@@ -29,11 +29,17 @@ rand_chacha = "0.9"
 rayon = "1"
 # Fixed-point decimal money (QE-007): exact arithmetic, no binary float. String serde for exactness.
 rust_decimal = { version = "1", features = ["serde", "serde-with-str"] }
+# Embedded typed LMDB key-value store (QE-010 market data, QE-011 synthetic cache).
+# default-features off drops the unmaintained `bincode` (RUSTSEC-2025-0141) pulled by the default
+# serde-bincode codec; we only use the serde-json value codec (enabled per-crate).
+heed = { version = "0.20", default-features = false }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tracing-appender = "0.2"
 # Property-based testing (QE-007 money laws); used only as a dev-dependency.
 proptest = "1"
+# Temp directories for storage tests; dev-dependency only.
+tempfile = "3"
 
 # Internal crates (path deps) — referenced by member crates as `qe-domain.workspace = true`.
 qe-domain = { path = "crates/domain" }

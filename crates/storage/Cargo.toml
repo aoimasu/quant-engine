@@ -12,3 +12,10 @@ workspace = true
 
 [dependencies]
 qe-domain.workspace = true
+heed = { workspace = true, features = ["serde-json"] }
+rust_decimal.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
