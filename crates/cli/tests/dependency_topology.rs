@@ -40,6 +40,10 @@ fn workspace_dep_graph() -> BTreeMap<String, BTreeSet<String>> {
             .as_array()
             .expect("package dependencies array")
             .iter()
+            // Normal deps only: `kind` is null for normal, "dev"/"build" otherwise. Dev/build
+            // deps don't ship in the binary, so they create no pipeline coupling and must not
+            // count as architectural edges (e.g. a test-only fixture dep is fine).
+            .filter(|d| d["kind"].is_null())
             .filter_map(|d| d["name"].as_str())
             .map(str::to_owned)
             .filter(|d| members.contains(d)) // keep only workspace-internal edges

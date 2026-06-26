@@ -52,10 +52,15 @@ shared indicators and strategy logic").
 ### Dependency-check enforcement (AC #2)
 
 Implement as a workspace integration test in `cli/tests/dependency_topology.rs` that shells out
-to `cargo metadata --format-version 1 --no-deps` is insufficient (no edges); instead use
-`cargo metadata --format-version 1` and walk `resolve.nodes` to assert:
+to `cargo metadata --format-version 1 --no-deps`. With `--no-deps`, `packages` contains only
+workspace members, each carrying its own declared `dependencies` (with `name` and `kind`). The
+test keeps **normal** edges (`kind == null`; dev/build deps don't ship, so they create no
+pipeline coupling), filters to members, computes the transitive closure per crate, and asserts:
 - no path from `runtime` → `wfo`/`ensemble`;
 - no path from `wfo`/`ensemble` → `runtime`.
+
+This member-local closure is simpler than walking the full `resolve.nodes` graph and needs no
+package-id matching.
 
 Rationale for a test (not just CI grep): it travels with the workspace, runs under
 `cargo test --workspace`, and fails the build the moment someone adds a forbidden edge. The
