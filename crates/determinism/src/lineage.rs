@@ -1,0 +1,174 @@
+//! Vintage lineage records.
+//!
+//! Every produced artefact must carry a resolvable lineage record so a vintage can be audited and
+//! reproduced months later. A [`Lineage`] binds the four inputs that fully determine a stage's
+//! output: the config content hash (QE-002), the input-data snapshot id, the code commit, and the
+//! RNG seeds. Its [`Lineage::id`] is a stable hash usable as a primary key — i.e. *resolvable*.
+
+use qe_config::{Config, ConfigError};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use thiserror::Error;
+
+/// The provenance of an artefact: everything needed to reproduce it bit-for-bit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Lineage {
+    /// SHA-256 content hash of the resolved config (`qe_config::Config::content_hash`).
+    pub config_hash: String,
+    /// Identifier of the immutable input-data snapshot the stage consumed.
+    pub input_snapshot_id: String,
+    /// Code provenance — typically the git commit SHA the binary was built from.
+    pub code_commit: String,
+    /// Master RNG seed(s) plumbed into the stage's stochastic steps.
+    pub seeds: Vec<u64>,
+}
+
+impl Lineage {
+    /// Construct a lineage from already-resolved parts.
+    pub fn new(
+        config_hash: impl Into<String>,
+        input_snapshot_id: impl Into<String>,
+        code_commit: impl Into<String>,
+        seeds: Vec<u64>,
+    ) -> Self {
+        Self {
+            config_hash: config_hash.into(),
+            input_snapshot_id: input_snapshot_id.into(),
+            code_commit: code_commit.into(),
+            seeds,
+        }
+    }
+
+    /// Build a lineage from a resolved config, folding in QE-002's content hash.
+    ///
+    /// # Errors
+    /// Propagates [`ConfigError`] if the config cannot be serialised for hashing.
+    pub fn from_config(
+        config: &Config,
+        input_snapshot_id: impl Into<String>,
+        code_commit: impl Into<String>,
+        seeds: Vec<u64>,
+    ) -> Result<Self, ConfigError> {
+        Ok(Self::new(
+            config.content_hash()?,
+            input_snapshot_id,
+            code_commit,
+            seeds,
+        ))
+    }
+
+    /// Stable lineage id: lowercase-hex SHA-256 over the record's canonical JSON.
+    ///
+    /// Deterministic across runs and machines — the struct's field order is fixed and `seeds` is an
+    /// ordered `Vec`, so the JSON encoding is byte-stable. Suitable as an artefact primary key.
+    ///
+    /// # Errors
+    /// Returns [`LineageError::Serialize`] if the record cannot be serialised.
+    pub fn id(&self) -> Result<String, LineageError> {
+        let bytes = serde_json::to_vec(self).map_err(|e| LineageError::Serialize(e.to_string()))?;
+        Ok(hex(&Sha256::digest(&bytes)))
+    }
+}
+
+/// A value tagged with the lineage that produced it.
+///
+/// Models AC #2 — "every produced artefact carries a resolvable lineage record": from any
+/// `Artifact` you can reach [`HasLineage::lineage`] and resolve its [`Lineage::id`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Artifact<T> {
+    /// The produced value.
+    pub value: T,
+    /// The lineage that produced `value`.
+    pub lineage: Lineage,
+}
+
+impl<T> Artifact<T> {
+    /// Tag `value` with its `lineage`.
+    pub fn new(value: T, lineage: Lineage) -> Self {
+        Self { value, lineage }
+    }
+}
+
+/// Anything carrying a resolvable [`Lineage`].
+pub trait HasLineage {
+    /// The lineage that produced this artefact.
+    fn lineage(&self) -> &Lineage;
+}
+
+impl<T> HasLineage for Artifact<T> {
+    fn lineage(&self) -> &Lineage {
+        &self.lineage
+    }
+}
+
+/// Errors raised while hashing a [`Lineage`].
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum LineageError {
+    /// The lineage record could not be serialised for hashing.
+    #[error("failed to serialise lineage for hashing: {0}")]
+    Serialize(String),
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn id_is_stable_and_64_hex_chars() {
+        let a = Lineage::new("cfg", "snap-1", "commit", vec![42]);
+        let b = Lineage::new("cfg", "snap-1", "commit", vec![42]);
+        assert_eq!(a.id().unwrap(), b.id().unwrap());
+        assert_eq!(a.id().unwrap().len(), 64);
+        assert!(a.id().unwrap().bytes().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn id_is_sensitive_to_every_field() {
+        let base = Lineage::new("cfg", "snap-1", "commit", vec![42]);
+        let id = base.id().unwrap();
+        assert_ne!(
+            id,
+            Lineage::new("CFG", "snap-1", "commit", vec![42])
+                .id()
+                .unwrap()
+        );
+        assert_ne!(
+            id,
+            Lineage::new("cfg", "snap-2", "commit", vec![42])
+                .id()
+                .unwrap()
+        );
+        assert_ne!(
+            id,
+            Lineage::new("cfg", "snap-1", "other", vec![42])
+                .id()
+                .unwrap()
+        );
+        assert_ne!(
+            id,
+            Lineage::new("cfg", "snap-1", "commit", vec![43])
+                .id()
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn from_config_uses_content_hash() {
+        let cfg = Config::from_toml_str("").expect("defaults are valid");
+        let lin = Lineage::from_config(&cfg, "snap", "commit", vec![cfg.determinism.seed]).unwrap();
+        assert_eq!(lin.config_hash, cfg.content_hash().unwrap());
+    }
+
+    #[test]
+    fn artifact_exposes_resolvable_lineage() {
+        let lin = Lineage::new("cfg", "snap", "commit", vec![1, 2]);
+        let id = lin.id().unwrap();
+        let art = Artifact::new(vec![0u8; 3], lin);
+        assert_eq!(art.lineage().id().unwrap(), id);
+        assert_eq!(art.value, vec![0u8; 3]);
+    }
+}
