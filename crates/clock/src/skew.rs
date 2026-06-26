@@ -112,13 +112,39 @@ impl SkewGuard {
     /// Evaluate, returning `Ok(reading)` when in sync and `Err(Fatal)` on a breach.
     ///
     /// The error's [`disposition`](qe_error::disposition) is [`Halt`](qe_error::Disposition::Halt).
-    /// Prefer [`evaluate`](Self::evaluate) + [`record_skew`] when you also want to log the reading on
-    /// a breach (the health signal is still available via the reading).
+    ///
+    /// **This does not log.** It performs only the halt decision and drops the [`SkewReading`] on a
+    /// breach (the skew detail survives in the error message). For the full "log *and* halt" path —
+    /// the one a runtime/kill-path call site (QE-009) should use — call
+    /// [`check_and_log`](Self::check_and_log), or pair this with [`record_skew`] yourself.
     ///
     /// # Errors
     /// A Fatal [`QeError`] when `|local - reference|` exceeds the threshold.
     pub fn check(&self, local: Timestamp, reference: Timestamp) -> qe_error::Result<SkewReading> {
         let reading = self.evaluate(local, reference);
+        match reading.breach() {
+            Some(err) => Err(err),
+            None => Ok(reading),
+        }
+    }
+
+    /// Evaluate, **log** the reading with the correlation context, then halt on a breach.
+    ///
+    /// This is the recommended call site for the live runtime / kill path: it always emits the
+    /// clock-health event (via [`record_skew`] — `info` in sync, `warn` on breach) *and* returns
+    /// `Err(Fatal)` on a breach, so a breach is logged and routed to the halt path in one call —
+    /// never halted without a trace and never silently continued.
+    ///
+    /// # Errors
+    /// A Fatal [`QeError`] when `|local - reference|` exceeds the threshold.
+    pub fn check_and_log(
+        &self,
+        local: Timestamp,
+        reference: Timestamp,
+        c: &Correlation,
+    ) -> qe_error::Result<SkewReading> {
+        let reading = self.evaluate(local, reference);
+        record_skew(&reading, c);
         match reading.breach() {
             Some(err) => Err(err),
             None => Ok(reading),
@@ -214,6 +240,16 @@ mod tests {
         assert_eq!(reading.skew_ms, 50);
         assert_eq!(reading.health, ClockHealth::InSync);
         assert!(reading.breach().is_none());
+    }
+
+    #[test]
+    fn check_and_log_matches_check_decision() {
+        // check_and_log must make the same Ok/Err decision as check (it only adds logging).
+        let guard = SkewGuard::new(1_000).unwrap();
+        let corr = Correlation::run("r", "-");
+        assert!(guard.check_and_log(at(5_000), at(0), &corr).is_err());
+        let ok = guard.check_and_log(at(100), at(50), &corr).unwrap();
+        assert_eq!(ok.health, ClockHealth::InSync);
     }
 
     #[test]

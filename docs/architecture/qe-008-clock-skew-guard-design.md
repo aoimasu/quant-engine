@@ -52,9 +52,11 @@ New crate `qe-clock` (`crates/clock`):
   `qe::clock`) carrying **all four correlation fields + `skew_ms` + `health`** — `warn` on breach,
   `info` otherwise. This is AC #2's "logged with the correlation fields".
 
-The split (always-`evaluate` → always-`record_skew` → optional `breach`/halt) guarantees a breach is
-**never a silent continue**: the reading is logged and the health is `Skewed` regardless, and the
-caller routes the Fatal error to the halt path.
+The split (always-`evaluate` → always-`record_skew` → optional `breach`/halt) *provides* a
+non-silent path — a breach yields `health = Skewed` and an `Err(Fatal)` the caller cannot continue
+past without explicitly discarding. `check_and_log` bundles "log + halt" into one call so the
+runtime/kill path (QE-009) logs the breach and routes the Fatal error together; the bare `check`
+performs only the halt decision (documented) for callers that log separately.
 
 ### `lib.rs`
 Crate docs + `ClockError` (thiserror; `InvalidThreshold`) + re-exports.

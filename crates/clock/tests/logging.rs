@@ -71,3 +71,33 @@ fn record_skew_emits_correlation_and_health() {
     // A breach logs at WARN level.
     assert_eq!(json["level"], "WARN");
 }
+
+#[test]
+fn record_skew_in_sync_logs_at_info_with_health() {
+    let buf = BufWriter::default();
+    let subscriber = tracing_subscriber::fmt::Subscriber::builder()
+        .with_env_filter(EnvFilter::new("qe::clock=info"))
+        .json()
+        .with_writer(buf.clone())
+        .finish();
+
+    let guard = SkewGuard::new(1_000).unwrap();
+    let reading = guard.evaluate(Timestamp::from_millis(100), Timestamp::from_millis(50));
+    let corr = Correlation {
+        run_id: "run-1",
+        vintage_hash: "-",
+        instrument: "-",
+        window_id: "-",
+    };
+
+    tracing::subscriber::with_default(subscriber, || record_skew(&reading, &corr));
+
+    let line = buf.contents();
+    let json: serde_json::Value =
+        serde_json::from_str(line.lines().next().expect("a log line")).expect("valid JSON");
+    // In sync: INFO level, health exposed, skew reported.
+    assert_eq!(json["level"], "INFO");
+    assert_eq!(json["fields"]["health"], "in_sync");
+    assert_eq!(json["fields"]["skew_ms"], 50);
+    assert_eq!(json["fields"]["run_id"], "run-1");
+}
