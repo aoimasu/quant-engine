@@ -1,17 +1,20 @@
-//! Proves AC #2: clippy rejects `unwrap()` in a hot-path (`deny(clippy::unwrap_used)`) module.
+//! Proves AC #2: clippy rejects `unwrap`/`expect`/`panic` in a hot-path
+//! (`deny(clippy::unwrap_used, expect_used, panic)`) module.
 //!
 //! Runs `cargo clippy` against the excluded `hotpath_violation` fixture crate (which contains an
-//! `unwrap()` inside a `#![deny(clippy::unwrap_used)]` module) and asserts the build fails with the
-//! `unwrap_used` lint. A fresh `CARGO_TARGET_DIR` avoids stale-cache false passes.
+//! `unwrap()`, an `expect()`, and a `panic!()` inside such a module) and asserts the build fails
+//! naming each lint. A per-run `CARGO_TARGET_DIR` (PID-scoped, cleaned up) avoids cross-run/parallel
+//! contention and stale-cache false passes.
 
 use std::path::PathBuf;
 use std::process::Command;
 
 #[test]
-fn clippy_rejects_unwrap_in_hot_path_module() {
+fn clippy_rejects_banned_constructs_in_hot_path_module() {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/hotpath_violation/Cargo.toml");
-    let target = std::env::temp_dir().join("qe_error_hotpath_clippy_target");
+    let target =
+        std::env::temp_dir().join(format!("qe_error_hotpath_clippy_{}", std::process::id()));
 
     let output = Command::new(env!("CARGO"))
         .args([
@@ -24,14 +27,18 @@ fn clippy_rejects_unwrap_in_hot_path_module() {
         .output()
         .expect("failed to run `cargo clippy` on the fixture");
 
-    assert!(
-        !output.status.success(),
-        "clippy should FAIL on an unwrap() inside a deny(unwrap_used) module, but it succeeded"
-    );
+    let status = output.status;
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let _ = std::fs::remove_dir_all(&target); // best-effort cleanup
 
-    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("unwrap_used") || stderr.contains("used `unwrap()`"),
-        "clippy failed but not for the expected lint; stderr:\n{stderr}"
+        !status.success(),
+        "clippy should FAIL on banned constructs in a deny module, but it succeeded.\n{stderr}"
     );
+    for lint in ["unwrap", "expect", "panic"] {
+        assert!(
+            stderr.contains(lint),
+            "clippy failed but did not flag `{lint}`; stderr:\n{stderr}"
+        );
+    }
 }

@@ -64,10 +64,12 @@ Per-module enforcement that `unwrap`/`expect`/`panic` are rejected in designated
 - **Automated proof (chosen over `trybuild`):** `clippy::*` are clippy-only lints, so `trybuild`
   (which drives `rustc`) can't prove them. Instead, an **excluded fixture crate**
   (`crates/error/tests/fixtures/hotpath_violation`, `exclude`d from the workspace) deliberately
-  contains an `unwrap()` inside a `#![deny(clippy::unwrap_used)]` module. The integration test
-  `tests/hot_path_lint.rs` runs `cargo clippy` against that fixture (fresh `CARGO_TARGET_DIR` to
-  avoid stale-cache passes) and asserts a non-zero exit with the `unwrap_used` lint. This is the
-  honest, self-contained `cargo test`-time proof that the gate rejects the violation.
+  contains an `unwrap()`, an `expect()`, and a `panic!()` inside a
+  `#![deny(clippy::unwrap_used, expect_used, panic)]` module. The integration test
+  `tests/hot_path_lint.rs` runs `cargo clippy` against that fixture (a per-run, PID-scoped
+  `CARGO_TARGET_DIR` that is cleaned up — avoids parallel contention and stale-cache passes) and
+  asserts a non-zero exit naming each of the three lints. This is the honest, self-contained
+  `cargo test`-time proof that the gate rejects all three constructs.
 - The real enforcement in normal code is the QE-005 CI clippy gate (`-D warnings`) compiling
   hot-path modules under their deny block.
 
