@@ -35,10 +35,13 @@ fn clippy_rejects_banned_constructs_in_hot_path_module() {
         !status.success(),
         "clippy should FAIL on banned constructs in a deny module, but it succeeded.\n{stderr}"
     );
-    for lint in ["unwrap", "expect", "panic"] {
+    // Assert the per-lint help anchors, which appear ONLY when that specific lint fires. (Bare
+    // words like "panic" are non-discriminating — they also occur in unwrap/expect notes and in
+    // the echoed deny-attribute source line.)
+    for anchor in ["#unwrap_used", "#expect_used", "#panic"] {
         assert!(
-            stderr.contains(lint),
-            "clippy failed but did not flag `{lint}`; stderr:\n{stderr}"
+            stderr.contains(anchor),
+            "clippy failed but did not flag `{anchor}`; stderr:\n{stderr}"
         );
     }
 }
