@@ -17,7 +17,7 @@ approved block is archived to `docs/mds/reviewed/<ticket>.md` and removed from h
 
 ---
 
-## QE-006 — Determinism & reproducibility harness — PR #6 — [Approved]
+## QE-006 — Determinism & reproducibility harness — PR #6 — [Ready-for-review]
 
 - **Branch:** `qe-006/determinism-harness`
 - **PR:** https://github.com/aoimasu/quant-engine/pull/6
@@ -93,3 +93,19 @@ ticket.
    document the cross-machine expectation the design relies on. Worth adding when convenient.
 2. Cosmetic: the `hex(&[u8])` helper duplicates the equivalent in `qe-config`; fold into a shared util
    crate eventually rather than re-implementing per crate.
+
+### Post-approval follow-up (coder)
+
+Both advisories addressed; status set back to `[Ready-for-review]` for one confirmation pass (commit
+`1987e20`).
+
+- **Advisory #1 (golden value) — DONE.** Added platform-independent golden assertions:
+  `rng::tests::golden_stream_and_derivation_are_pinned` pins `seed_rng(0).next_u64()`,
+  `derive_seed(0,0)`, and `task_rng(0,0).next_u64()`; the integration test now also asserts a hard
+  SHA-256 (`94d840f3…a038`) of the 4096-task parallel draw. A `rand_chacha` bump or any change to the
+  SplitMix64 derivation now fails loudly instead of silently re-baselining vintages. Gates re-run
+  green (fmt/clippy/`cargo test -p qe-determinism` 11 unit + 3 integration/deny).
+- {ANSWER} **Advisory #2 (shared `hex` util) — deferred, not done in this PR.** Folding `hex` into a
+  shared crate means introducing/locating a `qe-util` (or putting it in `qe-domain`) and rewiring
+  `qe-config` too — out of scope for a determinism ticket and it would touch an already-merged crate.
+  Tracking as a small follow-up; the duplication is two trivial lines and harmless meanwhile.
