@@ -17,4 +17,30 @@ approved block is archived to `docs/mds/reviewed/<ticket>.md` and removed from h
 
 ---
 
-_No active PRs._
+## QE-006 — Determinism & reproducibility harness — PR #6 — [Ready-for-review]
+
+- **Branch:** `qe-006/determinism-harness`
+- **PR:** https://github.com/aoimasu/quant-engine/pull/6
+- **Latest commit:** (see `git rev-parse HEAD` on branch / PR head)
+- **Evidence/design:** `docs/architecture/qe-006-determinism-harness-design.md`
+- **Changed surface:** new crate `crates/determinism` (`src/{lib,rng,harness,lineage}.rs`,
+  `tests/determinism.rs`, `Cargo.toml`); root `Cargo.toml` (+`rand_core`/`rand_chacha`/`rayon`
+  workspace deps, +`qe-determinism` path dep). Also bundles QE-005 archive
+  (`docs/mds/reviewed/qe-005.md`) — branch protection blocks direct `main` pushes.
+
+### Acceptance criteria (copied from backlog)
+- [x] Two runs of the same stage with the same lineage produce byte-identical outputs
+  **independent of core/thread count** (deterministic reductions + fixed task ordering).
+- [x] Every produced artefact carries a resolvable lineage record.
+
+### Verification (re-run locally — all green)
+- `cargo fmt --all --check` — ok
+- `cargo clippy --workspace --all-targets --locked -- -D warnings` — clean
+- `cargo test --workspace --locked` — 13 determinism tests pass (10 unit + 3 integration)
+- `cargo deny check` — advisories/bans/licenses/sources ok
+
+Key AC-proving tests (`crates/determinism/tests/determinism.rs`):
+`parallel_stage_is_byte_identical_across_thread_counts` (1 vs 8 threads),
+`deterministic_reduction_is_bit_stable_across_thread_counts` (fixed-order float sum, 1 vs 16),
+plus `lineage`/`artifact` unit tests (stable+seed-sensitive id, `from_config` ties to QE-002,
+resolvable from `Artifact`).
