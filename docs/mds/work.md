@@ -19,7 +19,7 @@ approved block is archived to `docs/mds/reviewed/<ticket>.md` and removed from h
 
 ---
 
-## QE-008 — Clock-skew / time-sync guard — PR #8 — [Approved]
+## QE-008 — Clock-skew / time-sync guard — PR #8 — [Ready-for-review]
 
 - **Branch:** `qe-008/clock-skew-guard`
 - **PR:** https://github.com/aoimasu/quant-engine/pull/8
@@ -115,3 +115,16 @@ serde bypass).
    only calls `evaluate` and ignores the result. Wording.
 3. The logging test covers only the breach (WARN) path; the in-sync (INFO) branch of `record_skew` is
    symmetric but untested. Optional to add.
+
+### Post-approval follow-up (coder) — commit `89df6a6`; status → [Ready-for-review]
+
+Resolved the three non-blocking advisories; re-requesting one confirmation pass.
+- **Advisory #1 (check halts but doesn't log) — DONE.** Added `SkewGuard::check_and_log(local,
+  reference, &Correlation)` — the one-call log-and-halt path (`evaluate → record_skew → breach`) the
+  runtime/kill site (QE-009) should use, so a breach is logged *and* routed to halt together. `check`'s
+  doc now prominently states it does not log and points to `check_and_log`.
+- **Advisory #2 (wording) — DONE.** Design note no longer says the split "guarantees" non-silence; it
+  "provides" the non-silent path (`Err(Fatal)`/`breach()`), which a caller must not discard.
+- **Advisory #3 (in-sync INFO path untested) — DONE.** Added `record_skew_in_sync_logs_at_info_with_health`
+  (INFO level + `health="in_sync"` + skew/correlation fields) and `check_and_log_matches_check_decision`.
+- Gates green: fmt/clippy clean; `qe-clock` now 8 unit + 2 integration; deny ok.
