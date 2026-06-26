@@ -8,18 +8,25 @@
 
 mod error;
 mod schema;
+pub mod universe;
 
 pub use error::ConfigError;
-pub use schema::{BarsConfig, Config, DeterminismConfig, HistoryConfig, Profile, StorageConfig};
+pub use schema::{
+    BarsConfig, Config, DeterminismConfig, HistoryConfig, Profile, StorageConfig,
+    UniverseMemberConfig,
+};
+pub use universe::{InstrumentListing, Universe};
 
 use figment::{
     providers::{Env, Format, Toml},
     Figment,
 };
+use qe_domain::InstrumentId;
 use schema::resolution_minutes;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use universe::parse_iso_date;
 
 impl Config {
     /// Load config for a given profile: base TOML file, then an optional `<stem>.<profile>.<ext>`
@@ -142,7 +149,68 @@ impl Config {
             }
         }
 
+        // Building the universe validates the `[[universe]]` section (ids, dates, ordering, dups)
+        // with dotted field paths — fail-fast at load like every other field.
+        self.universe()?;
+
         Ok(())
+    }
+
+    /// Resolve the point-in-time [`Universe`] from this config.
+    ///
+    /// Prefers the `[[universe]]` section when present; otherwise falls back to the flat
+    /// `instruments` list as an **open-ended** universe (every instrument always a member), so
+    /// existing date-less configs keep working. Count-agnostic: one instrument or many.
+    ///
+    /// # Errors
+    /// [`ConfigError::Invalid`] (with a dotted `universe[i].field` path) if an instrument id is
+    /// invalid, a date is malformed, `delisted < listed`, or an instrument appears twice.
+    pub fn universe(&self) -> Result<Universe, ConfigError> {
+        if self.universe.is_empty() {
+            // Fallback: the flat list (already non-empty + dup-checked above) as open-ended listings.
+            let listings = self
+                .instruments
+                .iter()
+                .enumerate()
+                .map(|(i, sym)| {
+                    let id = InstrumentId::new(sym)
+                        .map_err(|e| invalid(&format!("instruments[{i}]"), &e.to_string()))?;
+                    Ok(InstrumentListing::open_ended(id))
+                })
+                .collect::<Result<Vec<_>, ConfigError>>()?;
+            return Ok(Universe::new(listings));
+        }
+
+        let mut listings = Vec::with_capacity(self.universe.len());
+        let mut seen = BTreeSet::new();
+        for (i, m) in self.universe.iter().enumerate() {
+            let id = InstrumentId::new(&m.instrument)
+                .map_err(|e| invalid(&format!("universe[{i}].instrument"), &e.to_string()))?;
+            if !seen.insert(id.as_str().to_owned()) {
+                return Err(invalid(
+                    &format!("universe[{i}].instrument"),
+                    &format!("duplicate instrument '{}'", id.as_str()),
+                ));
+            }
+            // Omitted `listed` → open-ended (listed since forever).
+            let listed = match &m.listed {
+                Some(s) => {
+                    parse_iso_date(s).map_err(|e| invalid(&format!("universe[{i}].listed"), e))?
+                }
+                None => universe::OPEN_LISTING,
+            };
+            let delisted = match &m.delisted {
+                Some(s) => Some(
+                    parse_iso_date(s)
+                        .map_err(|e| invalid(&format!("universe[{i}].delisted"), e))?,
+                ),
+                None => None,
+            };
+            let listing = InstrumentListing::new(id, listed, delisted)
+                .map_err(|e| invalid(&format!("universe[{i}].delisted"), e))?;
+            listings.push(listing);
+        }
+        Ok(Universe::new(listings))
     }
 }
 
