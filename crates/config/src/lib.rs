@@ -1,0 +1,344 @@
+//! qe-config — typed, layered, reproducible configuration.
+//!
+//! Loading merges, in increasing precedence: a base TOML file, an optional profile overlay file
+//! (`<stem>.<profile>.<ext>` next to the base), then `QE_`-prefixed environment overrides (nested
+//! via `__`). The requested profile is authoritative over whatever the files contain. The resolved
+//! [`Config`] is validated at load (fail-fast with field-level errors) and exposes a stable
+//! [`Config::content_hash`] for vintage lineage.
+
+mod error;
+mod schema;
+
+pub use error::ConfigError;
+pub use schema::{BarsConfig, Config, DeterminismConfig, HistoryConfig, Profile, StorageConfig};
+
+use figment::{
+    providers::{Env, Format, Toml},
+    Figment,
+};
+use schema::resolution_minutes;
+use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
+
+impl Config {
+    /// Load config for a given profile: base TOML file, then an optional `<stem>.<profile>.<ext>`
+    /// overlay next to it, then `QE_`-prefixed environment overrides; finally validate.
+    ///
+    /// The requested `profile` is forced onto the resolved config (authoritative over file
+    /// contents), so `train`/`runtime-sim`/`runtime-live` are genuinely separate configurations.
+    /// A missing overlay file is simply skipped.
+    ///
+    /// # Errors
+    /// Returns [`ConfigError::Load`] if sources cannot be read/parsed, or [`ConfigError::Invalid`]
+    /// if a field fails validation.
+    pub fn load(profile: Profile, base_path: &Path) -> Result<Self, ConfigError> {
+        let mut fig = Figment::new().merge(Toml::file(base_path));
+        if let Some(overlay) = profile_overlay_path(base_path, profile) {
+            fig = fig.merge(Toml::file(overlay));
+        }
+        let mut cfg: Self = fig
+            .merge(Env::prefixed("QE_").split("__"))
+            .extract()
+            .map_err(|e| ConfigError::Load(e.to_string()))?;
+        cfg.profile = profile; // requested profile wins over file contents
+        cfg.validate()?;
+        Ok(cfg)
+    }
+
+    /// Parse + validate config from a TOML string (no filesystem; mainly for tests/embedding).
+    ///
+    /// # Errors
+    /// As [`Config::load`].
+    pub fn from_toml_str(s: &str) -> Result<Self, ConfigError> {
+        let cfg: Self = Figment::new()
+            .merge(Toml::string(s))
+            .extract()
+            .map_err(|e| ConfigError::Load(e.to_string()))?;
+        cfg.validate()?;
+        Ok(cfg)
+    }
+
+    /// Stable content hash (lowercase hex SHA-256) of the resolved config.
+    ///
+    /// Deterministic across runs and machines: the schema is `Vec`/scalar only, so JSON
+    /// serialisation is order-stable. Folded into vintage lineage by QE-006/QE-129.
+    ///
+    /// # Errors
+    /// Returns [`ConfigError::Serialize`] if the config cannot be serialised.
+    pub fn content_hash(&self) -> Result<String, ConfigError> {
+        let bytes = serde_json::to_vec(self).map_err(|e| ConfigError::Serialize(e.to_string()))?;
+        let digest = Sha256::digest(&bytes);
+        Ok(digest.iter().map(|b| format!("{b:02x}")).collect())
+    }
+
+    /// Validate the resolved config, returning a field-level error on the first problem.
+    ///
+    /// # Errors
+    /// Returns [`ConfigError::Invalid`] naming the offending dotted field path.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.instruments.is_empty() {
+            return Err(invalid("instruments", "must list at least one instrument"));
+        }
+        let mut seen_instruments = BTreeSet::new();
+        for (i, sym) in self.instruments.iter().enumerate() {
+            let field = format!("instruments[{i}]");
+            if sym.trim().is_empty() {
+                return Err(invalid(&field, "must not be blank"));
+            }
+            if !seen_instruments.insert(sym) {
+                return Err(invalid(&field, &format!("duplicate instrument '{sym}'")));
+            }
+        }
+
+        let base = resolution_minutes(&self.bars.base).ok_or_else(|| {
+            invalid(
+                "bars.base",
+                &format!("unknown resolution '{}'", self.bars.base),
+            )
+        })?;
+        let mut seen_res = BTreeSet::new();
+        for (i, r) in self.bars.reconstructed.iter().enumerate() {
+            let field = format!("bars.reconstructed[{i}]");
+            let m = resolution_minutes(r)
+                .ok_or_else(|| invalid(&field, &format!("unknown resolution '{r}'")))?;
+            if m <= base {
+                return Err(invalid(
+                    &field,
+                    &format!(
+                        "'{r}' must be strictly coarser than base '{}'",
+                        self.bars.base
+                    ),
+                ));
+            }
+            if !seen_res.insert(r) {
+                return Err(invalid(&field, &format!("duplicate resolution '{r}'")));
+            }
+        }
+
+        match &self.history.start {
+            None if !self.history.max_available => {
+                return Err(invalid(
+                    "history.start",
+                    "required when `max_available = false`",
+                ));
+            }
+            Some(start) if !is_iso_date(start) => {
+                return Err(invalid(
+                    "history.start",
+                    &format!("'{start}' is not an ISO `YYYY-MM-DD` date"),
+                ));
+            }
+            _ => {}
+        }
+
+        for (field, val) in [
+            ("storage.market_dir", &self.storage.market_dir),
+            ("storage.synthetic_dir", &self.storage.synthetic_dir),
+            ("storage.artifacts_dir", &self.storage.artifacts_dir),
+        ] {
+            if val.trim().is_empty() {
+                return Err(invalid(field, "must not be empty"));
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// Path to the optional profile overlay file: `<dir>/<stem>.<profile>.<ext>` next to `base_path`.
+fn profile_overlay_path(base_path: &Path, profile: Profile) -> Option<PathBuf> {
+    let stem = base_path.file_stem()?.to_str()?;
+    let ext = base_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("toml");
+    let parent = base_path.parent().unwrap_or_else(|| Path::new(""));
+    Some(parent.join(format!("{stem}.{}.{ext}", profile.as_str())))
+}
+
+/// Lightweight `YYYY-MM-DD` format + range check. Full calendar validation (leap years, real
+/// `Date` type) is deferred to the shared time type in QE-007.
+fn is_iso_date(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' {
+        return false;
+    }
+    let all_digits = |slice: &str| !slice.is_empty() && slice.bytes().all(|c| c.is_ascii_digit());
+    if !(all_digits(&s[0..4]) && all_digits(&s[5..7]) && all_digits(&s[8..10])) {
+        return false;
+    }
+    let month: u8 = s[5..7].parse().unwrap_or(0);
+    let day: u8 = s[8..10].parse().unwrap_or(0);
+    (1..=12).contains(&month) && (1..=31).contains(&day)
+}
+
+fn invalid(field: &str, message: &str) -> ConfigError {
+    ConfigError::Invalid {
+        field: field.to_owned(),
+        message: message.to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const VALID: &str = r#"
+profile = "train"
+instruments = ["BTCUSDT", "ETHUSDT"]
+
+[bars]
+base = "5m"
+reconstructed = ["30m", "4h"]
+
+[storage]
+market_dir = "data/lmdb/market"
+synthetic_dir = "data/lmdb/synthetic"
+artifacts_dir = "data/artifacts"
+
+[determinism]
+seed = 42
+"#;
+
+    #[test]
+    fn parses_valid_config() {
+        let cfg = Config::from_toml_str(VALID).expect("valid config");
+        assert_eq!(cfg.profile, Profile::Train);
+        assert_eq!(cfg.bars.base, "5m");
+        assert_eq!(cfg.determinism.seed, 42);
+    }
+
+    #[test]
+    fn defaults_apply_for_minimal_config() {
+        // An empty document leaves every field to its serde default.
+        let cfg = Config::from_toml_str("").expect("empty doc uses all defaults");
+        assert_eq!(cfg.profile, Profile::Train);
+        assert_eq!(cfg.instruments, vec!["BTCUSDT", "ETHUSDT"]);
+        assert_eq!(cfg.bars.reconstructed, vec!["30m", "4h"]);
+        assert!(cfg.history.max_available);
+        assert_eq!(cfg.determinism.seed, 0);
+    }
+
+    #[test]
+    fn hash_is_stable_across_loads() {
+        let a = Config::from_toml_str(VALID).unwrap();
+        let b = Config::from_toml_str(VALID).unwrap();
+        assert_eq!(a.content_hash().unwrap(), b.content_hash().unwrap());
+        assert_eq!(a.content_hash().unwrap().len(), 64); // sha256 hex
+    }
+
+    #[test]
+    fn hash_changes_with_content() {
+        let a = Config::from_toml_str(VALID).unwrap();
+        let other = VALID.replace("seed = 42", "seed = 43");
+        let b = Config::from_toml_str(&other).unwrap();
+        assert_ne!(a.content_hash().unwrap(), b.content_hash().unwrap());
+    }
+
+    #[test]
+    fn rejects_unknown_base_resolution() {
+        let toml = VALID.replace(r#"base = "5m""#, r#"base = "7m""#);
+        let err = Config::from_toml_str(&toml).unwrap_err();
+        match err {
+            ConfigError::Invalid { field, .. } => assert_eq!(field, "bars.base"),
+            other => panic!("expected Invalid(bars.base), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_reconstructed_not_coarser_than_base() {
+        let toml = VALID.replace(
+            r#"reconstructed = ["30m", "4h"]"#,
+            r#"reconstructed = ["5m"]"#,
+        );
+        let err = Config::from_toml_str(&toml).unwrap_err();
+        match err {
+            ConfigError::Invalid { field, message } => {
+                assert_eq!(field, "bars.reconstructed[0]");
+                assert!(message.contains("strictly coarser"), "msg: {message}");
+            }
+            other => panic!("expected Invalid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_empty_instruments() {
+        let toml = VALID.replace(
+            r#"instruments = ["BTCUSDT", "ETHUSDT"]"#,
+            "instruments = []",
+        );
+        let err = Config::from_toml_str(&toml).unwrap_err();
+        assert!(matches!(err, ConfigError::Invalid { field, .. } if field == "instruments"));
+    }
+
+    #[test]
+    fn rejects_missing_start_when_not_max_available() {
+        let toml = format!("{VALID}\n[history]\nmax_available = false\n");
+        let err = Config::from_toml_str(&toml).unwrap_err();
+        assert!(matches!(err, ConfigError::Invalid { field, .. } if field == "history.start"));
+    }
+
+    #[test]
+    fn rejects_malformed_start_date() {
+        let toml = format!("{VALID}\n[history]\nmax_available = false\nstart = \"banana\"\n");
+        let err = Config::from_toml_str(&toml).unwrap_err();
+        assert!(matches!(err, ConfigError::Invalid { field, .. } if field == "history.start"));
+    }
+
+    #[test]
+    fn accepts_valid_start_date() {
+        let toml = format!("{VALID}\n[history]\nmax_available = false\nstart = \"2019-09-08\"\n");
+        let cfg = Config::from_toml_str(&toml).expect("valid ISO date accepted");
+        assert_eq!(cfg.history.start.as_deref(), Some("2019-09-08"));
+    }
+
+    #[test]
+    fn rejects_blank_instrument() {
+        let toml = VALID.replace(
+            r#"instruments = ["BTCUSDT", "ETHUSDT"]"#,
+            r#"instruments = ["BTCUSDT", ""]"#,
+        );
+        let err = Config::from_toml_str(&toml).unwrap_err();
+        assert!(matches!(err, ConfigError::Invalid { field, .. } if field == "instruments[1]"));
+    }
+
+    #[test]
+    fn rejects_duplicate_instruments() {
+        let toml = VALID.replace(
+            r#"instruments = ["BTCUSDT", "ETHUSDT"]"#,
+            r#"instruments = ["BTCUSDT", "BTCUSDT"]"#,
+        );
+        let err = Config::from_toml_str(&toml).unwrap_err();
+        match err {
+            ConfigError::Invalid { field, message } => {
+                assert_eq!(field, "instruments[1]");
+                assert!(message.contains("duplicate"), "msg: {message}");
+            }
+            other => panic!("expected Invalid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_duplicate_reconstructed() {
+        let toml = VALID.replace(
+            r#"reconstructed = ["30m", "4h"]"#,
+            r#"reconstructed = ["30m", "30m"]"#,
+        );
+        let err = Config::from_toml_str(&toml).unwrap_err();
+        assert!(
+            matches!(err, ConfigError::Invalid { field, .. } if field == "bars.reconstructed[1]")
+        );
+    }
+
+    #[test]
+    fn iso_date_helper_edges() {
+        assert!(is_iso_date("2020-01-01"));
+        assert!(is_iso_date("2019-12-31"));
+        assert!(!is_iso_date("2020-13-01")); // month out of range
+        assert!(!is_iso_date("2020-01-32")); // day out of range
+        assert!(!is_iso_date("2020-1-1")); // wrong width
+        assert!(!is_iso_date("2020/01/01")); // wrong separators
+        assert!(!is_iso_date("banana"));
+    }
+}
