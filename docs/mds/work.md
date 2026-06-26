@@ -26,8 +26,8 @@ approved block is archived to `docs/mds/reviewed/<ticket>.md` and removed from h
 ## QE-012 — Instrument-universe configuration & point-in-time membership — PR #12 — [Ready-for-review]
 
 - **Branch:** `qe-012/instrument-universe`
-- **PR:** _(set on `gh pr create`)_
-- **Latest commit:** _(see PR head)_
+- **PR:** https://github.com/aoimasu/quant-engine/pull/12
+- **Latest commit:** `cf9708d`
 - **Evidence/design:** `docs/architecture/qe-012-instrument-universe-design.md`
 - **Changed surface:** `crates/config` — **new** `src/universe.rs` (`Universe`, `InstrumentListing`,
   ISO-date→`Timestamp` civil-date math), **new** `tests/universe.rs` (4 integration tests);
