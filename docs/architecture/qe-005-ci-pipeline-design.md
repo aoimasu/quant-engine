@@ -36,7 +36,11 @@ Mechanics for determinism + speed (AC #2):
   `dtolnay/rust-toolchain` — no floating `stable`.
 - `Swatinem/rust-cache` for build caching.
 - `concurrency` cancels superseded runs on the same ref.
-- No network-dependent or time-dependent test steps → deterministic.
+- No network-dependent or time-dependent *test* steps → the build/test/lint gates are
+  deterministic. **Caveat:** the `deny` job's advisories check pulls the live RustSec database at
+  run time, so the same commit can flip green→red when a new advisory lands upstream. That is the
+  deliberate point of a security gate, not flakiness — but it means "deterministic" applies to the
+  code gates, not to advisory freshness.
 
 ### `deny.toml`
 

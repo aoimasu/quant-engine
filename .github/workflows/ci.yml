@@ -21,7 +21,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@67ef31d5b988238dd797d409d6f9574278e20537 # pinned (was @master) for supply-chain determinism
         with:
           toolchain: "1.96.0"
           components: rustfmt
@@ -32,21 +32,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@67ef31d5b988238dd797d409d6f9574278e20537 # pinned (was @master) for supply-chain determinism
         with:
           toolchain: "1.96.0"
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
   test:
     name: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@67ef31d5b988238dd797d409d6f9574278e20537 # pinned (was @master) for supply-chain determinism
         with:
           toolchain: "1.96.0"
+          # clippy is required: qe-error's `hot_path_lint` test shells out to `cargo clippy`.
           components: clippy
       - uses: Swatinem/rust-cache@v2
       # --locked also fails on a stale Cargo.lock (the QE-002 class of bug).
