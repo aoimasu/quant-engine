@@ -11,6 +11,9 @@ edition = "2021"
 license = "proprietary"
 rust-version = "1.96"
 repository = "https://github.com/aoimasu/quant-engine"
+# Internal crates — never published. Also lets cargo-deny's licence check skip them
+# (their non-SPDX `license = "proprietary"` would otherwise fail the audit).
+publish = false
 
 [workspace.dependencies]
 # Shared third-party versions; member crates opt in with `dep.workspace = true`.

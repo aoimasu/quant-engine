@@ -1,0 +1,36 @@
+# cargo-deny configuration — dependency advisories, licences, bans, sources.
+# Run locally with `cargo deny check`.
+
+[advisories]
+version = 2
+yanked = "deny"
+
+[licenses]
+version = 2
+# Allowed licences may be listed ahead of need; don't warn when one isn't currently used.
+unused-allowed-license = "allow"
+# Permissive licences allowed for third-party dependencies.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "MPL-2.0",
+    "CC0-1.0",
+]
+# Our own crates are `publish = false`; skip them (their `license = "proprietary"` is not SPDX).
+private = { ignore = true }
+
+[bans]
+# Informational for now — duplicate transitive versions warn but don't fail the build.
+multiple-versions = "warn"
+wildcards = "allow"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
