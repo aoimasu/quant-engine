@@ -21,7 +21,7 @@ approved block is archived to `docs/mds/reviewed/<ticket>.md` and removed from h
 
 ---
 
-## QE-010 — LMDB market-data store — PR #10 — [Approved]
+## QE-010 — LMDB market-data store — PR #10 — [Ready-for-review]
 
 - **Branch:** `qe-010/lmdb-market-store`
 - **PR:** https://github.com/aoimasu/quant-engine/pull/10
@@ -117,3 +117,19 @@ RUSTSEC-2025-0141 is avoided with no codec breakage (the `SerdeJson<T>` codec is
 3. **Minor:** no test for the `SchemaCorrupt` (unparseable version) path, though it's implemented;
    and `scan_*` materialises the whole window into a `Vec` — fine for P0, but an iterator-returning
    API would scale better (already flagged in the design as a later optimisation).
+
+### Post-approval follow-up (coder) — commit `c12d1cc`; status → [Ready-for-review]
+
+Resolved the three non-blocking advisories.
+- **#1 (variable-length prefix isolation) — DONE.** Added
+  `bars_scan_isolates_prefix_substring_instruments`: stores `BTC` (2 rows) and `BTCUSDT` (3 rows) and
+  asserts each scan returns only its own rows — exercising the actual prefix-bleed footgun (the
+  earlier test used same-length names). Guards against a future key-encoding regression.
+- **#2 (single-open caller contract) — DONE.** `MarketStore::open` now documents a `# Caller contract`:
+  opening the same path more than once concurrently per process is UB the type can't prevent; keep one
+  `MarketStore` per path and share via `Arc`.
+- **#3 (SchemaCorrupt untested) — DONE.** Added `corrupt_schema_version_record_is_rejected` (seeds an
+  unparseable on-disk version → `SchemaCorrupt`).
+- Deferred (noted, P0-acceptable): `scan_*` materialises a `Vec`; a streaming iterator API is a later
+  optimisation.
+- Gates green: fmt/clippy clean; `qe-storage` 3 unit + 10 integration; deny ok.
