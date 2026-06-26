@@ -27,8 +27,8 @@ approved block is archived to `docs/mds/reviewed/<ticket>.md` and removed from h
 ## QE-013 — Local run & deployment-agnostic packaging — PR #13 — [Ready-for-review]
 
 - **Branch:** `qe-013/local-run-packaging`
-- **PR:** _(set on `gh pr create`)_
-- **Latest commit:** _(see PR head)_
+- **PR:** https://github.com/aoimasu/quant-engine/pull/13
+- **Latest commit:** `9098602`
 - **Evidence/design:** `docs/architecture/qe-013-local-run-packaging-design.md`
 - **Changed surface:** `crates/cli` — **new** `src/lib.rs` (`run_train`, vintage manifest, CLI
   parsing, `CliError`), `src/main.rs` (thin dispatcher, `qe` binary + `ExitCode`), **new**
