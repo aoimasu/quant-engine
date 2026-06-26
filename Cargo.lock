@@ -633,6 +633,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "qe-clock"
+version = "0.1.0"
+dependencies = [
+ "qe-domain",
+ "qe-error",
+ "qe-telemetry",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "qe-config"
 version = "0.1.0"
 dependencies = [

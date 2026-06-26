@@ -1,0 +1,23 @@
+[package]
+name = "qe-clock"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+qe-domain.workspace = true
+qe-error.workspace = true
+qe-telemetry.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+tracing-subscriber.workspace = true
