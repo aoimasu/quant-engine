@@ -27,9 +27,13 @@ rand_core = "0.9"
 rand_chacha = "0.9"
 # Data-parallel runtime; a dev-dependency of qe-determinism (proving thread-count independence).
 rayon = "1"
+# Fixed-point decimal money (QE-007): exact arithmetic, no binary float. String serde for exactness.
+rust_decimal = { version = "1", features = ["serde", "serde-with-str"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tracing-appender = "0.2"
+# Property-based testing (QE-007 money laws); used only as a dev-dependency.
+proptest = "1"
 
 # Internal crates (path deps) — referenced by member crates as `qe-domain.workspace = true`.
 qe-domain = { path = "crates/domain" }
