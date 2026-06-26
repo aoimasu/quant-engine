@@ -20,7 +20,7 @@ approved block is archived to `docs/mds/reviewed/<ticket>.md` and removed from h
 
 ---
 
-## QE-009 — Risk-limit & kill-switch contract (shared types) — PR #9 — [Reviewed]
+## QE-009 — Risk-limit & kill-switch contract (shared types) — PR #9 — [Ready-for-review]
 
 - **Branch:** `qe-009/risk-kill-switch-contract`
 - **PR:** https://github.com/aoimasu/quant-engine/pull/9
@@ -124,3 +124,20 @@ order path honours the kill, and right now it doesn't.
    _(AC #2's literal text "must **accept** a kill handle" is met — `kill_handle()` is required — so the
    box is ticked; but the conformance check is the AC's deliverable and currently gives false
    assurance, which is why this blocks approval rather than being a nit.)_
+
+### Round 2 — coder response (commit `9d2945e`); status → [Ready-for-review]
+
+**Feedback #1 (Blocker — conformance didn't prove `admit` honours the kill) — FIXED, both ways the
+reviewer suggested.**
+- **Structural guarantee:** `OrderGate::admit` is now a **provided default** that calls
+  `kill_precheck()` first and only then delegates to a new **required** `admit_within_limits(intent)`.
+  Implementors write their limit/sizing decision in `admit_within_limits`; they cannot accidentally or
+  silently skip the kill check, because the default `admit` always applies it. (Overriding `admit` is
+  possible but an explicit, visible act — and the conformance check re-proves any override.)
+- **Stronger conformance:** `assert_honours_kill_switch` now also calls `gate.admit(&intent)` after
+  tripping and requires `Admission::FlattenAndHalt` — exercising the real order-submission path, not
+  just the `kill_precheck`/`ensure_live` helpers. The reviewer's `BadGate` (an `admit` that returns
+  `Admit` unconditionally) would now fail this check; and a gate that only implements
+  `admit_within_limits` can't bypass the kill at all.
+- Sample impls (`SampleGate` in qe-risk, `SamplePort` in qe-runtime) updated to `admit_within_limits`.
+- Gates green: fmt/clippy clean; `qe-risk` 10 + `qe-runtime` conformance; deny ok; topology guard green.
