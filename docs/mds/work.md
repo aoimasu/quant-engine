@@ -14,98 +14,150 @@ approved block is archived to `docs/mds/reviewed/<ticket>.md` and removed from h
 - QE-003 — Structured logging & tracing — PR #3 — Approved & merged.
 - QE-004 — Error model & result conventions — PR #4 — Approved & merged.
 - QE-005 — CI pipeline — PR #5 — Approved & merged.
+- QE-006 — Determinism & reproducibility harness — PR #6 — Approved & merged.
 
 ---
 
-## QE-006 — Determinism & reproducibility harness — PR #6 — [Ready-for-review]
+## QE-007 — Shared domain types — PR #7 — [Ready-for-review]
 
-- **Branch:** `qe-006/determinism-harness`
-- **PR:** https://github.com/aoimasu/quant-engine/pull/6
+- **Branch:** `qe-007/shared-domain-types`
+- **PR:** https://github.com/aoimasu/quant-engine/pull/7
 - **Latest commit:** (see `git rev-parse HEAD` on branch / PR head)
-- **Evidence/design:** `docs/architecture/qe-006-determinism-harness-design.md`
-- **Changed surface:** new crate `crates/determinism` (`src/{lib,rng,harness,lineage}.rs`,
-  `tests/determinism.rs`, `Cargo.toml`); root `Cargo.toml` (+`rand_core`/`rand_chacha`/`rayon`
-  workspace deps, +`qe-determinism` path dep). Also bundles QE-005 archive
-  (`docs/mds/reviewed/qe-005.md`) — branch protection blocks direct `main` pushes.
+- **Evidence/design:** `docs/architecture/qe-007-shared-domain-types-design.md`
+- **Changed surface:** fills the `crates/domain` scaffold — `src/{lib,money,instrument,time,
+  resolution,bar,funding,side,vintage}.rs`, `Cargo.toml`; root `Cargo.toml` (+`rust_decimal`
+  workspace dep, +`proptest` dev workspace dep). Also bundles the QE-006 archive
+  (`docs/mds/reviewed/qe-006.md`) — branch protection blocks direct `main` pushes.
 
 ### Acceptance criteria (copied from backlog)
-- [x] Two runs of the same stage with the same lineage produce byte-identical outputs
-  **independent of core/thread count** (deterministic reductions + fixed task ordering).
-- [x] Every produced artefact carries a resolvable lineage record.
+- [x] Money arithmetic is exact (property tests for associativity/rounding policy).
+      _(Arithmetic is exact and the proptests are genuine/non-vacuous — see review. NB the
+      construction-time validation is bypassable at the serde boundary; tracked as Feedback #1, a
+      separate soundness concern from arithmetic exactness.)_
+- [x] Bar/resolution types are shared by both pipelines (single definition).
+      _(`Resolution`/`Bar` are single definitions re-exported from `qe-domain`. But the `Bar` OHLC
+      invariant is NOT enforced — public fields + serde bypass `Bar::new`; Feedback #1.)_
 
 ### Verification (re-run locally — all green)
 - `cargo fmt --all --check` — ok
 - `cargo clippy --workspace --all-targets --locked -- -D warnings` — clean
-- `cargo test --workspace --locked` — 13 determinism tests pass (10 unit + 3 integration)
-- `cargo deny check` — advisories/bans/licenses/sources ok
+- `cargo test --workspace --locked` — `qe-domain` 29 tests pass (incl. 4 proptest laws); workspace green
+- `cargo deny check` — advisories/bans/licenses/sources ok (proptest pulls a 2nd `rand` major →
+  `multiple-versions = "warn"`, non-fatal)
 
-Key AC-proving tests (`crates/determinism/tests/determinism.rs`):
-`parallel_stage_is_byte_identical_across_thread_counts` (1 vs 8 threads),
-`deterministic_reduction_is_bit_stable_across_thread_counts` (fixed-order float sum, 1 vs 16),
-plus `lineage`/`artifact` unit tests (stable+seed-sensitive id, `from_config` ties to QE-002,
-resolvable from `Artifact`).
+Key AC-proving tests:
+- **AC #1 (exact money)** — `money.rs` proptests: `notional_addition_is_associative` /
+  `_is_commutative` / `notional_sub_inverts_add` (exact equality), and
+  `rounding_stays_within_one_ulp_and_target_scale` (every `RoundingPolicy`: `scale() ≤ target` and
+  `|rounded − exact| < 10^-scale`); unit tests for negative rejection, banker-vs-half-up midpoint,
+  exact-string serde round-trip.
+- **AC #2 (single bar/resolution definition)** — `Resolution` defined once in `qe-domain`,
+  `FromStr`/`Display`/`minutes` round-trip tests; `Bar::new` OHLC-invariant validation tests. Both
+  pipelines consume the one re-exported definition.
+
+### Design notes for the reviewer
+- Money is `rust_decimal::Decimal` (96-bit fixed-point, no binary float); the only rounding point is
+  `Price::notional(qty, scale, policy)`. Decimals serialise as strings for exact JSON round-trips.
+- Wiring `qe-config`'s string resolutions onto `Resolution` is intentionally deferred to QE-012 (its
+  scope) to avoid touching an already-merged crate here.
+- `qe-domain` keeps zero internal-crate deps, so the QE-001 topology guard is unaffected (re-run green).
 
 ### Review notes
 
-**Verdict: [Approved]** — both acceptance criteria genuinely met and independently verified,
-including an adversarial check that the AC #1 tests actually discriminate. Clean, focused crate; the
-RNG/harness/lineage split is well-judged and the primitives are sound for a "stages don't exist yet"
-ticket.
+**Verdict: [Reviewed]** — strong, well-tested crate with genuinely exact decimal money and a clean
+module layout; the literal AC text is satisfied. Holding short of approval for **one systemic,
+demonstrated soundness defect** (the validating constructors are bypassed at the serde/public-field
+boundary), plus two minor edge notes. The defect is squarely in scope for "the shared, validated
+vocabulary," so it should be fixed before this becomes the foundation everything else builds on.
 
-**Independent re-verification (branch `qe-006/determinism-harness`):**
+**Independent re-verification (branch `qe-007/shared-domain-types`):**
 - `cargo fmt --all --check` clean · `cargo clippy --workspace --all-targets --locked -- -D warnings`
-  clean · `cargo test --workspace --locked` **51 passed, 1 ignored** (qe-determinism: 13) ·
-  `cargo deny check` → advisories/bans/licenses/sources **ok** (the new `rand_chacha`/`rand_core`/
-  `rayon` + transitives all pass the licence/advisory audit). QE-001 `dependency_topology` guard still
-  green — `qe-determinism → qe-config` adds no forbidden runtime↔training edge.
+  clean · `cargo test --workspace --locked` **80 passed, 1 ignored** (qe-domain 29) · `cargo deny
+  check` ok (the 2nd `rand` major from `proptest` is `multiple-versions = "warn"`, non-fatal as
+  documented) · QE-001 topology guard green (qe-domain has zero internal deps).
 
-- **AC #1 — proven, and the tests genuinely discriminate (not trivial).** `task_rng(master, index)`
-  derives a private RNG per task from `(master, index)`, so a task's stream depends only on its index,
-  never on scheduling. The two integration tests compare real rayon pools at 1-vs-8 and 1-vs-16
-  threads (byte-identical parallel draw; bit-stable fixed-order `f64` reduction), with `to_le_bytes`
-  for endianness-independent output. To confirm these aren't vacuous I wrote a throwaway probe using
-  the *shared-RNG anti-pattern* (`Mutex<DetRng>` drawn inside `into_par_iter`): it **diverges** across
-  thread counts (`1==8 → false`). So the suite passes precisely because `task_rng` removes the
-  schedule dependence, and would fail for the real failure mode. Removed the probe; tree clean.
+**What I verified positively (the adversarial focus areas):**
+- **AC #1 money is exact, tests non-vacuous.** Confirmed the generators (`mantissa` in `0..1e9`,
+  `scale 0..=8`) keep `p*q` at ≤18 significant digits / scale ≤16 — genuinely exact within Decimal's
+  28-digit range, so `exact = p*q` is a *true* product and the ulp bound is **not** vacuously
+  satisfied by a pre-rounded value. The associativity/commutativity/sub-inverse proptests use exact
+  Decimal value-equality and hold over the domain; `rounding_stays_within_one_ulp_and_target_scale`
+  is correct for **all four** policies (`Down`/`Up` directed rounding stays `< 1 ulp`; the two
+  half-policies `≤ 0.5 ulp`). Decimal **string** serde round-trips exactly (verified). No negative-zero
+  hazard — `rust_decimal` has no signed zero.
+- **AC #2 single definition.** `Resolution` (one enum, `FromStr`/`Display`/`minutes` round-trip,
+  derived `Ord` matches ascending duration) and `Bar` are defined once and re-exported. Half-open
+  `[start,end)` interval semantics are correct; `Side`/`Direction` conversions are total and
+  involutive. (Transient note: `qe-config` still carries its own string resolution ladder until
+  QE-012 wires it onto `Resolution` — acceptable, documented, but "single across the codebase" isn't
+  fully realized yet.)
 
-- **AC #2 — satisfied at the primitive level.** `Lineage { config_hash, input_snapshot_id,
-  code_commit, seeds }` is exactly the backlog's four-input record; `from_config` folds QE-002's
-  `content_hash()` (tested); `id()` is a stable, every-field-sensitive SHA-256 over canonical JSON
-  (fixed field order + ordered `seeds` Vec ⇒ byte-stable, machine-independent) → a resolvable primary
-  key. `Artifact<T>` + `HasLineage` make "every produced artefact carries a resolvable lineage record"
-  a type-level property. (Forcing future stages to wrap outputs in `Artifact` is per-stage, like
-  `task_rng` — correct scope for a primitives ticket.)
+### Feedback
 
-- **Soundness of the three points raised:**
-  - *SplitMix64 derivation* `splitmix64(master ^ splitmix64(index))` uses the correct Vigna constants
-    and is bijective in `index` for a fixed `master` → no task-seed collisions; adjacent indices are
-    decorrelated (tested), and `ChaCha8Rng::seed_from_u64` further diffuses. Sound.
-  - *`collect()` index order* relies on rayon's `IndexedParallelIterator` order-preservation
-    (documented) — the right tool; the reduction test additionally folds **sequentially** over the
-    collected Vec, so it doesn't depend on reduce-tree shape. Sound.
-  - *dev-only `rayon`* keeps the library executor-agnostic (no parallel runtime imposed on consumers);
-    rayon appears only in the tests that exercise 1-vs-N. Appropriate.
+1. **[Blocker — validating constructors are bypassed at the (de)serialization & field boundary].**
+   Every validated type derives `#[derive(Deserialize)]` directly, so deserialization never runs
+   `new`/validation; and `Bar`'s fields are all `pub`, so an invalid bar can also be built with a
+   struct literal. I demonstrated this with a probe (deserializing crafted JSON):
+   - `Price` ← `"-5.0"` → `Ok(-5.0)` (a **negative price**; `Price::new` rejects it). Same for `Qty`.
+   - `InstrumentId` ← `"btc-usdt"` → `Ok("btc-usdt")` — **un-canonicalised** (lowercase + hyphen), so
+     it won't `==` the canonical `BTCUSDT`, silently breaking the "same instrument → same id" contract
+     that Eq/Hash-keyed lookups depend on.
+   - `VintageHash` ← `"xyz"` → `Ok` (not 64-hex) — corrupts the audit key the firewall relies on.
+   - `TimeInterval` ← `{"start":100,"end":50}` → `Ok` (reversed; `new` rejects it).
+   - `Bar` ← `{... "high":"90","low":"95","close":"999" ...}` → `Ok`, with `range() = -5` (a negative
+     range, violating the OHLC invariant the doc says `new` guarantees).
+   These types are explicitly meant to be (de)serialized (the design says they feed lineage/hashing;
+   bars come from storage in QE-010/011), so corrupt/malformed storage/config/feed data silently
+   becomes invariant-violating domain values — exactly what a validated vocabulary exists to prevent,
+   and the doc-comments actively claim ("validated", "Construction validates the OHLC invariant", "a
+   non-negative price"). **Fix:** validate on deserialize — e.g. `#[serde(try_from = "Decimal")]` /
+   `try_from = "String"` with `TryFrom` impls that call `new` (and a wire struct for `Bar` that calls
+   `Bar::new`); make `Bar`'s fields private with getters (or `#[non_exhaustive]` + constructor-only).
+   Add deserialize-**rejection** tests (the current serde tests only round-trip *valid* values, so
+   they don't catch this).
 
-**Non-blocking advisory notes (no action required):**
-1. The AC #1 tests prove *same-machine* N-thread equality but don't pin the stream against drift with
-   a **golden value** (a hard-coded expected byte/hash). A golden assertion would additionally catch
-   an accidental change to the ChaCha8 stream or the SplitMix64 derivation (e.g. a dep bump) and
-   document the cross-machine expectation the design relies on. Worth adding when convenient.
-2. Cosmetic: the `hex(&[u8])` helper duplicates the equivalent in `qe-config`; fold into a shared util
-   crate eventually rather than re-implementing per crate.
+2. **[Minor — "only rounding point" is slightly overstated].** `Price::notional` computes `self.0 *
+   qty.0` then rounds once — correct for in-range inputs. But `rust_decimal`'s `*` itself rounds
+   (banker's) when the true product exceeds 28 significant digits, and **panics** on 96-bit magnitude
+   overflow. So for extreme-precision/huge price×qty there is a hidden second rounding (or a panic)
+   before the explicit `round_dp`. Realistic crypto precision (≤8 dp) is safe and the proptest
+   correctly stays in range, but either document the precision/magnitude precondition or use
+   `checked_mul` and surface saturation.
 
-### Post-approval follow-up (coder)
+3. **[Minor — overflow on `Notional` `+`/`-` panics, untested].** `Add`/`Sub` use `self.0 + rhs.0`,
+   which panics on 96-bit overflow; `checked_add`/`checked_sub` exist but their `None` path has no
+   test. Worth a test pinning the overflow contract, and note the panic-on-overflow tension if these
+   are ever used in a QE-004 hot-path module (the clippy `panic` lint won't catch an arithmetic
+   overflow panic).
 
-Both advisories addressed; status set back to `[Ready-for-review]` for one confirmation pass (commit
-`1987e20`).
+### Round 2 — coder response (commit `a8c0ddf`); status → [Ready-for-review]
 
-- **Advisory #1 (golden value) — DONE.** Added platform-independent golden assertions:
-  `rng::tests::golden_stream_and_derivation_are_pinned` pins `seed_rng(0).next_u64()`,
-  `derive_seed(0,0)`, and `task_rng(0,0).next_u64()`; the integration test now also asserts a hard
-  SHA-256 (`94d840f3…a038`) of the 4096-task parallel draw. A `rand_chacha` bump or any change to the
-  SplitMix64 derivation now fails loudly instead of silently re-baselining vintages. Gates re-run
-  green (fmt/clippy/`cargo test -p qe-determinism` 11 unit + 3 integration/deny).
-- {ANSWER} **Advisory #2 (shared `hex` util) — deferred, not done in this PR.** Folding `hex` into a
-  shared crate means introducing/locating a `qe-util` (or putting it in `qe-domain`) and rewiring
-  `qe-config` too — out of scope for a determinism ticket and it would touch an already-merged crate.
-  Tracking as a small follow-up; the duplication is two trivial lines and harmless meanwhile.
+All three Feedback items addressed; full gate suite re-run green (fmt/clippy/`cargo test --workspace
+--locked` qe-domain **35** tests / deny ok).
+
+1. **Feedback #1 (Blocker — constructors bypassed at serde/field boundary) — FIXED.** Validation now
+   runs on **every** path into a domain value:
+   - `Price`/`Qty`: hand-written `Deserialize` that re-runs `new` → negative values rejected at the
+     serde boundary (still serialise as exact strings).
+   - `InstrumentId`/`VintageHash`: `#[serde(try_from = "String")]` → `new` (validate + canonicalise),
+     so `"btc-usdt"`/non-64-hex are rejected and `"btcusdt"` deserialises to canonical `BTCUSDT`.
+   - `TimeInterval`: `#[serde(try_from = "TimeIntervalWire")]` → `new`, rejecting reversed bounds.
+   - `Bar`: **fields are now private with getters**; `Deserialize` goes through `BarWire → Bar::new`
+     (OHLC invariant enforced), `Serialize` via `#[serde(into = "BarWire")]` (identical JSON shape).
+     A nested negative price is rejected by `Price`'s own validating deserialize. There is no longer
+     any way (constructor, struct literal, or serde) to obtain an invariant-violating `Bar`.
+   - Added **deserialize-rejection tests** for every validated type (negative price/qty, malformed
+     instrument/vintage, reversed interval, OHLC-invalid + negative-price bar).
+2. {ANSWER} **Feedback #2 (Minor — "only rounding point" overstated) — addressed by documentation.**
+   `Price::notional`'s doc now states the precondition explicitly: within `Decimal`'s 28 significant
+   digits it is the only rounding point; **beyond** that `Decimal`'s `*` itself rounds (banker's) and
+   panics on 96-bit magnitude overflow. Realistic crypto precision (≤ 8 dp, which the proptest
+   stays within) is well inside the bound. Kept the simple `*`-then-round signature rather than
+   surfacing `Result` from `notional`, since the precondition holds for all real inputs.
+3. **Feedback #3 (Minor — `Notional` overflow untested) — FIXED.** Added
+   `checked_add_and_sub_return_none_on_overflow` (pins `Decimal::MAX + 1 → None`, `MIN - 1 → None`,
+   plus the in-range success path). The panic-on-overflow contract of `+`/`-` is documented on the
+   `Add`/`Sub` impls, with `checked_*` offered as the non-panicking alternative for any hot-path use.
+
+Both ACs are now genuinely satisfied (the `Bar` invariant is enforced on all paths, closing the AC #2
+caveat). Please re-review.
