@@ -3,11 +3,12 @@
 use std::path::Path;
 
 use heed::types::{Bytes, SerdeJson, Str};
-use heed::{Database, Env, EnvOpenOptions, RoTxn};
+use heed::{Database, Env, RoTxn};
 use serde::de::DeserializeOwned;
 
 use qe_domain::{Bar, FundingRateSample, InstrumentId, Resolution, Timestamp};
 
+use crate::engine::{check_or_init_schema, open_env, read_schema_version, DB_META};
 use crate::key::{bar_key, bar_prefix, series_key, series_prefix, time_from_key};
 use crate::records::{FuturesMetrics, PremiumSample};
 use crate::{StorageError, SCHEMA_VERSION};
@@ -15,12 +16,10 @@ use crate::{StorageError, SCHEMA_VERSION};
 /// Default LMDB map size (max on-disk size): 1 GiB. Real deployments may size up.
 pub const DEFAULT_MAP_SIZE: usize = 1 << 30;
 
-const DB_META: &str = "meta";
 const DB_BARS: &str = "bars";
 const DB_FUNDING: &str = "funding";
 const DB_PREMIUM: &str = "premium";
 const DB_FUTURES: &str = "futures_metrics";
-const KEY_SCHEMA_VERSION: &str = "schema_version";
 
 /// An embedded LMDB store for the fused market corpus.
 ///
@@ -51,19 +50,7 @@ impl MarketStore {
     /// # Errors
     /// [`StorageError`] on I/O, an LMDB failure, or a schema-version mismatch.
     pub fn open(path: impl AsRef<Path>, map_size: usize) -> Result<Self, StorageError> {
-        std::fs::create_dir_all(&path)?;
-
-        // SAFETY: `EnvOpenOptions::open` is `unsafe` because LMDB memory-maps the database file and
-        // the caller must ensure no other mapping mutates it unsoundly. We uphold this: a single
-        // process owns this exclusive on-disk path via one `Env`, and the mapping is never handed to
-        // foreign code — the standard, sound usage of an embedded LMDB store.
-        #[allow(unsafe_code)]
-        let env = unsafe {
-            EnvOpenOptions::new()
-                .map_size(map_size)
-                .max_dbs(8)
-                .open(path)?
-        };
+        let env = open_env(path, map_size, 8)?;
 
         let mut wtxn = env.write_txn()?;
         let meta: Database<Str, Str> = env.create_database(&mut wtxn, Some(DB_META))?;
@@ -76,22 +63,7 @@ impl MarketStore {
         let futures: Database<Bytes, SerdeJson<FuturesMetrics>> =
             env.create_database(&mut wtxn, Some(DB_FUTURES))?;
 
-        match meta.get(&wtxn, KEY_SCHEMA_VERSION)? {
-            Some(found_str) => {
-                let found: u32 = found_str
-                    .parse()
-                    .map_err(|_| StorageError::SchemaCorrupt(found_str.to_owned()))?;
-                if found != SCHEMA_VERSION {
-                    return Err(StorageError::SchemaMismatch {
-                        expected: SCHEMA_VERSION,
-                        found,
-                    });
-                }
-            }
-            None => {
-                meta.put(&mut wtxn, KEY_SCHEMA_VERSION, &SCHEMA_VERSION.to_string())?;
-            }
-        }
+        check_or_init_schema(&meta, &mut wtxn, SCHEMA_VERSION)?;
         wtxn.commit()?;
 
         Ok(MarketStore {
@@ -109,13 +81,7 @@ impl MarketStore {
     /// # Errors
     /// [`StorageError`] on an LMDB failure or a corrupt/missing version record.
     pub fn schema_version(&self) -> Result<u32, StorageError> {
-        let rtxn = self.env.read_txn()?;
-        match self.meta.get(&rtxn, KEY_SCHEMA_VERSION)? {
-            Some(v) => v
-                .parse()
-                .map_err(|_| StorageError::SchemaCorrupt(v.to_owned())),
-            None => Err(StorageError::SchemaCorrupt("missing".to_owned())),
-        }
+        read_schema_version(&self.env, &self.meta)
     }
 
     // ---- bars (keyed by instrument + resolution + time) -------------------------------------
