@@ -120,6 +120,29 @@ mod tests {
     }
 
     #[test]
+    fn indicator_key_components_are_unambiguous() {
+        // The length prefixes must make the symbol/indicator split unambiguous: moving a byte across
+        // the boundary ("ab","c" vs "a","bc") yields distinct keys (no concatenation collision).
+        let t = Timestamp::from_secs(1);
+        let k1 = indicator_key(&inst("ab"), Resolution::M5, "c", 14, t);
+        let k2 = indicator_key(&inst("a"), Resolution::M5, "bc", 14, t);
+        assert_ne!(k1, k2, "length-prefixed components must not collide");
+        // Lookback and resolution are part of the identity too.
+        assert_ne!(
+            indicator_key(&inst("ab"), Resolution::M5, "c", 14, t),
+            indicator_key(&inst("ab"), Resolution::M5, "c", 21, t),
+            "different lookback → different key"
+        );
+        assert_ne!(
+            indicator_key(&inst("ab"), Resolution::M5, "c", 14, t),
+            indicator_key(&inst("ab"), Resolution::H1, "c", 14, t),
+            "different resolution → different key"
+        );
+        // The trailing order(time) still round-trips through time_from_key.
+        assert_eq!(time_from_key(&k1).millis(), t.millis());
+    }
+
+    #[test]
     fn prefixes_isolate_instruments_and_resolutions() {
         let btc = bar_prefix(&inst("BTCUSDT"), Resolution::M5);
         let eth = bar_prefix(&inst("ETHUSDT"), Resolution::M5);

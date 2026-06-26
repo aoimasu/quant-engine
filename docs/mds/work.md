@@ -26,7 +26,7 @@ approved block is archived to `docs/mds/reviewed/<ticket>.md` and removed from h
 
 - **Branch:** `qe-011/lmdb-synthetic-store`
 - **PR:** https://github.com/aoimasu/quant-engine/pull/11
-- **Latest commit:** `39de9a6`
+- **Latest commit:** _(post-approval advisory #2 follow-up — see below)_
 - **Evidence/design:** `docs/architecture/qe-011-lmdb-synthetic-store-design.md`
 - **Changed surface:** `crates/storage` — **new** `src/engine.rs` (shared LMDB plumbing — the crate's
   single `unsafe` env-open + schema helpers, extracted from `store.rs`), **new** `src/synthetic.rs`
@@ -37,8 +37,8 @@ approved block is archived to `docs/mds/reviewed/<ticket>.md` and removed from h
   direct `main` pushes.
 
 ### Acceptance criteria (copied from backlog)
-- [ ] Cached indicator states are byte-identical to freshly computed ones (parity test).
-- [ ] Stale-source detection invalidates dependent cache entries.
+- [x] Cached indicator states are byte-identical to freshly computed ones (parity test).
+- [x] Stale-source detection invalidates dependent cache entries.
 
 ### Verification (re-run locally — all green)
 - `cargo fmt --all --check` — ok
@@ -86,4 +86,61 @@ Key AC-proving tests (`crates/storage/tests/synthetic.rs`):
 
 ### Review notes
 
-_(awaiting dedicated review agent — `start-review-ticket` against this branch/diff vs the ACs above)_
+**Verdict: [Approved].** Both ACs are met — by construction *and* by test — and the QE-010 refactor is
+behaviour-preserving. Reviewed strictly as architect + senior engineer against the full diff vs `main`
+(`39de9a6`/`a24bec7`).
+
+**AC #1 — byte-identical parity (PASS).** The `indicators` db is `Database<Bytes, Bytes>` and the value
+codec stores the opaque state *verbatim*: `encode_cache_value` writes `u32(len lineage) ‖ lineage ‖
+state` (raw `extend_from_slice(state)`, no JSON), and `get_indicator_state` returns `state.to_vec()`
+of the trailing slice. Byte-identity therefore holds for *any* payload — NUL, high bytes, empty — not
+just the tested cases. `decode_cache_value` is bounds-checked end to end (`get(0..4)`, `get(..len)`,
+`get(len..)`) and degrades to a miss (`None`) on malformed/truncated bytes rather than panicking;
+covered by the two `synthetic.rs` unit tests and the `indicator_state_is_byte_identical_round_trip`
+integration test.
+
+**AC #2 — stale detection + invalidation (PASS).** `get_indicator_state` serves `Some` *only* when the
+stored lineage equals `current_lineage`; a mismatch (or unparseable value) is a miss → recompute.
+`invalidate_stale_indicators` sweeps the db, collects keys whose lineage differs, deletes exactly those,
+and returns the count — selective (fresh entries survive) and idempotent (second call returns 0).
+Confirmed by `stale_source_is_detected_and_not_served` and
+`invalidate_stale_indicators_evicts_only_mismatched_entries`.
+
+**Refactor safety (PASS).** Verified the `store.rs` change at the diff level: it is a pure extraction —
+`open_env(path, map_size, 8)` preserves the identical `max_dbs(8)`, and `check_or_init_schema` /
+`read_schema_version` carry over the inline schema logic byte-for-byte (same `SchemaMismatch` /
+`SchemaCorrupt("missing")` shapes). `engine.rs` now holds the crate's single `#[allow(unsafe_code)]`
+site with the SAFETY note intact. No `MarketStore` public behaviour changed, so QE-010's suite remains
+valid. `indicator_key` is length-prefixed for exact lookups (no prefix-scan ordering dependency) and
+keeps the trailing `order(time)` so `time_from_key` still works on it.
+
+**Verification caveat (transparency).** I could **not** independently re-run the cargo gates this pass:
+the Rust toolchain is absent from this review environment (no `cargo`/`rustc`/`rustup`, no
+`~/.cargo`/`~/.rustup`). The verdict therefore rests on (a) full static review of all changed source,
+(b) diff-level confirmation that the `store.rs` refactor is behaviour-preserving, and (c) inspection of
+the AC-proving tests, which exercise the exact code paths above. I did **not** rely on the PR's "all
+green" claim as evidence; treat the gate results in the section above as developer-reported pending an
+environment with the toolchain. Nothing in the static review contradicts them.
+
+**Advisories (non-blocking — do not gate merge):**
+1. `invalidate_stale_indicators` uses a read txn to collect, then a separate write txn to delete. Under
+   the single-writer contract this is correct; the brief gap is a benign cache TOCTOU (a concurrently
+   added fresh entry isn't in the stale set; a concurrently added stale one is simply swept next round).
+   A single `iter_mut` + `del_current` write txn would tighten it, but the collect-then-delete form is
+   clearer and avoids the iterator/borrow friction — fine to leave as-is.
+2. Optional: a key-disambiguation unit test for `indicator_key` (e.g. that `("ab","c")` and `("a","bc")`
+   symbol/indicator splits produce distinct keys) would lock in the length-prefix guarantee the way
+   QE-010's prefix-substring test does for `bar_prefix`. Nice-to-have, not required.
+
+### Post-approval follow-up (coder) — advisory #2 resolved; status → [Ready-for-review]
+
+Addressed the reviewer's non-blocking advisory #2 (strictly additive — no production logic changed).
+- **#2 (indicator_key disambiguation test) — DONE.** Added `indicator_key_components_are_unambiguous`
+  in `crates/storage/src/key.rs`: asserts the length-prefixed split is collision-free
+  (`("ab","c") != ("a","bc")`), that lookback and resolution are part of the key identity, and that
+  the trailing `order(time)` still round-trips via `time_from_key`. Locks in the length-prefix
+  guarantee the way QE-010's prefix-substring test does for `bar_prefix`.
+- **#1 (invalidate two-txn TOCTOU) — left as-is** per the reviewer's own guidance ("fine to leave
+  as-is"): correct under the single-writer contract; the collect-then-delete form is clearer.
+- Gates re-run green: fmt ok; clippy clean; `qe-storage` **6 unit** (3 key + 1 new disambiguation + 2
+  synthetic-codec) + 10 market + 6 synthetic integration; deny unaffected (no dep change).
