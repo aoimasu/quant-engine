@@ -79,4 +79,14 @@ mod tests {
         // Adjacent indices must not collapse to the same stream.
         assert_ne!(task_rng(0, 0).next_u64(), task_rng(0, 1).next_u64());
     }
+
+    /// Golden values: pin the exact stream/derivation so a `rand_chacha` bump or an accidental
+    /// change to `splitmix64`/`task_rng` is caught here rather than silently re-baselining every
+    /// vintage. These constants are platform-independent (ChaCha8 + SplitMix64 are pure integer).
+    #[test]
+    fn golden_stream_and_derivation_are_pinned() {
+        assert_eq!(seed_rng(0).next_u64(), 0xb585_f767_a79a_3b6c);
+        assert_eq!(derive_seed(0, 0), 0xa706_dd2f_4d19_7e6f);
+        assert_eq!(task_rng(0, 0).next_u64(), 0xddfd_9f22_480f_1436);
+    }
 }

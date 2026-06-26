@@ -5,6 +5,7 @@
 use qe_determinism::{reproduce, task_rng};
 use rand_core::RngCore;
 use rayon::prelude::*;
+use sha2::{Digest, Sha256};
 
 /// Run `f` inside a rayon pool of exactly `threads` worker threads.
 fn with_threads<T, F>(threads: usize, f: F) -> T
@@ -40,6 +41,18 @@ fn parallel_stage_is_byte_identical_across_thread_counts() {
     let many = parallel_draw(0x00C0_FFEE, 4096, 8);
     assert_eq!(one, many, "per-task seeding must not depend on core count");
     assert_eq!(one.len(), 4096 * 8);
+
+    // Golden lock: pin the exact artefact so a stream/derivation change (e.g. a rand_chacha bump)
+    // is caught here instead of silently re-baselining every vintage. ChaCha8 + SplitMix64 +
+    // little-endian bytes are all platform-independent, so this holds cross-machine too.
+    let digest: String = Sha256::digest(&one)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    assert_eq!(
+        digest,
+        "94d840f3a57cb518df3dc83427183636199e52cdbada4d7d2c483a1c7a41a038"
+    );
 }
 
 /// A deterministic reduction: `f64`s are computed in parallel but folded **sequentially in fixed
