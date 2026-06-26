@@ -61,12 +61,16 @@ logic** (that is QE-215/216).
   Clamp(Qty), Reject(String), FlattenAndHalt(String) }` — the kill path and a `Halt`-outcome limit
   both map to `FlattenAndHalt`.
 - `OrderGate` trait: `kill_handle(&self) -> &KillHandle` (so **every** order-submitting component must
-  hold a kill handle — the contract) and `admit(&self, &OrderIntent) -> Admission`. Provided methods
-  `kill_precheck()` (→ `Some(FlattenAndHalt)` when tripped) and `ensure_live()` (→ `Err(Fatal/Halt)`
-  when tripped) give every gate the flatten-and-halt behaviour for free, wired to QE-004.
-- `assert_honours_kill_switch<G: OrderGate>(&G)` — the reusable **conformance check**: an untripped
-  gate admits; after `trip`, `kill_precheck` is `FlattenAndHalt` and `ensure_live` is a `Halt`
-  disposition. AC #2.
+  hold a kill handle — the contract). The kill check is **structural**, not a convention: implementors
+  write `admit_within_limits(&self, &OrderIntent) -> Admission` (the size/margin decision, assuming a
+  live switch), and the trait's **provided** `admit` kill-prechecks *first*, then delegates — so a gate
+  cannot accidentally or silently submit while tripped. Provided `kill_precheck()` (→
+  `Some(FlattenAndHalt)` when tripped) and `ensure_live()` (→ `Err(Fatal/Halt)`) wire to QE-004.
+- `assert_honours_kill_switch<G: OrderGate>(&G)` — the reusable **conformance check**: after `trip`,
+  it asserts `kill_precheck` is `FlattenAndHalt`, **the actual `admit` decision is `FlattenAndHalt`**
+  (exercising the order-submission path, not just the helpers), and `ensure_live` is a `Halt`
+  disposition. Exercising `admit` is what makes conformance prove the order path *honours* the kill,
+  not merely that a handle is held. AC #2.
 
 ### `qe-runtime` wiring (AC #1)
 Add `qe-risk` dep; define `pub trait OrderPort: qe_risk::OrderGate {}` and re-export `KillHandle`, with

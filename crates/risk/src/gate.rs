@@ -1,5 +1,6 @@
 //! The order-submission contract: every order gate holds a kill handle and honours it first.
 
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 use qe_domain::{Direction, InstrumentId, Price, Qty};
@@ -43,10 +44,26 @@ pub trait OrderGate {
     /// The out-of-band kill handle this component honours. Every order path must hold one.
     fn kill_handle(&self) -> &KillHandle;
 
-    /// Decide admission for `intent`. Implementations must call [`kill_precheck`] first.
-    fn admit(&self, intent: &OrderIntent) -> Admission;
+    /// The component's limit/sizing decision for `intent`, assuming the kill switch is **live**.
+    ///
+    /// Implement this, not [`admit`](OrderGate::admit): the kill check is applied *structurally* by
+    /// `admit` before this is ever reached, so a gate cannot accidentally (or silently) submit while
+    /// tripped. Enforcement of the size/margin limits here is QE-215/216.
+    fn admit_within_limits(&self, intent: &OrderIntent) -> Admission;
 
-    /// The kill check every gate must perform before anything else: `Some(FlattenAndHalt)` when the
+    /// Final admission: the out-of-band kill switch is checked **first** (structurally), then the
+    /// component's limit decision. A tripped kill always yields [`Admission::FlattenAndHalt`].
+    ///
+    /// The default is what guarantees the kill is honoured — override only with great care (the
+    /// conformance check would then re-prove the override still flattens-and-halts when tripped).
+    fn admit(&self, intent: &OrderIntent) -> Admission {
+        match self.kill_precheck() {
+            Some(halt) => halt,
+            None => self.admit_within_limits(intent),
+        }
+    }
+
+    /// The kill check every gate performs before anything else: `Some(FlattenAndHalt)` when the
     /// switch is tripped, else `None`.
     fn kill_precheck(&self) -> Option<Admission> {
         let kill = self.kill_handle();
@@ -77,15 +94,30 @@ pub trait OrderGate {
     }
 }
 
-/// Reusable conformance check (AC #2): assert a gate accepts and honours its kill handle.
+/// A representative benign order used by [`assert_honours_kill_switch`] to exercise the `admit` path.
+fn conformance_intent() -> OrderIntent {
+    OrderIntent {
+        instrument: InstrumentId::new("BTCUSDT").expect("valid symbol"),
+        direction: Direction::Long,
+        qty: Qty::new(Decimal::ONE).expect("valid qty"),
+        price: Price::new(Decimal::ONE).expect("valid price"),
+    }
+}
+
+/// Reusable conformance check (AC #2): assert a gate accepts **and honours** its kill handle on the
+/// actual order-submission path.
 ///
 /// An untripped gate must not kill-precheck and must be live; after the shared handle is tripped, the
-/// gate must return [`Admission::FlattenAndHalt`] and an `ensure_live` error whose disposition is
-/// [`Halt`](qe_error::Disposition::Halt).
+/// gate's `kill_precheck`, **its `admit` decision**, and `ensure_live` must all reflect the kill —
+/// `admit` returns [`Admission::FlattenAndHalt`] and `ensure_live` is a
+/// [`Halt`](qe_error::Disposition::Halt) disposition. Exercising `admit` (not just the helpers) is
+/// what makes this prove the order path honours the kill, rather than merely that a handle is held.
 ///
 /// # Panics
-/// Panics if `gate` does not honour its kill handle.
+/// Panics if `gate` does not honour its kill handle on any of those paths.
 pub fn assert_honours_kill_switch<G: OrderGate>(gate: &G) {
+    let intent = conformance_intent();
+
     assert!(
         gate.kill_precheck().is_none(),
         "untripped gate must not kill-precheck"
@@ -96,7 +128,12 @@ pub fn assert_honours_kill_switch<G: OrderGate>(gate: &G) {
 
     match gate.kill_precheck() {
         Some(Admission::FlattenAndHalt(_)) => {}
-        other => panic!("gate ignored the kill switch: {other:?}"),
+        other => panic!("kill_precheck ignored the kill switch: {other:?}"),
+    }
+    // The decisive check: the actual admission path must flatten-and-halt once tripped.
+    match gate.admit(&intent) {
+        Admission::FlattenAndHalt(_) => {}
+        other => panic!("admit ignored the kill switch when tripped: {other:?}"),
     }
     let err = gate
         .ensure_live()
@@ -124,10 +161,8 @@ mod tests {
         fn kill_handle(&self) -> &KillHandle {
             &self.kill
         }
-        fn admit(&self, _intent: &OrderIntent) -> Admission {
-            if let Some(halt) = self.kill_precheck() {
-                return halt;
-            }
+        // Implements only the limit decision; the kill check is applied structurally by `admit`.
+        fn admit_within_limits(&self, _intent: &OrderIntent) -> Admission {
             Admission::Admit
         }
     }

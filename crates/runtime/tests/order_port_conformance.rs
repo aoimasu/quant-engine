@@ -21,8 +21,9 @@ impl OrderGate for SamplePort {
     fn kill_handle(&self) -> &KillHandle {
         &self.kill
     }
-    fn admit(&self, _intent: &OrderIntent) -> Admission {
-        self.kill_precheck().unwrap_or(Admission::Admit)
+    // Only the limit decision; `admit`'s default applies the kill check structurally.
+    fn admit_within_limits(&self, _intent: &OrderIntent) -> Admission {
+        Admission::Admit
     }
 }
 

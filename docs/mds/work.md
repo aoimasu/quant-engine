@@ -20,7 +20,7 @@ approved block is archived to `docs/mds/reviewed/<ticket>.md` and removed from h
 
 ---
 
-## QE-009 — Risk-limit & kill-switch contract (shared types) — PR #9 — [Ready-for-review]
+## QE-009 — Risk-limit & kill-switch contract (shared types) — PR #9 — [Reviewed]
 
 - **Branch:** `qe-009/risk-kill-switch-contract`
 - **PR:** https://github.com/aoimasu/quant-engine/pull/9
@@ -33,8 +33,14 @@ approved block is archived to `docs/mds/reviewed/<ticket>.md` and removed from h
   protection blocks direct `main` pushes.
 
 ### Acceptance criteria (copied from backlog)
-- [ ] The contract compiles and is referenced by the runtime crates' interfaces.
-- [ ] A conformance test asserts any order-submitting component must accept a kill handle.
+- [x] The contract compiles and is referenced by the runtime crates' interfaces.
+      _(Genuine: `OrderPort: qe_risk::OrderGate` is a real supertrait bound — being an `OrderPort`
+      compile-time-requires holding a `KillHandle`; the runtime conformance test exercises a
+      runtime-layer port.)_
+- [x] A conformance test asserts any order-submitting component must accept a kill handle.
+      _(Literal "accept a handle" met — `kill_handle()` is a required method. BUT the conformance
+      check doesn't verify the component **honours** the kill on its `admit` path — see Feedback #1,
+      a demonstrated hole for a kill-switch contract.)_
 
 ### Verification (re-run locally — all green)
 - `cargo fmt --all --check` — ok
@@ -61,3 +67,60 @@ Key AC-proving tests:
   QE-008. `KillHandle` is `Arc`-shared (clones observe the same trip), latching, `SeqCst`.
 - `qe-risk` deps (qe-domain/qe-error/rust_decimal) and the `qe-runtime → qe-risk` edge add no
   forbidden runtime↔training dependency → QE-001 topology guard green.
+
+### Review notes
+
+**Verdict: [Reviewed]** — strong contract crate: the kill switch is concurrency-sound, the serde
+discipline correctly applies the QE-007 lesson, the per-kind outcome policy is sensible, and the
+runtime reference is genuine. Holding short of approval for **one demonstrated hole in the AC #2
+conformance check** — for a kill-switch contract it matters that "conformance" actually proves the
+order path honours the kill, and right now it doesn't.
+
+**Independent re-verification (branch `qe-009/risk-kill-switch-contract`):**
+- `cargo fmt --all --check` clean · `cargo clippy --workspace --all-targets --locked -- -D warnings`
+  clean · `cargo test --workspace --locked` **107 passed, 1 ignored** (qe-risk 10 + runtime
+  conformance) · `cargo deny check` ok · QE-001 topology guard green (`qe-runtime → qe-risk` adds no
+  forbidden runtime↔training edge).
+
+**Focus areas verified positively:**
+- **AC #1 — genuine, not cosmetic.** `pub trait OrderPort: qe_risk::OrderGate` is a real supertrait
+  bound: you cannot implement `OrderPort` without implementing `OrderGate`, whose required
+  `kill_handle()` forces holding a `KillHandle` at compile time. The runtime test builds a
+  `SamplePort` (a `qe_runtime::OrderPort`, not just a qe-risk gate), constructed *with* a handle, and
+  runs the conformance check — it exercises the runtime layer.
+- **Focus 3 — kill switch is concurrency-sound.** `trip` writes the reason **under the mutex** before
+  the `SeqCst` `tripped` store; any observer that sees `tripped == true` is forced to observe the
+  reason (it either blocks on the still-held reason mutex, or acquires-after-release). "First reason
+  wins" is deterministic (mutex-serialised, `if slot.is_none()`); latching is correct (nothing ever
+  resets `tripped`); out-of-band via `Arc`-shared clones. `KillHandle` is **not** `Serialize`/
+  `Deserialize`, so kill state can't be injected from untrusted data. No race found.
+- **Focus 4 — serde discipline clean (no QE-007 regression).** `Leverage`/`Fraction` have manual
+  `Serialize` (exact string) + validating `Deserialize` that calls `new` — verified `"-1"` leverage
+  and `"1.5"` fraction are rejected on deserialize. `RiskLimits`/`OrderIntent` compose only validated
+  types (the QE-007-round-2 `InstrumentId`/`Qty`/`Price` validate on deserialize). No bypassable
+  invariant. `default_outcome` (clamp sizing caps; reject portfolio/margin breaches; halt on
+  drawdown) is a sensible, conservative policy for a leveraged perp venue.
+
+### Feedback
+
+1. **[Blocker — the AC #2 conformance check doesn't prove the order path honours the kill].**
+   `assert_honours_kill_switch` exercises only the **provided** `kill_precheck()` / `ensure_live()`
+   helpers (which are wired to the handle and trivially honour a trip) — it **never calls `admit`**.
+   So a component can implement `OrderGate`, hold a handle, pass conformance, and still submit orders
+   while the kill is tripped. I demonstrated this with a `BadGate` whose `admit` returns
+   `Admission::Admit` unconditionally: it **passes `assert_honours_kill_switch`**, yet `admit(intent)`
+   returns `Admit` even after the handle is tripped. The "Implementations must call `kill_precheck`
+   first" rule is only a doc comment — exactly the convention-vs-enforcement trap QE-007 taught this
+   team to close. For a P0 kill-switch contract this is the property that matters most. **Fix (either,
+   ideally both):**
+   - Strengthen `assert_honours_kill_switch` to also assert the admission path: after the internal
+     `trip`, call `gate.admit(&intent)` and require `Admission::FlattenAndHalt(_)` (the fn can take a
+     representative `OrderIntent`, or the trait can expose a no-op intent for conformance).
+   - Structurally guarantee it: give `OrderGate::admit` a **default** impl that does `kill_precheck`
+     first and delegates the limit decision to a new required method (e.g. `admit_within_limits`), so
+     a gate can't accidentally (or silently) skip the kill check. Then "admit honours the kill" is a
+     compile-time/structural property, not a convention — and the conformance check has teeth.
+
+   _(AC #2's literal text "must **accept** a kill handle" is met — `kill_handle()` is required — so the
+   box is ticked; but the conformance check is the AC's deliverable and currently gives false
+   assurance, which is why this blocks approval rather than being a nit.)_
