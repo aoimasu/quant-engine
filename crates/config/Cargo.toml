@@ -11,8 +11,9 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-# No internal-crate deps yet. QE-007/QE-012 will reintroduce qe-domain once config references
-# shared newtypes (instrument/resolution), which will also tighten validation.
+# QE-012 reintroduces qe-domain: the universe references shared newtypes (InstrumentId/Timestamp)
+# so config-resolved instruments are validated against the same vocabulary the engine uses.
+qe-domain = { path = "../domain" }
 serde.workspace = true
 serde_json.workspace = true
 figment.workspace = true

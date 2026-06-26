@@ -97,15 +97,37 @@ pub struct DeterminismConfig {
     pub seed: u64,
 }
 
+/// One point-in-time universe member: an instrument with an optional `[listed, delisted)` window.
+///
+/// `listed`/`delisted` are ISO `YYYY-MM-DD` (UTC midnight). An omitted `listed` means "since
+/// forever" (open-ended); an omitted `delisted` means "still trading". See [`crate::Universe`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UniverseMemberConfig {
+    /// Instrument symbol (validated against `qe_domain::InstrumentId` when the universe is built).
+    pub instrument: String,
+    /// ISO `YYYY-MM-DD` listing date (inclusive); `None` = listed since forever.
+    #[serde(default)]
+    pub listed: Option<String>,
+    /// ISO `YYYY-MM-DD` delisting date (exclusive); `None` = still trading.
+    #[serde(default)]
+    pub delisted: Option<String>,
+}
+
 /// Top-level resolved configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Config {
     /// Operating profile.
     #[serde(default = "default_profile")]
     pub profile: Profile,
-    /// Instrument universe (default `BTCUSDT`, `ETHUSDT`).
+    /// Instrument universe (default `BTCUSDT`, `ETHUSDT`). The flat list with no point-in-time
+    /// dimension; when `[[universe]]` is empty, [`crate::Config::universe`] derives an open-ended
+    /// universe from it.
     #[serde(default = "default_instruments")]
     pub instruments: Vec<String>,
+    /// Point-in-time universe members (instrument + listing/delisting dates). Takes precedence over
+    /// `instruments` when non-empty. Default empty (flat-list fallback).
+    #[serde(default)]
+    pub universe: Vec<UniverseMemberConfig>,
     /// Multi-resolution bar settings.
     #[serde(default)]
     pub bars: BarsConfig,

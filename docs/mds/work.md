@@ -19,128 +19,138 @@ approved block is archived to `docs/mds/reviewed/<ticket>.md` and removed from h
 - QE-008 — Clock-skew / time-sync guard — PR #8 — Approved & merged.
 - QE-009 — Risk-limit & kill-switch contract — PR #9 — Approved & merged.
 - QE-010 — LMDB market-data store — PR #10 — Approved & merged.
+- QE-011 — LMDB synthetic-data store — PR #11 — Approved & merged.
 
 ---
 
-## QE-011 — LMDB synthetic-data store — PR #11 — [Ready-for-review]
+## QE-012 — Instrument-universe configuration & point-in-time membership — PR #12 — [Ready-for-review]
 
-- **Branch:** `qe-011/lmdb-synthetic-store`
-- **PR:** https://github.com/aoimasu/quant-engine/pull/11
-- **Latest commit:** _(post-approval advisory #2 follow-up — see below)_
-- **Evidence/design:** `docs/architecture/qe-011-lmdb-synthetic-store-design.md`
-- **Changed surface:** `crates/storage` — **new** `src/engine.rs` (shared LMDB plumbing — the crate's
-  single `unsafe` env-open + schema helpers, extracted from `store.rs`), **new** `src/synthetic.rs`
-  (`SyntheticStore`), **new** `tests/synthetic.rs` (6 integration tests); `src/store.rs` refactored to
-  use the shared `engine` helpers (no behaviour change — QE-010's 10 integration tests still pass);
-  `src/key.rs` (+`indicator_key`); `src/lib.rs` (module wiring + exports). Also bundles the QE-010
-  archive (`docs/mds/reviewed/qe-010.md`) + `docs/mds/work.md` bookkeeping — branch protection blocks
-  direct `main` pushes.
+- **Branch:** `qe-012/instrument-universe`
+- **PR:** https://github.com/aoimasu/quant-engine/pull/12
+- **Latest commit:** _(post-approval advisory #1 follow-up — see below)_
+- **Evidence/design:** `docs/architecture/qe-012-instrument-universe-design.md`
+- **Changed surface:** `crates/config` — **new** `src/universe.rs` (`Universe`, `InstrumentListing`,
+  ISO-date→`Timestamp` civil-date math), **new** `tests/universe.rs` (4 integration tests);
+  `src/schema.rs` (+`UniverseMemberConfig`, +`Config.universe` field); `src/lib.rs`
+  (+`Config::universe()` builder, universe validation wired into `validate`, exports); `Cargo.toml`
+  (reintroduce `qe-domain` path dep). Also bundles the QE-011 archive
+  (`docs/mds/reviewed/qe-011.md`) + `docs/mds/work.md` bookkeeping — branch protection blocks direct
+  `main` pushes.
 
 ### Acceptance criteria (copied from backlog)
-- [x] Cached indicator states are byte-identical to freshly computed ones (parity test).
-- [x] Stale-source detection invalidates dependent cache entries.
+- [x] A backtest window excludes instruments not yet listed / already delisted at that time.
+- [x] Changing the universe size requires only config, no code change.
 
 ### Verification (re-run locally — all green)
 - `cargo fmt --all --check` — ok
 - `cargo clippy --workspace --all-targets --locked -- -D warnings` — clean
-- `cargo test --workspace --locked` — `qe-storage` 5 unit (3 key + 2 synthetic-codec) + 10 market
-  integration + 6 synthetic integration tests pass; workspace green
-- `cargo deny check` — advisories/bans/licenses/sources ok (no new deps; heed stays
-  `default-features = false`)
+- `cargo test --workspace --locked` — `qe-config` 22 unit (8 new universe) + 4 layering + 4 new
+  universe integration; QE-001 topology guard green; workspace green
+- `cargo deny check` — advisories/bans/licenses/sources ok (no new third-party deps; `qe-domain` is
+  an internal path dep)
 
-Key AC-proving tests (`crates/storage/tests/synthetic.rs`):
-- **AC #1 (byte-identical parity)** — `indicator_state_is_byte_identical_round_trip`: caches an opaque
-  state containing a NUL, high bytes (`250, 0, 99, 255`) and separately an **empty** payload, and
-  asserts `get_indicator_state` returns the *exact* bytes. The cache stores **raw state bytes** (not
-  re-serialised through JSON) precisely so a cached state is bit-for-bit identical to the freshly
-  computed one. Reinforced by the two `src/synthetic.rs` unit tests on the value codec
-  (`encode_cache_value`/`decode_cache_value` round-trip incl. empty/binary, and truncation rejection).
-- **AC #2 (stale-source detection + invalidation)** — `stale_source_is_detected_and_not_served`: an
-  entry tagged `lineage-A` is **not served** when queried with `lineage-B` (returns `None` → caller
-  recomputes). `invalidate_stale_indicators_evicts_only_mismatched_entries`: bulk-evicts exactly the
-  entries whose source lineage differs from the current one (returns the count; leaves fresh entries
-  intact; idempotent — a second call removes 0).
-- Plus `recon_bars_round_trip_scan_and_lineage_check` (multi-resolution bars: lineage-checked `get`,
-  chronological `[from,to)` window scan), `schema_version_recorded_and_reopen_succeeds`,
-  `open_result_is_usable`.
+Key AC-proving tests:
+- **AC #1 (point-in-time exclusion)** — `universe.rs::members_at_respects_listing_and_delisting`
+  and `tests/universe.rs::point_in_time_membership_excludes_unlisted_and_delisted`: BTC listed
+  `2019-09-08`, ETH listed `2019-11-27` delisted `2025-01-01`; `members_at` returns `[]` before any
+  listing, `[BTC]` before ETH lists, `[BTC,ETH]` while both live, `[BTC]` after ETH delists.
+  `membership_boundaries_are_half_open` pins `listed` inclusive / `delisted` exclusive.
+  `delisted_symbols_stay_in_all_known` proves the delisted symbol is retained in the full roster (no
+  survivorship drop).
+- **AC #2 (config-only resize)** — `tests/universe.rs::universe_size_is_config_only` (1- vs
+  3-instrument `[[universe]]` TOML through the identical code path) and
+  `flat_instruments_fallback_is_open_ended` (date-less configs keep working as always-member);
+  `universe.rs::universe_is_count_agnostic`.
+- **Validation** — `invalid_universe_entry_is_rejected_at_load` (delisted < listed → fail-fast with
+  the `universe[0].delisted` dotted path); date golden values + leap-year/day-overflow rejection in
+  `days_from_civil_golden_values` / `parse_iso_date_rejects_malformed_and_out_of_range`.
 
 ### Design notes for the reviewer
-- **Shared plumbing (`engine.rs`).** QE-010's `store.rs` carried its own `unsafe` env-open + schema
-  check; QE-011 extracts these into `engine.rs` so the crate has **exactly one** `unsafe` site
-  (`open_env`) reused by both stores, plus `check_or_init_schema` / `read_schema_version`. `store.rs`
-  was refactored onto these helpers with **no behaviour change** — QE-010's full integration suite
-  still passes (10 tests).
-- **Indicator cache value layout (parity-critical):** `u32(len lineage) ‖ lineage ‖ raw_state_bytes`.
-  State is stored as raw bytes (the `indicators` db is `Database<Bytes, Bytes>`), *not* via
-  `SerdeJson`, so AC #1 byte-identity holds for arbitrary binary payloads (incl. NUL/empty).
-- **Lineage-tagged invalidation (QE-006 link):** every entry stores the **source lineage id** it was
-  derived from. A read passes the *current* lineage; a mismatch is "stale" → not served. Bulk eviction
-  (`invalidate_stale_indicators`) sweeps all non-matching entries. Reconstructed bars carry the same
-  lineage tag (a private `ReconBar{source_lineage, bar}` via `SerdeJson`) and are lineage-checked on
-  `get`.
-- **Indicator key (`key.rs::indicator_key`):** length-prefixed components
-  `u16(len sym) ‖ sym ‖ [resolution] ‖ u16(len id) ‖ id ‖ u32(lookback) ‖ order(time)` — unambiguous
-  for exact lookups (not prefix scans), reusing QE-010's sign-flipped `order(time)` so `time_from_key`
-  still works on the trailing 8 bytes.
-- No new dependencies; `qe-storage` adds no internal edge to wfo/ensemble → QE-001 topology green.
+- **Point-in-time membership** is a half-open window test mirroring `qe_domain::TimeInterval`:
+  `listed <= as_of < delisted`. `delisted = None` = still trading; an open-ended listing uses a
+  `Timestamp::MIN` sentinel (`OPEN_LISTING`) so it's a member at every instant.
+- **Config-driven & count-agnostic:** `[[universe]]` (instrument + optional `listed`/`delisted` ISO
+  dates) resolves via `Config::universe()`; when absent it **falls back** to the flat `instruments`
+  list as open-ended listings, so existing date-less configs are unaffected. Same code serves 1 or N
+  instruments.
+- **No survivorship bias:** `Universe::all_known()` returns the full roster incl. delisted symbols;
+  filtering to a point in time is an explicit `members_at` call — blown-up coins are never silently
+  dropped at load.
+- **Dates without a date crate:** ISO `YYYY-MM-DD` → UTC-midnight `Timestamp` via Howard Hinnant's
+  `days_from_civil` + per-month/leap-year validation — exact and deterministic (no `chrono`); config
+  still serialises from `Vec`/scalar only, so `content_hash` stays stable.
+- **Validation** is folded into `Config::validate` (building the universe), so a bad id / date /
+  ordering / duplicate fails fast at load with a dotted `universe[i].field` path.
+- **Topology:** reintroduces the `qe-config → qe-domain` internal edge (anticipated by the crate's
+  own `Cargo.toml` comment); neither pulls `wfo`/`ensemble`/`runtime`, so the QE-001 guard stays
+  green (verified).
 
 ### Review notes
 
-**Verdict: [Approved].** Both ACs are met — by construction *and* by test — and the QE-010 refactor is
-behaviour-preserving. Reviewed strictly as architect + senior engineer against the full diff vs `main`
-(`39de9a6`/`a24bec7`).
+**Verdict: [Approved].** Reviewed strictly as architect + senior engineer against the full diff vs
+`main` (head `cf9708d`). Both ACs are met — by construction and by test — date math is correct,
+validation fails fast at load, and the topology edge is sound.
 
-**AC #1 — byte-identical parity (PASS).** The `indicators` db is `Database<Bytes, Bytes>` and the value
-codec stores the opaque state *verbatim*: `encode_cache_value` writes `u32(len lineage) ‖ lineage ‖
-state` (raw `extend_from_slice(state)`, no JSON), and `get_indicator_state` returns `state.to_vec()`
-of the trailing slice. Byte-identity therefore holds for *any* payload — NUL, high bytes, empty — not
-just the tested cases. `decode_cache_value` is bounds-checked end to end (`get(0..4)`, `get(..len)`,
-`get(len..)`) and degrades to a miss (`None`) on malformed/truncated bytes rather than panicking;
-covered by the two `synthetic.rs` unit tests and the `indicator_state_is_byte_identical_round_trip`
-integration test.
+**AC #1 — point-in-time exclusion (PASS).** `InstrumentListing::is_tradable_at` implements the half-open
+window exactly: `self.listed <= as_of && self.delisted.is_none_or(|d| as_of < d)` — `listed` inclusive,
+`delisted` exclusive, `None` delisting = unbounded — mirroring `qe_domain::TimeInterval`.
+`members_at`/`is_member_at` filter on it; `all_known()` returns the **full** roster so delisted symbols
+are never silently dropped (survivorship-bias-free). Covered by `members_at_respects_listing_and_delisting`,
+`membership_boundaries_are_half_open` (pins the inclusive/exclusive boundaries), `delisted_symbols_stay_in_all_known`,
+and the integration test `point_in_time_membership_excludes_unlisted_and_delisted`.
 
-**AC #2 — stale detection + invalidation (PASS).** `get_indicator_state` serves `Some` *only* when the
-stored lineage equals `current_lineage`; a mismatch (or unparseable value) is a miss → recompute.
-`invalidate_stale_indicators` sweeps the db, collects keys whose lineage differs, deletes exactly those,
-and returns the count — selective (fresh entries survive) and idempotent (second call returns 0).
-Confirmed by `stale_source_is_detected_and_not_served` and
-`invalidate_stale_indicators_evicts_only_mismatched_entries`.
+**AC #2 — config-only resize (PASS).** `Config::universe()` builds from the `[[universe]]` TOML section
+when present, else falls back to the flat `instruments` list as `open_ended` listings — one count-agnostic
+code path for 1 or N instruments. Verified `universe_size_is_config_only` (1 vs 3 via identical path) and
+`flat_instruments_fallback_is_open_ended` (date-less configs unchanged, always-member). Precedence is
+correct: when `[[universe]]` is non-empty the flat list is ignored for membership but still validated.
 
-**Refactor safety (PASS).** Verified the `store.rs` change at the diff level: it is a pure extraction —
-`open_env(path, map_size, 8)` preserves the identical `max_dbs(8)`, and `check_or_init_schema` /
-`read_schema_version` carry over the inline schema logic byte-for-byte (same `SchemaMismatch` /
-`SchemaCorrupt("missing")` shapes). `engine.rs` now holds the crate's single `#[allow(unsafe_code)]`
-site with the SAFETY note intact. No `MarketStore` public behaviour changed, so QE-010's suite remains
-valid. `indicator_key` is length-prefixed for exact lookups (no prefix-scan ordering dependency) and
-keeps the trailing `order(time)` so `time_from_key` still works on it.
+**Date math (PASS).** ISO `YYYY-MM-DD` → UTC-midnight via Howard Hinnant `days_from_civil`, no external
+crate. Verified the golden values **by hand**: 1970→2000 = 30×365 + 7 leap days (1972…1996) = 10957 days;
+1969-12-31 = −1 day; epoch = 0. Per-month/leap-year rejection (`2021-02-29`, `2020-04-31`, `2020-13-01`,
+width/separator) is exercised. Note the 4-digit year cap (width-10 check) bounds `days * 86_400_000` well
+within `i64` — no overflow path. Deterministic, so `content_hash` stays stable (new field is `Vec`/scalar
+with `#[serde(default)]`).
 
-**Verification caveat (transparency).** I could **not** independently re-run the cargo gates this pass:
-the Rust toolchain is absent from this review environment (no `cargo`/`rustc`/`rustup`, no
-`~/.cargo`/`~/.rustup`). The verdict therefore rests on (a) full static review of all changed source,
-(b) diff-level confirmation that the `store.rs` refactor is behaviour-preserving, and (c) inspection of
-the AC-proving tests, which exercise the exact code paths above. I did **not** rely on the PR's "all
-green" claim as evidence; treat the gate results in the section above as developer-reported pending an
-environment with the toolchain. Nothing in the static review contradicts them.
+**Validation fail-fast (PASS).** `Config::load` → `validate()` → `self.universe()?`, so a bad id / malformed
+date / `delisted < listed` / duplicate fails at load with a dotted `universe[i].field` path
+(`invalid_universe_entry_is_rejected_at_load` asserts `universe[0].delisted`). The fallback path also runs
+`InstrumentId::new` on the flat list (the comment's "non-empty + dup-checked above" is accurate — `validate`
+checks those at lines 87–99 before calling `universe()`), tightening flat-list validation as intended.
+
+**Topology (PASS).** Independently confirmed `qe-domain` is a true leaf (deps: serde/thiserror/rust_decimal,
+**zero** internal `qe-` edges), so the reintroduced `qe-config → qe-domain` edge cannot transitively reach
+`wfo`/`ensemble`/`runtime` — the QE-001 guard stays green regardless of where it runs.
+
+**Verification caveat (transparency).** I could **not** independently re-run the cargo gates this pass: the
+Rust toolchain is absent from this review environment (no `cargo`/`rustc`/`rustup`). The verdict rests on
+full static review of all changed source, hand-verification of the date algorithm and golden values,
+diff-level confirmation of the `load → validate → universe` wiring, and structural confirmation that
+`qe-domain` is a leaf. I did not rely on the PR's "all green" claim as evidence; treat the reported gate
+results as developer-reported. Nothing in the static review contradicts them.
 
 **Advisories (non-blocking — do not gate merge):**
-1. `invalidate_stale_indicators` uses a read txn to collect, then a separate write txn to delete. Under
-   the single-writer contract this is correct; the brief gap is a benign cache TOCTOU (a concurrently
-   added fresh entry isn't in the stale set; a concurrently added stale one is simply swept next round).
-   A single `iter_mut` + `del_current` write txn would tighten it, but the collect-then-delete form is
-   clearer and avoids the iterator/borrow friction — fine to leave as-is.
-2. Optional: a key-disambiguation unit test for `indicator_key` (e.g. that `("ab","c")` and `("a","bc")`
-   symbol/indicator splits produce distinct keys) would lock in the length-prefix guarantee the way
-   QE-010's prefix-substring test does for `bar_prefix`. Nice-to-have, not required.
+1. **Two ISO-date validators with different strictness.** `history.start` is still validated by the
+   pre-existing `is_iso_date` (format + month 1..=12 + day 1..=31 only — **no** per-month/leap check), so
+   `history.start = "2021-02-29"` or `"2020-04-31"` would pass there while the universe's new `parse_iso_date`
+   correctly rejects them. Now that the calendar-strict parser exists, `history.start` could reuse it and the
+   two paths consolidate. Partly pre-existing (QE-002); newly fixable here. Not a QE-012 AC defect.
+2. **`validate()` builds the universe purely to validate and discards it**, and consumers rebuild via
+   `universe()`. Cheap and idiomatic fail-fast, fine to leave — noted only for awareness (a `build_universe`
+   helper returning the value could let `validate` reuse it if it ever caches the resolved config).
 
-### Post-approval follow-up (coder) — advisory #2 resolved; status → [Ready-for-review]
+### Post-approval follow-up (coder) — advisory #1 resolved; status → [Ready-for-review]
 
-Addressed the reviewer's non-blocking advisory #2 (strictly additive — no production logic changed).
-- **#2 (indicator_key disambiguation test) — DONE.** Added `indicator_key_components_are_unambiguous`
-  in `crates/storage/src/key.rs`: asserts the length-prefixed split is collision-free
-  (`("ab","c") != ("a","bc")`), that lookback and resolution are part of the key identity, and that
-  the trailing `order(time)` still round-trips via `time_from_key`. Locks in the length-prefix
-  guarantee the way QE-010's prefix-substring test does for `bar_prefix`.
-- **#1 (invalidate two-txn TOCTOU) — left as-is** per the reviewer's own guidance ("fine to leave
-  as-is"): correct under the single-writer contract; the collect-then-delete form is clearer.
-- Gates re-run green: fmt ok; clippy clean; `qe-storage` **6 unit** (3 key + 1 new disambiguation + 2
-  synthetic-codec) + 10 market + 6 synthetic integration; deny unaffected (no dep change).
+Addressed non-blocking advisory #1 (date-validation consolidation). Strictly a correctness +
+dedup improvement; no behaviour weakened.
+- **#1 (consolidate `history.start` onto strict `parse_iso_date`) — DONE.** `Config::validate` now
+  validates `history.start` through the same leap-year / per-month-aware `parse_iso_date` used by the
+  universe, and the weaker duplicate `is_iso_date` helper is **removed**. `history.start` now rejects
+  calendar-invalid dates the old check let through (e.g. `2021-02-29`). Replaced the helper's direct
+  unit test with `history_start_uses_strict_calendar_validation` (rejects `2021-02-29`, accepts the
+  real leap day `2020-02-29`) — one definition of "valid ISO date" across the config.
+- **#2 (validate builds-and-discards the universe) — left as-is:** intentional fail-fast — building
+  the universe *is* its validation; the cost is negligible and storing it would change `Config`'s
+  shape for no functional gain.
+- Gates re-run green: fmt ok; clippy clean; `qe-config` 22 unit + 4 layering + 4 universe
+  integration; deny unaffected (no dep change).
