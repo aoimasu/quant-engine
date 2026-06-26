@@ -46,6 +46,15 @@ with all four fields recorded. Training stages wrap their work in this span so e
 it inherits the correlation context (AC #1). `instrument`/`window_id` use `"-"` when not
 applicable (e.g. a whole-run stage).
 
+### Round 2 (review fixes)
+
+- `LogFormat::Pretty` now maps to `.pretty().with_ansi(false)` (was `.finish()` → single-line,
+  ANSI-coloured); a `pretty_format_is_multiline_and_colourless` test locks the behaviour.
+- Exported `HOT_PATH_TARGET` const as the single source of truth for the hot-path target; module
+  doc, emitters, and tests reference it (no stringly-typed drift).
+- Documented the non-blocking writer's **lossy** drop-on-backpressure semantics (audit
+  implication) and that only the disabled hot-path case is unit-tested.
+
 ### Hot-path guarantee (AC #2)
 
 Two mechanisms, both documented and the first one tested:

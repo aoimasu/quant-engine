@@ -4,7 +4,7 @@
 //! `EnvFilter` directive, optional non-blocking writer) and helpers for the standard correlation
 //! fields (`run_id`, `vintage_hash`, `instrument`, `window_id`).
 //!
-//! Hot-path guarantee: hot-path emissions should use a dedicated target (e.g. `qe::hot_path`) at
+//! Hot-path guarantee: hot-path emissions should use the [`HOT_PATH_TARGET`] target at
 //! `trace`/`debug`. Production filters disable them, so the macro short-circuits before any
 //! formatting or I/O. When enabled, [`init`] with `non_blocking = true` routes writes through a
 //! background worker, keeping the emitting thread off synchronous I/O.
@@ -13,6 +13,13 @@ use thiserror::Error;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::fmt::{self, writer::BoxMakeWriter};
 use tracing_subscriber::EnvFilter;
+
+/// Tracing target for hot-path log events.
+///
+/// Production filters disable this target so emissions short-circuit on the level check before any
+/// formatting or I/O. Emitters and filter directives must reference this constant rather than the
+/// bare string, so a typo can't silently mis-filter and defeat the disable-in-production strategy.
+pub const HOT_PATH_TARGET: &str = "qe::hot_path";
 
 /// Errors raised while installing telemetry.
 #[derive(Debug, Error)]
@@ -47,6 +54,12 @@ pub struct TelemetryConfig {
     /// Output format.
     pub format: LogFormat,
     /// Route writes through a background worker thread (keeps emitters off blocking I/O).
+    ///
+    /// Uses `tracing-appender`'s default **lossy** mode: under sustained backpressure it *drops*
+    /// records rather than blocking the emitter. This is the right tradeoff for the order-emission
+    /// hot path (never block the critical path), but means logs can be silently lost under load —
+    /// relevant for audit. Only the *disabled* hot-path (zero-I/O) case has a test; the enabled
+    /// non-blocking path is guaranteed by construction.
     pub non_blocking: bool,
 }
 
@@ -131,7 +144,10 @@ pub fn init(cfg: &TelemetryConfig) -> Result<TelemetryGuard, TelemetryError> {
 
     match cfg.format {
         LogFormat::Json => set_global(builder.json().finish())?,
-        LogFormat::Pretty => set_global(builder.finish())?,
+        // `.pretty()` gives the multi-line human format; `.with_ansi(false)` keeps it colourless
+        // (the writer is boxed/non-blocking so fmt can't TTY-detect and would otherwise emit raw
+        // ANSI escapes into redirected logs).
+        LogFormat::Pretty => set_global(builder.pretty().with_ansi(false).finish())?,
     }
 
     Ok(TelemetryGuard { _worker: worker })
@@ -189,6 +205,15 @@ mod tests {
             .finish()
     }
 
+    fn pretty_subscriber(filter: &str, buf: &BufWriter) -> impl tracing::Subscriber + Send + Sync {
+        fmt::Subscriber::builder()
+            .with_env_filter(EnvFilter::new(filter))
+            .pretty()
+            .with_ansi(false)
+            .with_writer(buf.clone())
+            .finish()
+    }
+
     #[test]
     fn stage_span_emits_correlation_fields() {
         let buf = BufWriter::default();
@@ -223,7 +248,7 @@ mod tests {
         // `info` filter disables `trace` → the hot-path event short-circuits, no I/O.
         let subscriber = json_subscriber("info", &buf);
         tracing::subscriber::with_default(subscriber, || {
-            tracing::trace!(target: "qe::hot_path", order_id = 42, "order emitted");
+            tracing::trace!(target: HOT_PATH_TARGET, order_id = 42, "order emitted");
         });
         assert!(
             buf.is_empty(),
@@ -237,11 +262,31 @@ mod tests {
         // Sanity counterpart: when the target/level is enabled, the event is recorded — proving
         // the previous test's emptiness is due to filtering, not a broken pipe.
         let buf = BufWriter::default();
-        let subscriber = json_subscriber("qe::hot_path=trace", &buf);
+        let subscriber = json_subscriber(&format!("{HOT_PATH_TARGET}=trace"), &buf);
         tracing::subscriber::with_default(subscriber, || {
-            tracing::trace!(target: "qe::hot_path", order_id = 42, "order emitted");
+            tracing::trace!(target: HOT_PATH_TARGET, order_id = 42, "order emitted");
         });
         assert!(buf.contents().contains("order emitted"));
+    }
+
+    #[test]
+    fn pretty_format_is_multiline_and_colourless() {
+        // Locks the LogFormat::Pretty fix: pretty output is multi-line and carries no ANSI escapes.
+        let buf = BufWriter::default();
+        let subscriber = pretty_subscriber("info", &buf);
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!(phase = "start", "pretty event");
+        });
+        let out = buf.contents();
+        assert!(out.contains("pretty event"));
+        assert!(
+            out.lines().count() > 1,
+            "pretty format should be multi-line, got: {out:?}"
+        );
+        assert!(
+            !out.contains('\u{1b}'),
+            "pretty output must be colourless (no ANSI), got: {out:?}"
+        );
     }
 
     #[test]
