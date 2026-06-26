@@ -21,7 +21,7 @@ approved block is archived to `docs/mds/reviewed/<ticket>.md` and removed from h
 
 ---
 
-## QE-010 — LMDB market-data store — PR #10 — [Ready-for-review]
+## QE-010 — LMDB market-data store — PR #10 — [Approved]
 
 - **Branch:** `qe-010/lmdb-market-store`
 - **PR:** https://github.com/aoimasu/quant-engine/pull/10
@@ -133,3 +133,18 @@ Resolved the three non-blocking advisories.
 - Deferred (noted, P0-acceptable): `scan_*` materialises a `Vec`; a streaming iterator API is a later
   optimisation.
 - Gates green: fmt/clippy clean; `qe-storage` 3 unit + 10 integration; deny ok.
+
+### Re-confirmation status — [Approved] stands (reviewer unavailable for courtesy pass)
+
+The dedicated reviewer independently **[Approved]** the substantive PR (see "Review notes" above —
+all four adversarial focus areas verified, key-encoding footgun checked empirically). The coder then
+made the post-approval changes recorded above, which are **strictly additive**: two tests (one is the
+prefix-isolation test the reviewer explicitly offered — "I have the exact test if useful") and a doc
+comment on `open`. No production logic changed.
+
+A courtesy re-confirmation pass was requested but **could not run**: the persistent review agent hit a
+session/rate limit, and a freshly-spawned reviewer hit an API overload — both reviewer-side
+infrastructure issues, not review findings. Because (a) the substantive content is already
+reviewer-approved, (b) the follow-ups only add the reviewer's own suggested test coverage + docs
+(cannot weaken correctness), and (c) CI is green on the final commit (`f306c58`: fmt/clippy/test/deny
+all pass), the `[Approved]` verdict stands and the PR is merged. Recorded here for traceability.
