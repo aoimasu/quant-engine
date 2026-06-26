@@ -130,13 +130,17 @@ impl Config {
                     "required when `max_available = false`",
                 ));
             }
-            Some(start) if !is_iso_date(start) => {
-                return Err(invalid(
-                    "history.start",
-                    &format!("'{start}' is not an ISO `YYYY-MM-DD` date"),
-                ));
+            // Validate through the same strict calendar parser as the universe (leap/per-month aware),
+            // so `history.start` and `[[universe]]` dates share one definition of "valid ISO date".
+            Some(start) => {
+                parse_iso_date(start).map_err(|e| {
+                    invalid(
+                        "history.start",
+                        &format!("'{start}' is not a valid ISO `YYYY-MM-DD` date: {e}"),
+                    )
+                })?;
             }
-            _ => {}
+            None => {}
         }
 
         for (field, val) in [
@@ -223,22 +227,6 @@ fn profile_overlay_path(base_path: &Path, profile: Profile) -> Option<PathBuf> {
         .unwrap_or("toml");
     let parent = base_path.parent().unwrap_or_else(|| Path::new(""));
     Some(parent.join(format!("{stem}.{}.{ext}", profile.as_str())))
-}
-
-/// Lightweight `YYYY-MM-DD` format + range check. Full calendar validation (leap years, real
-/// `Date` type) is deferred to the shared time type in QE-007.
-fn is_iso_date(s: &str) -> bool {
-    let bytes = s.as_bytes();
-    if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' {
-        return false;
-    }
-    let all_digits = |slice: &str| !slice.is_empty() && slice.bytes().all(|c| c.is_ascii_digit());
-    if !(all_digits(&s[0..4]) && all_digits(&s[5..7]) && all_digits(&s[8..10])) {
-        return false;
-    }
-    let month: u8 = s[5..7].parse().unwrap_or(0);
-    let day: u8 = s[8..10].parse().unwrap_or(0);
-    (1..=12).contains(&month) && (1..=31).contains(&day)
 }
 
 fn invalid(field: &str, message: &str) -> ConfigError {
@@ -400,13 +388,15 @@ seed = 42
     }
 
     #[test]
-    fn iso_date_helper_edges() {
-        assert!(is_iso_date("2020-01-01"));
-        assert!(is_iso_date("2019-12-31"));
-        assert!(!is_iso_date("2020-13-01")); // month out of range
-        assert!(!is_iso_date("2020-01-32")); // day out of range
-        assert!(!is_iso_date("2020-1-1")); // wrong width
-        assert!(!is_iso_date("2020/01/01")); // wrong separators
-        assert!(!is_iso_date("banana"));
+    fn history_start_uses_strict_calendar_validation() {
+        // After consolidating onto `parse_iso_date`, `history.start` rejects calendar-invalid dates
+        // that the old lightweight check would have passed (e.g. Feb 29 on a non-leap year).
+        let bad = format!("{VALID}\n[history]\nmax_available = false\nstart = \"2021-02-29\"\n");
+        let err = Config::from_toml_str(&bad).unwrap_err();
+        assert!(matches!(err, ConfigError::Invalid { field, .. } if field == "history.start"));
+
+        // A real leap day is accepted.
+        let ok = format!("{VALID}\n[history]\nmax_available = false\nstart = \"2020-02-29\"\n");
+        assert!(Config::from_toml_str(&ok).is_ok());
     }
 }
