@@ -18,7 +18,7 @@ approved block is archived to `docs/mds/reviewed/<ticket>.md` and removed from h
 
 ---
 
-## QE-007 — Shared domain types — PR #7 — [Reviewed]
+## QE-007 — Shared domain types — PR #7 — [Ready-for-review]
 
 - **Branch:** `qe-007/shared-domain-types`
 - **PR:** https://github.com/aoimasu/quant-engine/pull/7
@@ -129,3 +129,35 @@ vocabulary," so it should be fixed before this becomes the foundation everything
    test. Worth a test pinning the overflow contract, and note the panic-on-overflow tension if these
    are ever used in a QE-004 hot-path module (the clippy `panic` lint won't catch an arithmetic
    overflow panic).
+
+### Round 2 — coder response (commit `a8c0ddf`); status → [Ready-for-review]
+
+All three Feedback items addressed; full gate suite re-run green (fmt/clippy/`cargo test --workspace
+--locked` qe-domain **35** tests / deny ok).
+
+1. **Feedback #1 (Blocker — constructors bypassed at serde/field boundary) — FIXED.** Validation now
+   runs on **every** path into a domain value:
+   - `Price`/`Qty`: hand-written `Deserialize` that re-runs `new` → negative values rejected at the
+     serde boundary (still serialise as exact strings).
+   - `InstrumentId`/`VintageHash`: `#[serde(try_from = "String")]` → `new` (validate + canonicalise),
+     so `"btc-usdt"`/non-64-hex are rejected and `"btcusdt"` deserialises to canonical `BTCUSDT`.
+   - `TimeInterval`: `#[serde(try_from = "TimeIntervalWire")]` → `new`, rejecting reversed bounds.
+   - `Bar`: **fields are now private with getters**; `Deserialize` goes through `BarWire → Bar::new`
+     (OHLC invariant enforced), `Serialize` via `#[serde(into = "BarWire")]` (identical JSON shape).
+     A nested negative price is rejected by `Price`'s own validating deserialize. There is no longer
+     any way (constructor, struct literal, or serde) to obtain an invariant-violating `Bar`.
+   - Added **deserialize-rejection tests** for every validated type (negative price/qty, malformed
+     instrument/vintage, reversed interval, OHLC-invalid + negative-price bar).
+2. {ANSWER} **Feedback #2 (Minor — "only rounding point" overstated) — addressed by documentation.**
+   `Price::notional`'s doc now states the precondition explicitly: within `Decimal`'s 28 significant
+   digits it is the only rounding point; **beyond** that `Decimal`'s `*` itself rounds (banker's) and
+   panics on 96-bit magnitude overflow. Realistic crypto precision (≤ 8 dp, which the proptest
+   stays within) is well inside the bound. Kept the simple `*`-then-round signature rather than
+   surfacing `Result` from `notional`, since the precondition holds for all real inputs.
+3. **Feedback #3 (Minor — `Notional` overflow untested) — FIXED.** Added
+   `checked_add_and_sub_return_none_on_overflow` (pins `Decimal::MAX + 1 → None`, `MIN - 1 → None`,
+   plus the in-range success path). The panic-on-overflow contract of `+`/`-` is documented on the
+   `Add`/`Sub` impls, with `checked_*` offered as the non-panicking alternative for any hot-path use.
+
+Both ACs are now genuinely satisfied (the `Bar` invariant is enforced on all paths, closing the AC #2
+caveat). Please re-review.
