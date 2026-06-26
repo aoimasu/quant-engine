@@ -373,6 +373,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "qe-error"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+]
+
+[[package]]
 name = "qe-ingest"
 version = "0.1.0"
 dependencies = [
