@@ -275,7 +275,6 @@ name = "qe-config"
 version = "0.1.0"
 dependencies = [
  "figment",
- "qe-domain",
  "serde",
  "serde_json",
  "sha2",
