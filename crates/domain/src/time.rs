@@ -40,10 +40,29 @@ impl fmt::Display for Timestamp {
 }
 
 /// A half-open time interval `[start, end)`.
+///
+/// Deserialisation goes through [`TimeInterval::new`] (via [`TryFrom`]), so a reversed `[end <
+/// start]` interval cannot enter through serde.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "TimeIntervalWire")]
 pub struct TimeInterval {
     start: Timestamp,
     end: Timestamp,
+}
+
+/// Wire form of [`TimeInterval`] — deserialised then validated through [`TimeInterval::new`].
+#[derive(Deserialize)]
+struct TimeIntervalWire {
+    start: Timestamp,
+    end: Timestamp,
+}
+
+impl TryFrom<TimeIntervalWire> for TimeInterval {
+    type Error = DomainError;
+
+    fn try_from(wire: TimeIntervalWire) -> Result<Self, Self::Error> {
+        TimeInterval::new(wire.start, wire.end)
+    }
 }
 
 impl TimeInterval {
@@ -122,5 +141,15 @@ mod tests {
         let iv = TimeInterval::new(Timestamp::from_millis(5), Timestamp::from_millis(5)).unwrap();
         assert_eq!(iv.duration_millis(), 0);
         assert!(!iv.contains(Timestamp::from_millis(5)));
+    }
+
+    #[test]
+    fn deserialize_rejects_reversed_interval() {
+        assert!(serde_json::from_str::<TimeInterval>(r#"{"start":100,"end":50}"#).is_err());
+        let iv: TimeInterval = serde_json::from_str(r#"{"start":10,"end":20}"#).unwrap();
+        assert_eq!(
+            iv,
+            TimeInterval::new(Timestamp::from_millis(10), Timestamp::from_millis(20)).unwrap()
+        );
     }
 }

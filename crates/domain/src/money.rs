@@ -2,29 +2,64 @@
 //!
 //! [`Price`], [`Qty`], and [`Notional`] wrap [`rust_decimal::Decimal`], a 96-bit fixed-point
 //! decimal. Addition and subtraction are therefore **exact and associative** — there is no float
-//! error to accumulate. The only place a value can be rounded is [`Price::notional`]
-//! (`price × qty`), which takes an explicit [`RoundingPolicy`] and target scale, so rounding is
-//! always a deliberate, named decision rather than a silent loss.
+//! error to accumulate. For inputs within `Decimal`'s 28-significant-digit range, the only place a
+//! value is rounded is [`Price::notional`] (`price × qty`), which takes an explicit
+//! [`RoundingPolicy`] and target scale, so rounding is a deliberate, named decision rather than a
+//! silent loss. (Beyond 28 digits `Decimal`'s own `*` rounds/saturates — see [`Price::notional`].)
+//!
+//! `Price` and `Qty` are non-negative by construction *and* by deserialization: their `Deserialize`
+//! runs the validating constructor, so a negative value cannot enter via serde either.
 
 use std::fmt;
 use std::ops::{Add, Sub};
 
 use rust_decimal::{Decimal, RoundingStrategy};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::DomainError;
 
 /// A non-negative price, quoted in the instrument's quote currency.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct Price(#[serde(with = "rust_decimal::serde::str")] Decimal);
+///
+/// Serialises as a decimal string (exact); deserialisation re-runs [`Price::new`], so a negative
+/// price is rejected at the serde boundary too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Price(Decimal);
 
 /// A non-negative quantity (base-asset size / number of contracts).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct Qty(#[serde(with = "rust_decimal::serde::str")] Decimal);
+///
+/// Serialises as a decimal string (exact); deserialisation re-runs [`Qty::new`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Qty(Decimal);
 
-/// A signed money amount — notional exposure or realised PnL, so it may be negative.
+/// A signed money amount — notional exposure or realised PnL, so it may be negative (no validation).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct Notional(#[serde(with = "rust_decimal::serde::str")] Decimal);
+
+impl Serialize for Price {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        rust_decimal::serde::str::serialize(&self.0, serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Price {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = rust_decimal::serde::str::deserialize(deserializer)?;
+        Price::new(value).map_err(serde::de::Error::custom)
+    }
+}
+
+impl Serialize for Qty {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        rust_decimal::serde::str::serialize(&self.0, serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Qty {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = rust_decimal::serde::str::deserialize(deserializer)?;
+        Qty::new(value).map_err(serde::de::Error::custom)
+    }
+}
 
 impl Price {
     /// Zero — a valid price.
@@ -52,8 +87,10 @@ impl Price {
 
     /// `price × qty`, rounded to `scale` decimal places using `policy`.
     ///
-    /// This is the **only** rounding point in money arithmetic. The product itself is computed
-    /// exactly (decimal multiplication), then rounded once, deliberately.
+    /// For inputs whose exact product fits in `Decimal`'s 28 significant digits, this is the only
+    /// rounding point: the product is exact, then rounded once, deliberately. **Precondition:**
+    /// beyond 28 digits `Decimal`'s `*` itself rounds (banker's), and it **panics** on 96-bit
+    /// magnitude overflow — realistic crypto precision (≤ 8 dp) stays well inside this bound.
     #[must_use]
     pub fn notional(self, qty: Qty, scale: u32, policy: RoundingPolicy) -> Notional {
         let product = self.0 * qty.0;
@@ -232,6 +269,31 @@ mod tests {
         let json = serde_json::to_string(&price).unwrap();
         assert_eq!(json, "\"12345.6789\"");
         assert_eq!(serde_json::from_str::<Price>(&json).unwrap(), price);
+    }
+
+    #[test]
+    fn deserialize_rejects_negative_price_and_qty() {
+        // The serde boundary must not bypass the non-negative invariant.
+        assert!(serde_json::from_str::<Price>("\"-5.0\"").is_err());
+        assert!(serde_json::from_str::<Qty>("\"-0.0001\"").is_err());
+        // Valid values still round-trip.
+        assert_eq!(
+            serde_json::from_str::<Price>("\"5.0\"").unwrap(),
+            Price::new(dec("5.0")).unwrap()
+        );
+    }
+
+    #[test]
+    fn checked_add_and_sub_return_none_on_overflow() {
+        let max = Notional::new(Decimal::MAX);
+        assert!(max.checked_add(Notional::new(Decimal::ONE)).is_none());
+        let min = Notional::new(Decimal::MIN);
+        assert!(min.checked_sub(Notional::new(Decimal::ONE)).is_none());
+        // In-range arithmetic still succeeds.
+        assert_eq!(
+            Notional::new(dec("2")).checked_add(Notional::new(dec("3"))),
+            Some(Notional::new(dec("5")))
+        );
     }
 
     // Generate non-negative decimals with scale <= 8 so products stay exact (scale <= 16 <= 28).

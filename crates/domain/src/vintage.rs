@@ -9,9 +9,19 @@ use crate::DomainError;
 /// A 64-character lowercase-hex SHA-256 digest.
 ///
 /// This is the shape of `qe_config::Config::content_hash` and `qe_determinism::Lineage::id`; one
-/// type gives the information firewall a single, validated audit key.
+/// type gives the information firewall a single, validated audit key. Deserialisation re-validates
+/// (via [`TryFrom<String>`]), so a malformed digest cannot enter the audit trail through serde.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String")]
 pub struct VintageHash(String);
+
+impl TryFrom<String> for VintageHash {
+    type Error = DomainError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        VintageHash::new(value)
+    }
+}
 
 impl VintageHash {
     /// Validate a 64-char lowercase-hex digest.
@@ -73,5 +83,17 @@ mod tests {
         assert!(VintageHash::new(upper).is_err());
         let non_hex = "g".repeat(64);
         assert!(VintageHash::new(non_hex).is_err());
+    }
+
+    #[test]
+    fn deserialize_rejects_malformed_digest() {
+        assert!(serde_json::from_str::<VintageHash>("\"xyz\"").is_err());
+        let valid_json = format!("\"{VALID}\"");
+        assert_eq!(
+            serde_json::from_str::<VintageHash>(&valid_json)
+                .unwrap()
+                .as_str(),
+            VALID
+        );
     }
 }

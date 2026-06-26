@@ -9,9 +9,20 @@ use crate::DomainError;
 /// A canonical instrument symbol, e.g. `BTCUSDT`.
 ///
 /// Stored upper-cased and validated as non-empty ASCII alphanumeric, so the same instrument always
-/// has the same id regardless of input casing.
+/// has the same id regardless of input casing. Deserialisation runs the same validation +
+/// canonicalisation (via [`TryFrom<String>`]), so an un-canonical or malformed symbol cannot enter
+/// through serde and silently break Eq/Hash-keyed lookups.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String")]
 pub struct InstrumentId(String);
+
+impl TryFrom<String> for InstrumentId {
+    type Error = DomainError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        InstrumentId::new(value)
+    }
+}
 
 impl InstrumentId {
     /// Validate and canonicalise (upper-case) a symbol.
@@ -94,5 +105,18 @@ mod tests {
     fn venue_round_trips_via_str() {
         assert_eq!(Venue::BinanceUsdtPerp.as_str(), "binance-usdt-perp");
         assert_eq!(Venue::BinanceUsdtPerp.to_string(), "binance-usdt-perp");
+    }
+
+    #[test]
+    fn deserialize_validates_and_canonicalises() {
+        // Malformed symbol is rejected at the serde boundary.
+        assert!(serde_json::from_str::<InstrumentId>("\"btc-usdt\"").is_err());
+        assert!(serde_json::from_str::<InstrumentId>("\"\"").is_err());
+        // Lowercase input deserialises to the canonical uppercase id.
+        let id = serde_json::from_str::<InstrumentId>("\"btcusdt\"").unwrap();
+        assert_eq!(id, InstrumentId::new("BTCUSDT").unwrap());
+        // Round-trip of a canonical id is stable.
+        let json = serde_json::to_string(&id).unwrap();
+        assert_eq!(json, "\"BTCUSDT\"");
     }
 }
