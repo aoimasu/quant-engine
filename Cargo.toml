@@ -1,0 +1,34 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "proprietary"
+rust-version = "1.96"
+repository = "https://github.com/aoimasu/quant-engine"
+
+[workspace.dependencies]
+# Shared third-party versions; member crates opt in with `dep.workspace = true`.
+serde_json = "1"
+
+# Internal crates (path deps) — referenced by member crates as `qe-domain.workspace = true`.
+qe-domain = { path = "crates/domain" }
+qe-signal = { path = "crates/signal" }
+qe-storage = { path = "crates/storage" }
+qe-ingest = { path = "crates/ingest" }
+qe-wfo = { path = "crates/wfo" }
+qe-ensemble = { path = "crates/ensemble" }
+qe-venue = { path = "crates/venue" }
+qe-runtime = { path = "crates/runtime" }
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
