@@ -1,0 +1,37 @@
+# Example quant-engine configuration — copy to `config.toml` or pass with `--config`.
+#
+# Every setting here is overridable by a `QE_`-prefixed environment variable (nested with `__`),
+# e.g. `QE_DETERMINISM__SEED=7`. All persistent-state directories are RELATIVE and volume-friendly —
+# no absolute paths — so the same config runs locally and in a container with mounted volumes.
+
+profile = "train"
+
+# Flat universe (count-agnostic). For point-in-time membership use the [[universe]] table below;
+# when it is present it takes precedence over this list.
+instruments = ["BTCUSDT", "ETHUSDT"]
+
+# Point-in-time universe: listing/delisting dates are respected so a backtest as-of some date only
+# sees instruments tradable then (no survivorship bias). `delisted` omitted = still trading.
+[[universe]]
+instrument = "BTCUSDT"
+listed = "2019-09-08"
+
+[[universe]]
+instrument = "ETHUSDT"
+listed = "2019-11-27"
+
+[bars]
+base = "5m"
+reconstructed = ["30m", "4h"]
+
+[history]
+max_available = true
+
+# All persistent state lives under these configurable, volume-friendly directories.
+[storage]
+market_dir = "data/lmdb/market"
+synthetic_dir = "data/lmdb/synthetic"
+artifacts_dir = "data/artifacts"
+
+[determinism]
+seed = 42

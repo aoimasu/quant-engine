@@ -10,7 +10,15 @@ publish.workspace = true
 [lints]
 workspace = true
 
+# The user-facing binary is `qe` (the package/lib is `qe-cli`/`qe_cli`); the Dockerfile and docs
+# invoke `qe`.
+[[bin]]
+name = "qe"
+path = "src/main.rs"
+
 [dependencies]
+qe-config.workspace = true
+qe-determinism.workspace = true
 qe-domain.workspace = true
 qe-signal.workspace = true
 qe-storage.workspace = true
@@ -19,6 +27,9 @@ qe-wfo.workspace = true
 qe-ensemble.workspace = true
 qe-venue.workspace = true
 qe-runtime.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
-serde_json.workspace = true
+tempfile.workspace = true

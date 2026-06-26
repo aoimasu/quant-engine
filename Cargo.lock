@@ -907,6 +907,8 @@ dependencies = [
 name = "qe-cli"
 version = "0.1.0"
 dependencies = [
+ "qe-config",
+ "qe-determinism",
  "qe-domain",
  "qe-ensemble",
  "qe-ingest",
@@ -915,7 +917,10 @@ dependencies = [
  "qe-storage",
  "qe-venue",
  "qe-wfo",
+ "serde",
  "serde_json",
+ "tempfile",
+ "thiserror",
 ]
 
 [[package]]
