@@ -1,0 +1,23 @@
+[package]
+name = "qe-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+qe-domain.workspace = true
+qe-signal.workspace = true
+qe-storage.workspace = true
+qe-ingest.workspace = true
+qe-wfo.workspace = true
+qe-ensemble.workspace = true
+qe-venue.workspace = true
+qe-runtime.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
