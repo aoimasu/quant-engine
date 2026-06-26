@@ -41,6 +41,7 @@ qe-error = { path = "crates/error" }
 qe-config = { path = "crates/config" }
 qe-determinism = { path = "crates/determinism" }
 qe-clock = { path = "crates/clock" }
+qe-risk = { path = "crates/risk" }
 qe-telemetry = { path = "crates/telemetry" }
 qe-signal = { path = "crates/signal" }
 qe-storage = { path = "crates/storage" }

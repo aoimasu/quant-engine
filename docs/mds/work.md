@@ -16,115 +16,128 @@ approved block is archived to `docs/mds/reviewed/<ticket>.md` and removed from h
 - QE-005 — CI pipeline — PR #5 — Approved & merged.
 - QE-006 — Determinism & reproducibility harness — PR #6 — Approved & merged.
 - QE-007 — Shared domain types — PR #7 — Approved & merged.
+- QE-008 — Clock-skew / time-sync guard — PR #8 — Approved & merged.
 
 ---
 
-## QE-008 — Clock-skew / time-sync guard — PR #8 — [Ready-for-review]
+## QE-009 — Risk-limit & kill-switch contract (shared types) — PR #9 — [Ready-for-review]
 
-- **Branch:** `qe-008/clock-skew-guard`
-- **PR:** https://github.com/aoimasu/quant-engine/pull/8
+- **Branch:** `qe-009/risk-kill-switch-contract`
+- **PR:** https://github.com/aoimasu/quant-engine/pull/9
 - **Latest commit:** (see `git rev-parse HEAD` on branch / PR head)
-- **Evidence/design:** `docs/architecture/qe-008-clock-skew-guard-design.md`
-- **Changed surface:** new crate `crates/clock` (`src/{lib,skew}.rs`, `tests/logging.rs`,
-  `Cargo.toml`); root `Cargo.toml` (+`qe-clock` path dep). Also bundles the QE-007 archive
-  (`docs/mds/reviewed/qe-007.md`) — branch protection blocks direct `main` pushes.
+- **Evidence/design:** `docs/architecture/qe-009-risk-kill-switch-contract-design.md`
+- **Changed surface:** new crate `crates/risk` (`src/{lib,limit,kill,gate}.rs`, `Cargo.toml`);
+  `qe-runtime` now depends on `qe-risk` and defines `OrderPort: qe_risk::OrderGate`
+  (`crates/runtime/src/lib.rs`, `tests/order_port_conformance.rs`, `Cargo.toml`); root `Cargo.toml`
+  (+`qe-risk` path dep). Also bundles the QE-008 archive (`docs/mds/reviewed/qe-008.md`) — branch
+  protection blocks direct `main` pushes.
 
 ### Acceptance criteria (copied from backlog)
-- [x] Simulated skew beyond threshold triggers a halt, not a silent continue.
-      _(`check` returns `Err(QeError::fatal)` whose `disposition == Halt` — verified; boundary is
-      strict (equal=in-sync) both signs; `evaluate` is panic-free. Layer-appropriate: QE-009 consumes
-      the Halt disposition.)_
-- [x] Skew is logged with the correlation fields and exposed as health state.
-      _(`record_skew` logs all four correlation fields + `skew_ms` + `health` (WARN on breach), proven
-      by a non-trivial JSON-capture test; `ClockHealth` is also exposed as typed serializable state on
-      `SkewReading`, not just logged.)_
+- [x] The contract compiles and is referenced by the runtime crates' interfaces.
+      _(Genuine: `OrderPort: qe_risk::OrderGate` is a real supertrait bound — being an `OrderPort`
+      compile-time-requires holding a `KillHandle`; the runtime conformance test exercises a
+      runtime-layer port.)_
+- [x] A conformance test asserts any order-submitting component must accept a kill handle.
+      _(Literal "accept a handle" met — `kill_handle()` is a required method. BUT the conformance
+      check doesn't verify the component **honours** the kill on its `admit` path — see Feedback #1,
+      a demonstrated hole for a kill-switch contract.)_
 
 ### Verification (re-run locally — all green)
 - `cargo fmt --all --check` — ok
 - `cargo clippy --workspace --all-targets --locked -- -D warnings` — clean
-- `cargo test --workspace --locked` — `qe-clock` 7 unit + 1 integration tests pass; workspace green
+- `cargo test --workspace --locked` — `qe-risk` 10 unit tests + `qe-runtime` conformance test pass; workspace green
 - `cargo deny check` — advisories/bans/licenses/sources ok
 
 Key AC-proving tests:
-- **AC #1 (breach → halt, not silent continue)** — `check_returns_fatal_halt_on_breach`
-  (simulated skew → `Err` whose `qe_error::disposition == Disposition::Halt`); `check_ok_within_threshold`;
-  `breach_beyond_threshold_both_signs` + `in_sync_at_and_below_threshold_both_signs` (boundary at
-  `threshold` vs `threshold+1`, both signs); `evaluate_does_not_panic_on_extreme_opposite_instants`.
-- **AC #2 (logged with correlation fields + health)** — `tests/logging.rs::record_skew_emits_correlation_and_health`
-  captures the JSON log line and asserts `run_id`/`vintage_hash`/`instrument`/`window_id`/`skew_ms`/
-  `health="skewed"` and WARN level on breach.
+- **AC #1 (compiles + referenced by runtime interface)** — `qe-runtime` depends on `qe-risk` and
+  defines `OrderPort: qe_risk::OrderGate`; `crates/runtime/tests/order_port_conformance.rs` builds a
+  sample `OrderPort` *constructed with* a `KillHandle` and runs the conformance check (workspace build
+  + that test prove the reference compiles and is honoured).
+- **AC #2 (must accept a kill handle)** — `qe_risk::assert_honours_kill_switch` is exercised in both
+  `qe-risk` (`gate::tests::sample_gate_passes_conformance`) and `qe-runtime`. The `OrderGate` trait
+  makes holding a `KillHandle` a compile-time requirement; the conformance fn asserts the semantics
+  (untripped admits; tripped → `FlattenAndHalt` + `Halt` disposition).
 
 ### Design notes for the reviewer
-- The hard halt is expressed as QE-004's `QeError::fatal` (→ `Disposition::Halt`), the same channel
-  QE-009's concrete kill switch will consume — no new halt path invented. `SkewGuard` is pure: it
-  judges injected `(local, reference)` `Timestamp` samples, so "simulated skew" is trivially testable;
-  fetching reference time (NTP/venue) is a later integration ticket.
-- `ClockHealth { InSync, Skewed }` is the health signal surfaced to the cockpit (QE-304).
-- `qe-clock` deps (qe-domain/qe-error/qe-telemetry) are all foundational → QE-001 topology guard green.
+- **Contract, not enforcement** (limit-checking maths is QE-215/216). This ships: `LimitKind` + the
+  per-kind `LimitOutcome` policy (`default_outcome`), validated `Leverage`/`Fraction` caps (serde
+  rejection too — QE-007 lesson), `RiskLimits`, the out-of-band latching `KillHandle`/`KillSwitch`,
+  and the `OrderGate` contract with a reusable conformance check.
+- A tripped kill / `Halt`-outcome limit → Fatal `QeError` (`disposition == Halt`), same channel as
+  QE-008. `KillHandle` is `Arc`-shared (clones observe the same trip), latching, `SeqCst`.
+- `qe-risk` deps (qe-domain/qe-error/rust_decimal) and the `qe-runtime → qe-risk` edge add no
+  forbidden runtime↔training dependency → QE-001 topology guard green.
 
 ### Review notes
 
-**Verdict: [Approved]** — both acceptance criteria genuinely met and the adversarial focus areas all
-check out. Clean, pure, well-tested guard with honest layering. A few non-blocking advisories below.
+**Verdict: [Reviewed]** — strong contract crate: the kill switch is concurrency-sound, the serde
+discipline correctly applies the QE-007 lesson, the per-kind outcome policy is sensible, and the
+runtime reference is genuine. Holding short of approval for **one demonstrated hole in the AC #2
+conformance check** — for a kill-switch contract it matters that "conformance" actually proves the
+order path honours the kill, and right now it doesn't.
 
-**Independent re-verification (branch `qe-008/clock-skew-guard`):**
+**Independent re-verification (branch `qe-009/risk-kill-switch-contract`):**
 - `cargo fmt --all --check` clean · `cargo clippy --workspace --all-targets --locked -- -D warnings`
-  clean · `cargo test --workspace --locked` **94 passed, 1 ignored** (qe-clock 8: 7 unit + 1
-  integration) · `cargo deny check` ok · QE-001 `dependency_topology` guard green (foundational deps
-  only).
+  clean · `cargo test --workspace --locked` **107 passed, 1 ignored** (qe-risk 10 + runtime
+  conformance) · `cargo deny check` ok · QE-001 topology guard green (`qe-runtime → qe-risk` adds no
+  forbidden runtime↔training edge).
 
-**Focus area 1 — AC #1 (breach → halt):**
-- **Halt is a real halt, at the right layer.** `check` returns `Err(QeError::fatal(…))` and the test
-  asserts `disposition(&err) == Disposition::Halt`. Expressing the halt as QE-004's Fatal→Halt
-  disposition (which QE-009's kill switch will consume) is a *legitimate* satisfaction of "triggers a
-  halt," not under-delivery: QE-008 is the detector and QE-009 (a later ticket) is the enforcer, and
-  the contract (`disposition == Halt`) is tested so QE-009 can rely on it. An `Err` can't be silently
-  continued past without explicitly discarding it.
-- **Boundary is correct.** Breach is **strictly** `|skew| > threshold`; equal = in sync — tested at
-  `threshold` (in sync) and `threshold+1` (breach) for **both** signs.
-- **`evaluate` is genuinely panic-free.** `saturating_sub` + `unsigned_abs` avoid the overflow/`abs()`
-  panics. `evaluate_does_not_panic_on_extreme_opposite_instants` (`i64::MIN` vs `i64::MAX`) *really*
-  exercises the path: it passes under `cargo test`'s **debug** profile where integer overflow panics,
-  so a naive `-`/`abs()` would have aborted the test — the test is meaningful, not decorative. No
-  sign/threshold edge silently continues; saturation always errs toward `Skewed` (fail-safe).
+**Focus areas verified positively:**
+- **AC #1 — genuine, not cosmetic.** `pub trait OrderPort: qe_risk::OrderGate` is a real supertrait
+  bound: you cannot implement `OrderPort` without implementing `OrderGate`, whose required
+  `kill_handle()` forces holding a `KillHandle` at compile time. The runtime test builds a
+  `SamplePort` (a `qe_runtime::OrderPort`, not just a qe-risk gate), constructed *with* a handle, and
+  runs the conformance check — it exercises the runtime layer.
+- **Focus 3 — kill switch is concurrency-sound.** `trip` writes the reason **under the mutex** before
+  the `SeqCst` `tripped` store; any observer that sees `tripped == true` is forced to observe the
+  reason (it either blocks on the still-held reason mutex, or acquires-after-release). "First reason
+  wins" is deterministic (mutex-serialised, `if slot.is_none()`); latching is correct (nothing ever
+  resets `tripped`); out-of-band via `Arc`-shared clones. `KillHandle` is **not** `Serialize`/
+  `Deserialize`, so kill state can't be injected from untrusted data. No race found.
+- **Focus 4 — serde discipline clean (no QE-007 regression).** `Leverage`/`Fraction` have manual
+  `Serialize` (exact string) + validating `Deserialize` that calls `new` — verified `"-1"` leverage
+  and `"1.5"` fraction are rejected on deserialize. `RiskLimits`/`OrderIntent` compose only validated
+  types (the QE-007-round-2 `InstrumentId`/`Qty`/`Price` validate on deserialize). No bypassable
+  invariant. `default_outcome` (clamp sizing caps; reject portfolio/margin breaches; halt on
+  drawdown) is a sensible, conservative policy for a leveraged perp venue.
 
-**Focus area 2 — AC #2 (logged + health exposed):**
-- The JSON-capture test is **non-trivial**: it parses the real emitted JSON and asserts concrete
-  values (`run_id=run-42`, `vintage_hash=vh-abc`, `instrument=BTCUSDT`, `window_id=w7`, `skew_ms=5000`,
-  `health="skewed"`) **and** `level == "WARN"` — it fails if any field is dropped or the level is
-  wrong. Capturing via a local JSON subscriber + `with_default` (no process-global) is the sound,
-  isolated pattern (same as QE-003).
-- Health is **exposed as state, not just logged**: `SkewReading.health: ClockHealth` is a public,
-  `Serialize`/`Deserialize` field returned from `evaluate`/`check`, so the cockpit reads it as a typed
-  value.
+### Feedback
 
-**Focus area 3 — soundness / API split:** `evaluate` (always, pure) vs `record_skew` (always logs) vs
-`check`/`breach` (halt decision) is a clean separation. `Default` threshold `1000ms` is well-reasoned
-(mark price @1s, under a 5s recvWindow). `SkewGuard`'s threshold invariant can't be bypassed — the
-field is private, `new` rejects `≤ 0`, and `SkewGuard` is **not** `Deserialize` (so no QE-007-style
-serde bypass).
+1. **[Blocker — the AC #2 conformance check doesn't prove the order path honours the kill].**
+   `assert_honours_kill_switch` exercises only the **provided** `kill_precheck()` / `ensure_live()`
+   helpers (which are wired to the handle and trivially honour a trip) — it **never calls `admit`**.
+   So a component can implement `OrderGate`, hold a handle, pass conformance, and still submit orders
+   while the kill is tripped. I demonstrated this with a `BadGate` whose `admit` returns
+   `Admission::Admit` unconditionally: it **passes `assert_honours_kill_switch`**, yet `admit(intent)`
+   returns `Admit` even after the handle is tripped. The "Implementations must call `kill_precheck`
+   first" rule is only a doc comment — exactly the convention-vs-enforcement trap QE-007 taught this
+   team to close. For a P0 kill-switch contract this is the property that matters most. **Fix (either,
+   ideally both):**
+   - Strengthen `assert_honours_kill_switch` to also assert the admission path: after the internal
+     `trip`, call `gate.admit(&intent)` and require `Admission::FlattenAndHalt(_)` (the fn can take a
+     representative `OrderIntent`, or the trait can expose a no-op intent for conformance).
+   - Structurally guarantee it: give `OrderGate::admit` a **default** impl that does `kill_precheck`
+     first and delegates the limit decision to a new required method (e.g. `admit_within_limits`), so
+     a gate can't accidentally (or silently) skip the kill check. Then "admit honours the kill" is a
+     compile-time/structural property, not a convention — and the conformance check has teeth.
 
-**Non-blocking advisory notes (no action required):**
-1. **`check` halts but does not log.** The full "log *and* halt" path requires
-   `evaluate → record_skew → breach`; the convenience `check` performs only the halt decision and
-   discards the `SkewReading` on breach (skew detail survives in the error message). When QE-009 wires
-   the kill path, a `check`-only call site would halt **without** logging the breach — worth either
-   having `check` also emit the event, or documenting prominently that `record_skew` must accompany it.
-2. The design's "the split *guarantees* a breach is never a silent continue" is slightly overstated —
-   the guard *provides* the non-silent path (`Err(Fatal)`/`breach()`), but can't force a caller that
-   only calls `evaluate` and ignores the result. Wording.
-3. The logging test covers only the breach (WARN) path; the in-sync (INFO) branch of `record_skew` is
-   symmetric but untested. Optional to add.
+   _(AC #2's literal text "must **accept** a kill handle" is met — `kill_handle()` is required — so the
+   box is ticked; but the conformance check is the AC's deliverable and currently gives false
+   assurance, which is why this blocks approval rather than being a nit.)_
 
-### Post-approval follow-up (coder) — commit `89df6a6`; status → [Ready-for-review]
+### Round 2 — coder response (commit `9d2945e`); status → [Ready-for-review]
 
-Resolved the three non-blocking advisories; re-requesting one confirmation pass.
-- **Advisory #1 (check halts but doesn't log) — DONE.** Added `SkewGuard::check_and_log(local,
-  reference, &Correlation)` — the one-call log-and-halt path (`evaluate → record_skew → breach`) the
-  runtime/kill site (QE-009) should use, so a breach is logged *and* routed to halt together. `check`'s
-  doc now prominently states it does not log and points to `check_and_log`.
-- **Advisory #2 (wording) — DONE.** Design note no longer says the split "guarantees" non-silence; it
-  "provides" the non-silent path (`Err(Fatal)`/`breach()`), which a caller must not discard.
-- **Advisory #3 (in-sync INFO path untested) — DONE.** Added `record_skew_in_sync_logs_at_info_with_health`
-  (INFO level + `health="in_sync"` + skew/correlation fields) and `check_and_log_matches_check_decision`.
-- Gates green: fmt/clippy clean; `qe-clock` now 8 unit + 2 integration; deny ok.
+**Feedback #1 (Blocker — conformance didn't prove `admit` honours the kill) — FIXED, both ways the
+reviewer suggested.**
+- **Structural guarantee:** `OrderGate::admit` is now a **provided default** that calls
+  `kill_precheck()` first and only then delegates to a new **required** `admit_within_limits(intent)`.
+  Implementors write their limit/sizing decision in `admit_within_limits`; they cannot accidentally or
+  silently skip the kill check, because the default `admit` always applies it. (Overriding `admit` is
+  possible but an explicit, visible act — and the conformance check re-proves any override.)
+- **Stronger conformance:** `assert_honours_kill_switch` now also calls `gate.admit(&intent)` after
+  tripping and requires `Admission::FlattenAndHalt` — exercising the real order-submission path, not
+  just the `kill_precheck`/`ensure_live` helpers. The reviewer's `BadGate` (an `admit` that returns
+  `Admit` unconditionally) would now fail this check; and a gate that only implements
+  `admit_within_limits` can't bypass the kill at all.
+- Sample impls (`SampleGate` in qe-risk, `SamplePort` in qe-runtime) updated to `admit_within_limits`.
+- Gates green: fmt/clippy clean; `qe-risk` 10 + `qe-runtime` conformance; deny ok; topology guard green.

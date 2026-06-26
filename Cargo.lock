@@ -707,13 +707,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "qe-risk"
+version = "0.1.0"
+dependencies = [
+ "qe-domain",
+ "qe-error",
+ "rust_decimal",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "qe-runtime"
 version = "0.1.0"
 dependencies = [
  "qe-domain",
+ "qe-risk",
  "qe-signal",
  "qe-storage",
  "qe-venue",
+ "rust_decimal",
 ]
 
 [[package]]
