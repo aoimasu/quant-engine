@@ -57,7 +57,33 @@ pub fn bar_prefix(instrument: &InstrumentId, resolution: Resolution) -> Vec<u8> 
     k
 }
 
-/// Recover the timestamp from any key produced here (its trailing 8 bytes).
+/// Unambiguous key for an indicator-state cache entry:
+/// `u16(len sym) ‖ sym ‖ [resolution] ‖ u16(len id) ‖ id ‖ u32(lookback) ‖ order(time)`.
+///
+/// Components are length-prefixed (`u16`, no truncation for any realistic symbol/id) so they can't
+/// collide — this key is used for exact lookups, not prefix range scans.
+pub fn indicator_key(
+    instrument: &InstrumentId,
+    resolution: Resolution,
+    indicator_id: &str,
+    lookback: u32,
+    time: Timestamp,
+) -> Vec<u8> {
+    let sym = instrument.as_str().as_bytes();
+    let id = indicator_id.as_bytes();
+    let mut k = Vec::with_capacity(2 + sym.len() + 1 + 2 + id.len() + 4 + 8);
+    k.extend_from_slice(&(sym.len() as u16).to_be_bytes());
+    k.extend_from_slice(sym);
+    k.push(resolution_ordinal(resolution));
+    k.extend_from_slice(&(id.len() as u16).to_be_bytes());
+    k.extend_from_slice(id);
+    k.extend_from_slice(&lookback.to_be_bytes());
+    k.extend_from_slice(&order_i64(time.millis()));
+    k
+}
+
+/// Recover the timestamp from a key whose **trailing 8 bytes** are an `order(time)` (the series and
+/// bar keys; `indicator_key` also ends this way).
 pub fn time_from_key(key: &[u8]) -> Timestamp {
     let n = key.len();
     let mut tail = [0u8; 8];

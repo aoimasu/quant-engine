@@ -1,16 +1,20 @@
 //! qe-storage — embedded storage for the quant engine.
 //!
-//! QE-010 fills this with [`MarketStore`], an LMDB-backed store for the fused market corpus:
-//! OHLCVT bars, funding rates, premium/spread-to-underlier, and futures metrics, keyed by
-//! instrument (+ resolution for bars) + time, with chronological range scans and a versioned schema.
-//! (Synthetic/indicator cache is QE-011.)
+//! - QE-010: [`MarketStore`] — the fused market corpus (OHLCVT bars, funding, premium/spread-to-
+//!   underlier, futures metrics), keyed by instrument (+ resolution for bars) + time, with
+//!   chronological range scans and a versioned schema.
+//! - QE-011: [`SyntheticStore`] — derived artefacts (indicator-state cache + multi-resolution bars),
+//!   each tagged with its source lineage so stale entries are detected and evictable.
 
+mod engine;
 pub mod key;
 pub mod records;
 pub mod store;
+pub mod synthetic;
 
 pub use records::{FuturesMetrics, PremiumSample};
 pub use store::{MarketStore, DEFAULT_MAP_SIZE};
+pub use synthetic::{IndicatorKey, SyntheticStore, SYNTHETIC_SCHEMA_VERSION};
 
 use thiserror::Error;
 

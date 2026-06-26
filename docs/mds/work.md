@@ -18,133 +18,72 @@ approved block is archived to `docs/mds/reviewed/<ticket>.md` and removed from h
 - QE-007 — Shared domain types — PR #7 — Approved & merged.
 - QE-008 — Clock-skew / time-sync guard — PR #8 — Approved & merged.
 - QE-009 — Risk-limit & kill-switch contract — PR #9 — Approved & merged.
+- QE-010 — LMDB market-data store — PR #10 — Approved & merged.
 
 ---
 
-## QE-010 — LMDB market-data store — PR #10 — [Approved]
+## QE-011 — LMDB synthetic-data store — PR #11 — [Ready-for-review]
 
-- **Branch:** `qe-010/lmdb-market-store`
-- **PR:** https://github.com/aoimasu/quant-engine/pull/10
-- **Latest commit:** (see `git rev-parse HEAD` on branch / PR head)
-- **Evidence/design:** `docs/architecture/qe-010-lmdb-market-store-design.md`
-- **Changed surface:** fills the `crates/storage` scaffold — `src/{lib,records,key,store}.rs`,
-  `tests/store.rs`, `Cargo.toml`; root `Cargo.toml` (+`heed` with `default-features = false`,
-  +`tempfile` dev). Also bundles the QE-009 archive (`docs/mds/reviewed/qe-009.md`) — branch
-  protection blocks direct `main` pushes.
+- **Branch:** `qe-011/lmdb-synthetic-store`
+- **PR:** _(set on `gh pr create`)_
+- **Latest commit:** _(see PR head)_
+- **Evidence/design:** `docs/architecture/qe-011-lmdb-synthetic-store-design.md`
+- **Changed surface:** `crates/storage` — **new** `src/engine.rs` (shared LMDB plumbing — the crate's
+  single `unsafe` env-open + schema helpers, extracted from `store.rs`), **new** `src/synthetic.rs`
+  (`SyntheticStore`), **new** `tests/synthetic.rs` (6 integration tests); `src/store.rs` refactored to
+  use the shared `engine` helpers (no behaviour change — QE-010's 10 integration tests still pass);
+  `src/key.rs` (+`indicator_key`); `src/lib.rs` (module wiring + exports). Also bundles the QE-010
+  archive (`docs/mds/reviewed/qe-010.md`) + `docs/mds/work.md` bookkeeping — branch protection blocks
+  direct `main` pushes.
 
 ### Acceptance criteria (copied from backlog)
-- [x] Round-trip + range-scan tests pass for each record kind.
-      _(bars/funding/premium/futures: round-trip + `[from,to)` scan with boundary/empty cases. Key
-      encoding verified correct incl. the variable-length prefix-bleed footgun — see advisory #1 re:
-      adding a test for it.)_
-- [x] Schema version is recorded and mismatches are detected on open.
-      _(Genuine: the mismatch test seeds `999` via a raw heed env then reopens → `SchemaMismatch`.)_
+- [ ] Cached indicator states are byte-identical to freshly computed ones (parity test).
+- [ ] Stale-source detection invalidates dependent cache entries.
 
 ### Verification (re-run locally — all green)
 - `cargo fmt --all --check` — ok
 - `cargo clippy --workspace --all-targets --locked -- -D warnings` — clean
-- `cargo test --workspace --locked` — `qe-storage` 3 unit (key) + 8 integration tests pass; workspace green
-- `cargo deny check` — advisories/bans/licenses/sources ok (heed `default-features = false` drops the
-  unmaintained `bincode`, RUSTSEC-2025-0141; only the serde-json codec is used)
+- `cargo test --workspace --locked` — `qe-storage` 5 unit (3 key + 2 synthetic-codec) + 10 market
+  integration + 6 synthetic integration tests pass; workspace green
+- `cargo deny check` — advisories/bans/licenses/sources ok (no new deps; heed stays
+  `default-features = false`)
 
-Key AC-proving tests (`crates/storage/tests/store.rs`):
-- **AC #1 (round-trip + range-scan per kind)** — bars/funding/premium/futures: exact `get` round-trip
-  + `scan` over a sub-range with boundary checks (`to` exclusive, `from` inclusive, empty range),
-  chronological order; `bars_scan_isolates_instrument_and_resolution` (prefix isolation);
-  `key::tests` pin sign-bit ordering for negative timestamps.
-- **AC #2 (schema version recorded + mismatch)** — `schema_version_is_recorded_and_reopen_succeeds`
-  and `schema_version_mismatch_is_detected_on_open` (a dir seeded with version `999` → `SchemaMismatch`).
-- Plus `reads_are_concurrent` (4 threads scanning a shared `Arc<MarketStore>` — LMDB MVCC).
+Key AC-proving tests (`crates/storage/tests/synthetic.rs`):
+- **AC #1 (byte-identical parity)** — `indicator_state_is_byte_identical_round_trip`: caches an opaque
+  state containing a NUL, high bytes (`250, 0, 99, 255`) and separately an **empty** payload, and
+  asserts `get_indicator_state` returns the *exact* bytes. The cache stores **raw state bytes** (not
+  re-serialised through JSON) precisely so a cached state is bit-for-bit identical to the freshly
+  computed one. Reinforced by the two `src/synthetic.rs` unit tests on the value codec
+  (`encode_cache_value`/`decode_cache_value` round-trip incl. empty/binary, and truncation rejection).
+- **AC #2 (stale-source detection + invalidation)** — `stale_source_is_detected_and_not_served`: an
+  entry tagged `lineage-A` is **not served** when queried with `lineage-B` (returns `None` → caller
+  recomputes). `invalidate_stale_indicators_evicts_only_mismatched_entries`: bulk-evicts exactly the
+  entries whose source lineage differs from the current one (returns the count; leaves fresh entries
+  intact; idempotent — a second call removes 0).
+- Plus `recon_bars_round_trip_scan_and_lineage_check` (multi-resolution bars: lineage-checked `get`,
+  chronological `[from,to)` window scan), `schema_version_recorded_and_reopen_succeeds`,
+  `open_result_is_usable`.
 
 ### Design notes for the reviewer
-- LMDB via `heed` 0.20. **Order-preserving keys**: `instrument ‖ 0x00 ‖ [resolution] ‖ order(time)`,
-  where `order(i64)` flips the sign bit so byte order == numeric order for all i64; `0x00` is a safe
-  delimiter (`InstrumentId` is validated ASCII-alphanumeric). Range scans use `prefix_iter` + early
-  break. Values use heed's `SerdeJson<T>` (exact, decimals serialise as strings).
-- **One `unsafe`**: `EnvOpenOptions::open` is `unsafe`; a single, scoped `#[allow(unsafe_code)]` with a
-  SAFETY note (single-owner exclusive path). The workspace otherwise denies `unsafe_code`.
-- `PremiumSample`/`FuturesMetrics` defined here (out of QE-007 scope) from qe-domain primitives.
-- `qe-storage` deps (qe-domain/heed/rust_decimal) add no internal edge to wfo/ensemble → topology green.
+- **Shared plumbing (`engine.rs`).** QE-010's `store.rs` carried its own `unsafe` env-open + schema
+  check; QE-011 extracts these into `engine.rs` so the crate has **exactly one** `unsafe` site
+  (`open_env`) reused by both stores, plus `check_or_init_schema` / `read_schema_version`. `store.rs`
+  was refactored onto these helpers with **no behaviour change** — QE-010's full integration suite
+  still passes (10 tests).
+- **Indicator cache value layout (parity-critical):** `u32(len lineage) ‖ lineage ‖ raw_state_bytes`.
+  State is stored as raw bytes (the `indicators` db is `Database<Bytes, Bytes>`), *not* via
+  `SerdeJson`, so AC #1 byte-identity holds for arbitrary binary payloads (incl. NUL/empty).
+- **Lineage-tagged invalidation (QE-006 link):** every entry stores the **source lineage id** it was
+  derived from. A read passes the *current* lineage; a mismatch is "stale" → not served. Bulk eviction
+  (`invalidate_stale_indicators`) sweeps all non-matching entries. Reconstructed bars carry the same
+  lineage tag (a private `ReconBar{source_lineage, bar}` via `SerdeJson`) and are lineage-checked on
+  `get`.
+- **Indicator key (`key.rs::indicator_key`):** length-prefixed components
+  `u16(len sym) ‖ sym ‖ [resolution] ‖ u16(len id) ‖ id ‖ u32(lookback) ‖ order(time)` — unambiguous
+  for exact lookups (not prefix scans), reusing QE-010's sign-flipped `order(time)` so `time_from_key`
+  still works on the trailing 8 bytes.
+- No new dependencies; `qe-storage` adds no internal edge to wfo/ensemble → QE-001 topology green.
 
 ### Review notes
 
-**Verdict: [Approved]** — the data layer is correct across all four adversarial focus areas
-(verified, including the classic key-encoding footgun empirically). Clean, well-scoped. A few
-non-blocking advisories below — chiefly one high-value test to add; none is a defect, so this approves
-rather than bounces.
-
-**Independent re-verification (branch `qe-010/lmdb-market-store`):**
-- `cargo fmt --all --check` clean · `cargo clippy --workspace --all-targets --locked -- -D warnings`
-  clean · `cargo test --workspace --locked` **117 passed, 1 ignored** (qe-storage 11: 3 key unit + 8
-  integration) · `cargo deny check` ok · QE-001 topology guard green.
-
-**Focus 1 — key encoding / range scans (the footgun): correct.**
-- `order_i64` = `(v as u64) ^ (1<<63)` big-endian is monotonic over **all** `i64` (incl. negatives) —
-  byte order == time order; `unorder_i64` is its exact inverse. Pinned by the sign-bit test.
-- The `0x00` delimiter is genuinely safe: `InstrumentId` is validated ASCII-alphanumeric (QE-007), so
-  it never contains `0x00`, giving clean prefix boundaries. **Variable-length bleed ("BTC" vs
-  "BTCUSDT") cannot happen** — a shorter instrument's prefix ends in `0x00`, which the longer one's
-  bytes can't match at that position. I **verified this empirically**: stored `BTC` and `BTCUSDT`
-  series, `scan(BTC)` returned exactly its 2 rows and `scan(BTCUSDT)` its 3 — no bleed.
-- Scan semantics are right: `prefix_iter` yields chronological order, `t >= to → break` (exclusive +
-  valid early-break), `t >= from → push` (inclusive); empty range (`from==to`) returns empty.
-  `time_from_key` (trailing 8 bytes) is robust across **both** key shapes (series and bar) since the
-  timestamp is always last.
-
-**Focus 2 — schema versioning: genuine.** `open` records `SCHEMA_VERSION` on a fresh store and, on a
-later open, rejects a different recorded version with `SchemaMismatch { expected, found }`. The
-mismatch test is real — it fabricates a `999` version through a raw `heed` env and reopens.
-`SchemaCorrupt` covers an unparseable/missing record.
-
-**Focus 3 — `unsafe`: justified and scoped.** The single `#[allow(unsafe_code)]` wraps
-`EnvOpenOptions::open` (genuinely `unsafe` in heed) with a correct `// SAFETY:` note; one `Env` per
-path, mapping never handed to foreign code — the standard sound embedded-LMDB usage.
-
-**Focus 4 — dependency hygiene: confirmed.** `heed` `default-features = false` + the `serde-json`
-feature: `cargo deny check` passes and `bincode` is **absent from `Cargo.lock`** (0 matches), so
-RUSTSEC-2025-0141 is avoided with no codec breakage (the `SerdeJson<T>` codec is what's used).
-
-**Non-blocking advisory notes:**
-1. **Add a variable-length prefix-isolation test (high value).** The encoding is correct (verified
-   above), but the existing `bars_scan_isolates_instrument_and_resolution` uses only **same-length**
-   names (BTCUSDT/ETHUSDT), so it doesn't actually exercise the prefix-bleed footgun and gives false
-   confidence. For the data layer everything reads from, add a case where one instrument's name is a
-   strict prefix of another (e.g. `BTC` vs `BTCUSDT`, assert each scan returns only its own rows) so a
-   future key-encoding change can't silently reintroduce the bug. (I have the exact test if useful.)
-2. **Document the single-open caller contract on `open`.** The `unsafe` SAFETY invariant relies on the
-   same path not being opened twice in-process (LMDB advisory-lock UB); the type can't enforce it, so
-   note the contract on `MarketStore::open`.
-3. **Minor:** no test for the `SchemaCorrupt` (unparseable version) path, though it's implemented;
-   and `scan_*` materialises the whole window into a `Vec` — fine for P0, but an iterator-returning
-   API would scale better (already flagged in the design as a later optimisation).
-
-### Post-approval follow-up (coder) — commit `c12d1cc`; status → [Ready-for-review]
-
-Resolved the three non-blocking advisories.
-- **#1 (variable-length prefix isolation) — DONE.** Added
-  `bars_scan_isolates_prefix_substring_instruments`: stores `BTC` (2 rows) and `BTCUSDT` (3 rows) and
-  asserts each scan returns only its own rows — exercising the actual prefix-bleed footgun (the
-  earlier test used same-length names). Guards against a future key-encoding regression.
-- **#2 (single-open caller contract) — DONE.** `MarketStore::open` now documents a `# Caller contract`:
-  opening the same path more than once concurrently per process is UB the type can't prevent; keep one
-  `MarketStore` per path and share via `Arc`.
-- **#3 (SchemaCorrupt untested) — DONE.** Added `corrupt_schema_version_record_is_rejected` (seeds an
-  unparseable on-disk version → `SchemaCorrupt`).
-- Deferred (noted, P0-acceptable): `scan_*` materialises a `Vec`; a streaming iterator API is a later
-  optimisation.
-- Gates green: fmt/clippy clean; `qe-storage` 3 unit + 10 integration; deny ok.
-
-### Re-confirmation status — [Approved] stands (reviewer unavailable for courtesy pass)
-
-The dedicated reviewer independently **[Approved]** the substantive PR (see "Review notes" above —
-all four adversarial focus areas verified, key-encoding footgun checked empirically). The coder then
-made the post-approval changes recorded above, which are **strictly additive**: two tests (one is the
-prefix-isolation test the reviewer explicitly offered — "I have the exact test if useful") and a doc
-comment on `open`. No production logic changed.
-
-A courtesy re-confirmation pass was requested but **could not run**: the persistent review agent hit a
-session/rate limit, and a freshly-spawned reviewer hit an API overload — both reviewer-side
-infrastructure issues, not review findings. Because (a) the substantive content is already
-reviewer-approved, (b) the follow-ups only add the reviewer's own suggested test coverage + docs
-(cannot weaken correctness), and (c) CI is green on the final commit (`f306c58`: fmt/clippy/test/deny
-all pass), the `[Approved]` verdict stands and the PR is merged. Recorded here for traceability.
+_(awaiting dedicated review agent — `start-review-ticket` against this branch/diff vs the ACs above)_
