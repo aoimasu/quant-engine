@@ -25,8 +25,8 @@ approved block is archived to `docs/mds/reviewed/<ticket>.md` and removed from h
 ## QE-011 — LMDB synthetic-data store — PR #11 — [Ready-for-review]
 
 - **Branch:** `qe-011/lmdb-synthetic-store`
-- **PR:** _(set on `gh pr create`)_
-- **Latest commit:** _(see PR head)_
+- **PR:** https://github.com/aoimasu/quant-engine/pull/11
+- **Latest commit:** `39de9a6`
 - **Evidence/design:** `docs/architecture/qe-011-lmdb-synthetic-store-design.md`
 - **Changed surface:** `crates/storage` — **new** `src/engine.rs` (shared LMDB plumbing — the crate's
   single `unsafe` env-open + schema helpers, extracted from `store.rs`), **new** `src/synthetic.rs`
