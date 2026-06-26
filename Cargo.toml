@@ -1,6 +1,9 @@
 [workspace]
 resolver = "2"
 members = ["crates/*"]
+# Lint-proof fixture crate (deliberately contains an `unwrap()` in a deny(unwrap_used) module);
+# excluded so it is not built by the workspace — only invoked via `cargo clippy` from a test.
+exclude = ["crates/error/tests/fixtures/hotpath_violation"]
 
 [workspace.package]
 version = "0.1.0"
@@ -22,6 +25,7 @@ tracing-appender = "0.2"
 
 # Internal crates (path deps) — referenced by member crates as `qe-domain.workspace = true`.
 qe-domain = { path = "crates/domain" }
+qe-error = { path = "crates/error" }
 qe-config = { path = "crates/config" }
 qe-telemetry = { path = "crates/telemetry" }
 qe-signal = { path = "crates/signal" }
