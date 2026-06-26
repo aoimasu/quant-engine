@@ -25,17 +25,23 @@ layered and its hash recorded into vintage lineage.
 
 ### New crate `qe-config` (`crates/config`)
 
-Cross-cutting infra like `domain`/`signal`; depends only on `qe-domain`. Adding it under
-`crates/*` is picked up by the workspace glob; it does not affect the decoupling invariant
-(no path to `wfo`/`ensemble`/`runtime`-only crates). The QE-001 topology guard still holds.
+Cross-cutting infra like `domain`/`signal`. It declares **no internal-crate dependencies yet**
+(it has no domain types to reference); QE-007/QE-012 will reintroduce `qe-domain` when config
+adopts shared instrument/resolution newtypes. Adding the crate under `crates/*` is picked up by
+the workspace glob and does not affect the decoupling invariant (no path to
+`wfo`/`ensemble`/`runtime`-only crates). The QE-001 topology guard still holds.
 
 ### Layering & loading
 
-- Use **figment** (`toml` + `env` providers): merge a base TOML file, then a profile-specific
-  TOML (optional), then `QE_`-prefixed environment overrides (nested via `__`). This satisfies
-  "layered (file + env override)".
-- `Config::load(profile, base_path)` returns `Result<Config, ConfigError>`; env always wins.
-- A `Config::from_toml_str` path for tests (no filesystem).
+- Use **figment** (`toml` + `env` providers): merge a base TOML file, then an optional
+  **profile overlay** file `<stem>.<profile>.<ext>` next to the base (e.g.
+  `config.runtime-sim.toml`), then `QE_`-prefixed environment overrides (nested via `__`).
+- `Config::load(profile, base_path) -> Result<Config, ConfigError>`. Precedence: base < overlay <
+  env. The **requested profile is forced** onto the resolved config (authoritative over file
+  contents), so `train` / `runtime-sim` / `runtime-live` are genuinely separate configurations —
+  this is how the "separate profiles" Scope item is satisfied. A missing overlay is skipped.
+- A `Config::from_toml_str` path for tests/embedding (single source, no filesystem; parses the
+  `profile` field from content).
 
 ### Schema (representative, extensible)
 
@@ -52,10 +58,12 @@ Later tickets extend this; QE-002 ships a real-but-minimal schema exercising eve
 
 A `validate(&self) -> Result<(), ConfigError>` with **field-path** errors, e.g.
 `ConfigError::Invalid { field: "bars.base", message: "unknown resolution '5x'" }`. Checks:
-- `instruments` non-empty;
-- `bars.base` is a known resolution; every `bars.reconstructed` is a known resolution strictly
-  coarser than `base`;
-- `history`: if `!max_available` then `start` must be set;
+- `instruments` non-empty, every element non-blank, no duplicates (`instruments[i]`);
+- `bars.base` is a known resolution; every `bars.reconstructed[i]` is a known resolution strictly
+  coarser than `base`, with no duplicates;
+- `history`: if `!max_available` then `start` must be set; if `start` is present it must be an
+  ISO `YYYY-MM-DD` date (format + range check — full calendar validation is deferred to the shared
+  time type in QE-007);
 - storage dirs non-empty.
 Loading calls `validate()` so invalid config fails fast at load.
 

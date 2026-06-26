@@ -10,7 +10,8 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
-qe-domain.workspace = true
+# No internal-crate deps yet. QE-007/QE-012 will reintroduce qe-domain once config references
+# shared newtypes (instrument/resolution), which will also tighten validation.
 serde.workspace = true
 serde_json.workspace = true
 figment.workspace = true

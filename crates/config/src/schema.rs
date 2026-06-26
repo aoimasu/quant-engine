@@ -18,6 +18,18 @@ pub enum Profile {
     RuntimeLive,
 }
 
+impl Profile {
+    /// Kebab-case string form, matching the serde representation and overlay-file suffix.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Profile::Train => "train",
+            Profile::RuntimeSim => "runtime-sim",
+            Profile::RuntimeLive => "runtime-live",
+        }
+    }
+}
+
 /// Multi-resolution bar settings: a base resolution plus coarser reconstructions.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BarsConfig {

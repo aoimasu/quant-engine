@@ -1,8 +1,10 @@
 //! qe-config — typed, layered, reproducible configuration.
 //!
-//! Loading merges, in increasing precedence: a base TOML file, then `QE_`-prefixed environment
-//! overrides (nested via `__`). The resolved [`Config`] is validated at load (fail-fast with
-//! field-level errors) and exposes a stable [`Config::content_hash`] for vintage lineage.
+//! Loading merges, in increasing precedence: a base TOML file, an optional profile overlay file
+//! (`<stem>.<profile>.<ext>` next to the base), then `QE_`-prefixed environment overrides (nested
+//! via `__`). The requested profile is authoritative over whatever the files contain. The resolved
+//! [`Config`] is validated at load (fail-fast with field-level errors) and exposes a stable
+//! [`Config::content_hash`] for vintage lineage.
 
 mod error;
 mod schema;
@@ -16,20 +18,30 @@ use figment::{
 };
 use schema::resolution_minutes;
 use sha2::{Digest, Sha256};
-use std::path::Path;
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 
 impl Config {
-    /// Load config from a base TOML file plus `QE_`-prefixed environment overrides, then validate.
+    /// Load config for a given profile: base TOML file, then an optional `<stem>.<profile>.<ext>`
+    /// overlay next to it, then `QE_`-prefixed environment overrides; finally validate.
+    ///
+    /// The requested `profile` is forced onto the resolved config (authoritative over file
+    /// contents), so `train`/`runtime-sim`/`runtime-live` are genuinely separate configurations.
+    /// A missing overlay file is simply skipped.
     ///
     /// # Errors
     /// Returns [`ConfigError::Load`] if sources cannot be read/parsed, or [`ConfigError::Invalid`]
     /// if a field fails validation.
-    pub fn load(base_path: &Path) -> Result<Self, ConfigError> {
-        let cfg: Self = Figment::new()
-            .merge(Toml::file(base_path))
+    pub fn load(profile: Profile, base_path: &Path) -> Result<Self, ConfigError> {
+        let mut fig = Figment::new().merge(Toml::file(base_path));
+        if let Some(overlay) = profile_overlay_path(base_path, profile) {
+            fig = fig.merge(Toml::file(overlay));
+        }
+        let mut cfg: Self = fig
             .merge(Env::prefixed("QE_").split("__"))
             .extract()
             .map_err(|e| ConfigError::Load(e.to_string()))?;
+        cfg.profile = profile; // requested profile wins over file contents
         cfg.validate()?;
         Ok(cfg)
     }
@@ -68,6 +80,16 @@ impl Config {
         if self.instruments.is_empty() {
             return Err(invalid("instruments", "must list at least one instrument"));
         }
+        let mut seen_instruments = BTreeSet::new();
+        for (i, sym) in self.instruments.iter().enumerate() {
+            let field = format!("instruments[{i}]");
+            if sym.trim().is_empty() {
+                return Err(invalid(&field, "must not be blank"));
+            }
+            if !seen_instruments.insert(sym) {
+                return Err(invalid(&field, &format!("duplicate instrument '{sym}'")));
+            }
+        }
 
         let base = resolution_minutes(&self.bars.base).ok_or_else(|| {
             invalid(
@@ -75,6 +97,7 @@ impl Config {
                 &format!("unknown resolution '{}'", self.bars.base),
             )
         })?;
+        let mut seen_res = BTreeSet::new();
         for (i, r) in self.bars.reconstructed.iter().enumerate() {
             let field = format!("bars.reconstructed[{i}]");
             let m = resolution_minutes(r)
@@ -88,13 +111,25 @@ impl Config {
                     ),
                 ));
             }
+            if !seen_res.insert(r) {
+                return Err(invalid(&field, &format!("duplicate resolution '{r}'")));
+            }
         }
 
-        if !self.history.max_available && self.history.start.is_none() {
-            return Err(invalid(
-                "history.start",
-                "required when `max_available = false`",
-            ));
+        match &self.history.start {
+            None if !self.history.max_available => {
+                return Err(invalid(
+                    "history.start",
+                    "required when `max_available = false`",
+                ));
+            }
+            Some(start) if !is_iso_date(start) => {
+                return Err(invalid(
+                    "history.start",
+                    &format!("'{start}' is not an ISO `YYYY-MM-DD` date"),
+                ));
+            }
+            _ => {}
         }
 
         for (field, val) in [
@@ -109,6 +144,33 @@ impl Config {
 
         Ok(())
     }
+}
+
+/// Path to the optional profile overlay file: `<dir>/<stem>.<profile>.<ext>` next to `base_path`.
+fn profile_overlay_path(base_path: &Path, profile: Profile) -> Option<PathBuf> {
+    let stem = base_path.file_stem()?.to_str()?;
+    let ext = base_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("toml");
+    let parent = base_path.parent().unwrap_or_else(|| Path::new(""));
+    Some(parent.join(format!("{stem}.{}.{ext}", profile.as_str())))
+}
+
+/// Lightweight `YYYY-MM-DD` format + range check. Full calendar validation (leap years, real
+/// `Date` type) is deferred to the shared time type in QE-007.
+fn is_iso_date(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' {
+        return false;
+    }
+    let all_digits = |slice: &str| !slice.is_empty() && slice.bytes().all(|c| c.is_ascii_digit());
+    if !(all_digits(&s[0..4]) && all_digits(&s[5..7]) && all_digits(&s[8..10])) {
+        return false;
+    }
+    let month: u8 = s[5..7].parse().unwrap_or(0);
+    let day: u8 = s[8..10].parse().unwrap_or(0);
+    (1..=12).contains(&month) && (1..=31).contains(&day)
 }
 
 fn invalid(field: &str, message: &str) -> ConfigError {
@@ -215,5 +277,68 @@ seed = 42
         let toml = format!("{VALID}\n[history]\nmax_available = false\n");
         let err = Config::from_toml_str(&toml).unwrap_err();
         assert!(matches!(err, ConfigError::Invalid { field, .. } if field == "history.start"));
+    }
+
+    #[test]
+    fn rejects_malformed_start_date() {
+        let toml = format!("{VALID}\n[history]\nmax_available = false\nstart = \"banana\"\n");
+        let err = Config::from_toml_str(&toml).unwrap_err();
+        assert!(matches!(err, ConfigError::Invalid { field, .. } if field == "history.start"));
+    }
+
+    #[test]
+    fn accepts_valid_start_date() {
+        let toml = format!("{VALID}\n[history]\nmax_available = false\nstart = \"2019-09-08\"\n");
+        let cfg = Config::from_toml_str(&toml).expect("valid ISO date accepted");
+        assert_eq!(cfg.history.start.as_deref(), Some("2019-09-08"));
+    }
+
+    #[test]
+    fn rejects_blank_instrument() {
+        let toml = VALID.replace(
+            r#"instruments = ["BTCUSDT", "ETHUSDT"]"#,
+            r#"instruments = ["BTCUSDT", ""]"#,
+        );
+        let err = Config::from_toml_str(&toml).unwrap_err();
+        assert!(matches!(err, ConfigError::Invalid { field, .. } if field == "instruments[1]"));
+    }
+
+    #[test]
+    fn rejects_duplicate_instruments() {
+        let toml = VALID.replace(
+            r#"instruments = ["BTCUSDT", "ETHUSDT"]"#,
+            r#"instruments = ["BTCUSDT", "BTCUSDT"]"#,
+        );
+        let err = Config::from_toml_str(&toml).unwrap_err();
+        match err {
+            ConfigError::Invalid { field, message } => {
+                assert_eq!(field, "instruments[1]");
+                assert!(message.contains("duplicate"), "msg: {message}");
+            }
+            other => panic!("expected Invalid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_duplicate_reconstructed() {
+        let toml = VALID.replace(
+            r#"reconstructed = ["30m", "4h"]"#,
+            r#"reconstructed = ["30m", "30m"]"#,
+        );
+        let err = Config::from_toml_str(&toml).unwrap_err();
+        assert!(
+            matches!(err, ConfigError::Invalid { field, .. } if field == "bars.reconstructed[1]")
+        );
+    }
+
+    #[test]
+    fn iso_date_helper_edges() {
+        assert!(is_iso_date("2020-01-01"));
+        assert!(is_iso_date("2019-12-31"));
+        assert!(!is_iso_date("2020-13-01")); // month out of range
+        assert!(!is_iso_date("2020-01-32")); // day out of range
+        assert!(!is_iso_date("2020-1-1")); // wrong width
+        assert!(!is_iso_date("2020/01/01")); // wrong separators
+        assert!(!is_iso_date("banana"));
     }
 }
