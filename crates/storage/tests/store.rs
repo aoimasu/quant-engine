@@ -101,6 +101,47 @@ fn bars_scan_isolates_instrument_and_resolution() {
 }
 
 #[test]
+fn bars_scan_isolates_prefix_substring_instruments() {
+    // The footgun: one instrument's name is a strict prefix of another's. The 0x00 delimiter must
+    // keep "BTC" rows out of a "BTCUSDT" scan and vice-versa (and across funding too).
+    let dir = tempfile::tempdir().unwrap();
+    let store = open(dir.path());
+    let short = inst("BTC");
+    let long = inst("BTCUSDT");
+    store
+        .put_bars(
+            &short,
+            &[bar(Resolution::M5, 100, 100), bar(Resolution::M5, 200, 101)],
+        )
+        .unwrap();
+    store
+        .put_bars(
+            &long,
+            &[
+                bar(Resolution::M5, 100, 200),
+                bar(Resolution::M5, 200, 201),
+                bar(Resolution::M5, 300, 202),
+            ],
+        )
+        .unwrap();
+
+    let s = store
+        .scan_bars(&short, Resolution::M5, at(0), at(10_000))
+        .unwrap();
+    let l = store
+        .scan_bars(&long, Resolution::M5, at(0), at(10_000))
+        .unwrap();
+    assert_eq!(s.len(), 2, "BTC scan must not bleed into BTCUSDT rows");
+    assert_eq!(l.len(), 3, "BTCUSDT scan must not bleed into BTC rows");
+    assert!(s
+        .iter()
+        .all(|b| b.open() == price(100) || b.open() == price(101)));
+    assert!(l
+        .iter()
+        .all(|b| b.open().get() >= rust_decimal::Decimal::from(200)));
+}
+
+#[test]
 fn funding_round_trip_and_scan() {
     let dir = tempfile::tempdir().unwrap();
     let store = open(dir.path());
@@ -203,6 +244,34 @@ fn schema_version_mismatch_is_detected_on_open() {
         }
         Err(e) => panic!("expected SchemaMismatch, got error {e:?}"),
         Ok(_) => panic!("expected SchemaMismatch, but open succeeded"),
+    }
+}
+
+#[test]
+fn corrupt_schema_version_record_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        // SAFETY: same single-owner invariant as MarketStore::open — one exclusive env, dropped
+        // before re-opening. Seeds an unparseable version to exercise the SchemaCorrupt path.
+        #[allow(unsafe_code)]
+        let env = unsafe {
+            EnvOpenOptions::new()
+                .map_size(MAP_SIZE)
+                .max_dbs(8)
+                .open(dir.path())
+                .unwrap()
+        };
+        let mut wtxn = env.write_txn().unwrap();
+        let meta: Database<Str, Str> = env.create_database(&mut wtxn, Some("meta")).unwrap();
+        meta.put(&mut wtxn, "schema_version", "not-a-number")
+            .unwrap();
+        wtxn.commit().unwrap();
+        drop(env);
+    }
+    match MarketStore::open(dir.path(), MAP_SIZE) {
+        Err(StorageError::SchemaCorrupt(s)) => assert_eq!(s, "not-a-number"),
+        Err(e) => panic!("expected SchemaCorrupt, got {e:?}"),
+        Ok(_) => panic!("expected SchemaCorrupt, but open succeeded"),
     }
 }
 

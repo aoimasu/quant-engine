@@ -42,6 +42,12 @@ impl MarketStore {
     /// Records [`SCHEMA_VERSION`] on first open; on a later open, a different recorded version is
     /// rejected with [`StorageError::SchemaMismatch`].
     ///
+    /// # Caller contract
+    /// LMDB maps the file into the process; opening the **same `path` more than once concurrently**
+    /// (a second `MarketStore`, or any other `Env`, in this process) is undefined behaviour that the
+    /// type system cannot prevent. Keep a single `MarketStore` per path and share it (`Arc`) — it is
+    /// `Send + Sync` and supports concurrent reads.
+    ///
     /// # Errors
     /// [`StorageError`] on I/O, an LMDB failure, or a schema-version mismatch.
     pub fn open(path: impl AsRef<Path>, map_size: usize) -> Result<Self, StorageError> {

@@ -21,7 +21,7 @@ approved block is archived to `docs/mds/reviewed/<ticket>.md` and removed from h
 
 ---
 
-## QE-010 — LMDB market-data store — PR #10 — [Ready-for-review]
+## QE-010 — LMDB market-data store — PR #10 — [Approved]
 
 - **Branch:** `qe-010/lmdb-market-store`
 - **PR:** https://github.com/aoimasu/quant-engine/pull/10
@@ -33,8 +33,12 @@ approved block is archived to `docs/mds/reviewed/<ticket>.md` and removed from h
   protection blocks direct `main` pushes.
 
 ### Acceptance criteria (copied from backlog)
-- [ ] Round-trip + range-scan tests pass for each record kind.
-- [ ] Schema version is recorded and mismatches are detected on open.
+- [x] Round-trip + range-scan tests pass for each record kind.
+      _(bars/funding/premium/futures: round-trip + `[from,to)` scan with boundary/empty cases. Key
+      encoding verified correct incl. the variable-length prefix-bleed footgun — see advisory #1 re:
+      adding a test for it.)_
+- [x] Schema version is recorded and mismatches are detected on open.
+      _(Genuine: the mismatch test seeds `999` via a raw heed env then reopens → `SchemaMismatch`.)_
 
 ### Verification (re-run locally — all green)
 - `cargo fmt --all --check` — ok
@@ -61,3 +65,55 @@ Key AC-proving tests (`crates/storage/tests/store.rs`):
   SAFETY note (single-owner exclusive path). The workspace otherwise denies `unsafe_code`.
 - `PremiumSample`/`FuturesMetrics` defined here (out of QE-007 scope) from qe-domain primitives.
 - `qe-storage` deps (qe-domain/heed/rust_decimal) add no internal edge to wfo/ensemble → topology green.
+
+### Review notes
+
+**Verdict: [Approved]** — the data layer is correct across all four adversarial focus areas
+(verified, including the classic key-encoding footgun empirically). Clean, well-scoped. A few
+non-blocking advisories below — chiefly one high-value test to add; none is a defect, so this approves
+rather than bounces.
+
+**Independent re-verification (branch `qe-010/lmdb-market-store`):**
+- `cargo fmt --all --check` clean · `cargo clippy --workspace --all-targets --locked -- -D warnings`
+  clean · `cargo test --workspace --locked` **117 passed, 1 ignored** (qe-storage 11: 3 key unit + 8
+  integration) · `cargo deny check` ok · QE-001 topology guard green.
+
+**Focus 1 — key encoding / range scans (the footgun): correct.**
+- `order_i64` = `(v as u64) ^ (1<<63)` big-endian is monotonic over **all** `i64` (incl. negatives) —
+  byte order == time order; `unorder_i64` is its exact inverse. Pinned by the sign-bit test.
+- The `0x00` delimiter is genuinely safe: `InstrumentId` is validated ASCII-alphanumeric (QE-007), so
+  it never contains `0x00`, giving clean prefix boundaries. **Variable-length bleed ("BTC" vs
+  "BTCUSDT") cannot happen** — a shorter instrument's prefix ends in `0x00`, which the longer one's
+  bytes can't match at that position. I **verified this empirically**: stored `BTC` and `BTCUSDT`
+  series, `scan(BTC)` returned exactly its 2 rows and `scan(BTCUSDT)` its 3 — no bleed.
+- Scan semantics are right: `prefix_iter` yields chronological order, `t >= to → break` (exclusive +
+  valid early-break), `t >= from → push` (inclusive); empty range (`from==to`) returns empty.
+  `time_from_key` (trailing 8 bytes) is robust across **both** key shapes (series and bar) since the
+  timestamp is always last.
+
+**Focus 2 — schema versioning: genuine.** `open` records `SCHEMA_VERSION` on a fresh store and, on a
+later open, rejects a different recorded version with `SchemaMismatch { expected, found }`. The
+mismatch test is real — it fabricates a `999` version through a raw `heed` env and reopens.
+`SchemaCorrupt` covers an unparseable/missing record.
+
+**Focus 3 — `unsafe`: justified and scoped.** The single `#[allow(unsafe_code)]` wraps
+`EnvOpenOptions::open` (genuinely `unsafe` in heed) with a correct `// SAFETY:` note; one `Env` per
+path, mapping never handed to foreign code — the standard sound embedded-LMDB usage.
+
+**Focus 4 — dependency hygiene: confirmed.** `heed` `default-features = false` + the `serde-json`
+feature: `cargo deny check` passes and `bincode` is **absent from `Cargo.lock`** (0 matches), so
+RUSTSEC-2025-0141 is avoided with no codec breakage (the `SerdeJson<T>` codec is what's used).
+
+**Non-blocking advisory notes:**
+1. **Add a variable-length prefix-isolation test (high value).** The encoding is correct (verified
+   above), but the existing `bars_scan_isolates_instrument_and_resolution` uses only **same-length**
+   names (BTCUSDT/ETHUSDT), so it doesn't actually exercise the prefix-bleed footgun and gives false
+   confidence. For the data layer everything reads from, add a case where one instrument's name is a
+   strict prefix of another (e.g. `BTC` vs `BTCUSDT`, assert each scan returns only its own rows) so a
+   future key-encoding change can't silently reintroduce the bug. (I have the exact test if useful.)
+2. **Document the single-open caller contract on `open`.** The `unsafe` SAFETY invariant relies on the
+   same path not being opened twice in-process (LMDB advisory-lock UB); the type can't enforce it, so
+   note the contract on `MarketStore::open`.
+3. **Minor:** no test for the `SchemaCorrupt` (unparseable version) path, though it's implemented;
+   and `scan_*` materialises the whole window into a `Vec` — fine for P0, but an iterator-returning
+   API would scale better (already flagged in the design as a later optimisation).
