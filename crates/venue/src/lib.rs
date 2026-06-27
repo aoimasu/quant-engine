@@ -1,17 +1,20 @@
 //! qe-venue — venue connectivity and adapters.
 //!
-//! Scaffold crate established in QE-001; real APIs land in later tickets.
+//! QE-201 lands the venue-aware REST client: all REST ingress flows through a weighted rate-limit handler
+//! ([`ratelimit`]) that backs off rather than dropping under pressure, layered over an ephemeral cache
+//! ([`cache`]) for immutable closed-window historical responses and a [`RestTransport`](rest::RestTransport)
+//! network seam. Time and backoff go through the [`Clock`](clock::Clock) seam so the retry loop is
+//! deterministic in tests.
 
-/// Returns this crate's package name. Placeholder until later tickets add real APIs.
-#[must_use]
-pub fn crate_name() -> &'static str {
-    "qe-venue"
-}
+pub mod cache;
+pub mod clock;
+pub mod ratelimit;
+pub mod rest;
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn crate_name_is_set() {
-        assert_eq!(super::crate_name(), "qe-venue");
-    }
-}
+pub use cache::RestCache;
+pub use clock::{Clock, SystemClock};
+pub use ratelimit::{Acquire, RateLimiter};
+pub use rest::{RestError, RestResponse, RestTransport, VenueRequest, VenueRestClient};
+
+#[cfg(feature = "http")]
+pub use rest::HttpRestTransport;

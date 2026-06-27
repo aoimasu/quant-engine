@@ -10,5 +10,17 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = []
+# The concrete HTTP transport (ureq + native-tls). Default-off so the core crate — and CI's default
+# build/test — stays offline and dependency-light; the runtime binary enables it for live REST.
+http = ["dep:ureq"]
+
 [dependencies]
+# Timestamp / TimeInterval / InstrumentId for the request model and closed-window logic.
 qe-domain.workspace = true
+# Classified REST errors.
+thiserror.workspace = true
+# Optional blocking HTTP client for the real transport. native-tls (system TLS) avoids ring's
+# non-allowlisted OpenSSL licence; only compiled under the `http` feature (mirrors qe-ingest).
+ureq = { version = "2", default-features = false, features = ["native-tls"], optional = true }
