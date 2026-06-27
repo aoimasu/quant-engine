@@ -1154,6 +1154,7 @@ version = "0.1.0"
 dependencies = [
  "qe-config",
  "qe-domain",
+ "serde_json",
  "sha2",
  "tempfile",
  "thiserror",

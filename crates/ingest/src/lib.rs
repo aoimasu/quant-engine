@@ -12,23 +12,32 @@
 //! - [`downloader`] — the idempotent, resumable, checksum-verifying [`Downloader`].
 //! - [`checksum`] / [`drift`] — SHA-256 verification and CSV schema-drift detection.
 
+pub mod backfill;
 pub mod cache;
 pub mod checksum;
 pub mod downloader;
 pub mod drift;
 pub mod fetcher;
 pub mod plan;
+pub mod rest;
 pub mod source;
 
+pub use backfill::{BackfillRequest, BackfillResult, Backfiller, RetryPolicy};
 pub use cache::RawCache;
 pub use downloader::{Downloader, FileOutcome, SyncReport};
 pub use drift::{csv_header, detect_drift, DriftStatus, SchemaRegistry};
 pub use fetcher::{FetchError, Fetcher};
 pub use plan::enumerate_targets;
+pub use rest::{
+    parse_klines_json, PageRequest, RestEndpoint, RestError, RestSource, TimedRow,
+    DEFAULT_REST_BASE,
+};
 pub use source::{DataKind, Date, DumpFile, Period, YearMonth, DEFAULT_BASE_URL};
 
 #[cfg(feature = "http")]
 pub use fetcher::HttpFetcher;
+#[cfg(feature = "http")]
+pub use rest::HttpRestSource;
 
 use thiserror::Error;
 
@@ -57,6 +66,10 @@ pub enum IngestError {
     /// A ZIP archive could not be read (schema-drift header extraction).
     #[error("archive error: {0}")]
     Archive(String),
+
+    /// A REST backfill page failed fatally or exhausted the retry policy (QE-102).
+    #[error("rest backfill error: {0}")]
+    Rest(String),
 
     /// A filesystem error in the raw cache.
     #[error("io error at {path}: {source}")]
