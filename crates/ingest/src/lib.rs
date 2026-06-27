@@ -1,17 +1,71 @@
-//! qe-ingest — data ingestion and fusion.
+//! qe-ingest — external-source ingestion.
 //!
-//! Scaffold crate established in QE-001; real APIs land in later tickets.
+//! QE-101: the Binance public-dumps downloader. It fetches the bulk long-range history from
+//! `data.binance.vision` (klines, funding, premium-index, `/futures/data` metrics) for the
+//! configured point-in-time universe, **checksum-verified, idempotent, and resumable**, caching raw
+//! files locally and flagging cross-month schema drift.
+//!
+//! - [`source`] — the `data.binance.vision` layout ([`DumpFile`], [`DataKind`], [`Period`]).
+//! - [`plan`] — point-in-time target enumeration over the [`qe_config::Universe`].
+//! - [`fetcher`] — the byte-transport port ([`Fetcher`]); the real `HttpFetcher` is behind `http`.
+//! - [`cache`] — the local raw-file cache with digest sidecars.
+//! - [`downloader`] — the idempotent, resumable, checksum-verifying [`Downloader`].
+//! - [`checksum`] / [`drift`] — SHA-256 verification and CSV schema-drift detection.
 
-/// Returns this crate's package name. Placeholder until later tickets add real APIs.
-#[must_use]
-pub fn crate_name() -> &'static str {
-    "qe-ingest"
-}
+pub mod cache;
+pub mod checksum;
+pub mod downloader;
+pub mod drift;
+pub mod fetcher;
+pub mod plan;
+pub mod source;
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn crate_name_is_set() {
-        assert_eq!(super::crate_name(), "qe-ingest");
-    }
+pub use cache::RawCache;
+pub use downloader::{Downloader, FileOutcome, SyncReport};
+pub use drift::{csv_header, detect_drift, DriftStatus, SchemaRegistry};
+pub use fetcher::{FetchError, Fetcher};
+pub use plan::enumerate_targets;
+pub use source::{DataKind, Date, DumpFile, Period, YearMonth, DEFAULT_BASE_URL};
+
+#[cfg(feature = "http")]
+pub use fetcher::HttpFetcher;
+
+use thiserror::Error;
+
+/// Errors from the ingestion layer.
+#[derive(Debug, Error)]
+pub enum IngestError {
+    /// A resource was not found (HTTP 404).
+    #[error("not found: {0}")]
+    NotFound(String),
+
+    /// A transport-level failure fetching a URL.
+    #[error("transport error fetching {url}: {message}")]
+    Transport {
+        /// The URL that failed.
+        url: String,
+        /// The cause.
+        message: String,
+    },
+
+    /// A downloaded file's bytes did not match its `.CHECKSUM` after a re-fetch.
+    #[error("checksum mismatch for {0} (re-fetched, still corrupt)")]
+    ChecksumMismatch(String),
+
+    /// A `.CHECKSUM` sidecar held no parseable digest.
+    #[error("unparseable checksum sidecar: {0}")]
+    ChecksumUnparseable(String),
+
+    /// A ZIP archive could not be read (schema-drift header extraction).
+    #[error("archive error: {0}")]
+    Archive(String),
+
+    /// A filesystem error in the raw cache.
+    #[error("io error at {path}: {source}")]
+    Io {
+        /// The path being operated on.
+        path: String,
+        /// The underlying error.
+        source: std::io::Error,
+    },
 }

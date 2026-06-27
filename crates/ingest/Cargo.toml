@@ -10,6 +10,23 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = []
+# The concrete HTTP fetcher (ureq + native-tls). Default-off so the core crate — and CI's default
+# build/test — stays offline and dependency-light; the binary enables it for live downloads.
+http = ["dep:ureq"]
+
 [dependencies]
+# Raw-file caching only (no LMDB); fusion into qe-storage is QE-104.
+qe-config.workspace = true
 qe-domain.workspace = true
-qe-storage.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+# Pure-Rust ZIP (deflate only) for reading CSV headers out of Binance dump archives (schema drift).
+zip = { version = "2", default-features = false, features = ["deflate"] }
+# Optional blocking HTTP client for the real fetcher. native-tls (system TLS) avoids ring's
+# non-allowlisted OpenSSL licence; only compiled under the `http` feature.
+ureq = { version = "2", default-features = false, features = ["native-tls"], optional = true }
+
+[dev-dependencies]
+tempfile.workspace = true
