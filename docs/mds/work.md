@@ -28,8 +28,8 @@ approved block is archived to `docs/mds/reviewed/<ticket>.md` and removed from h
 ## QE-101 — Binance public-dumps downloader — PR #14 — [Ready-for-review]
 
 - **Branch:** `qe-101/binance-dumps-downloader`
-- **PR:** _(set on `gh pr create`)_
-- **Latest commit:** _(see PR head)_
+- **PR:** https://github.com/aoimasu/quant-engine/pull/14
+- **Latest commit:** `f6ad1bd`
 - **Evidence/design:** `docs/architecture/qe-101-binance-dumps-downloader-design.md`
 - **Changed surface:** `crates/ingest` — fills the scaffold: **new** `src/{source,checksum,fetcher,
   cache,downloader,drift,plan}.rs`, rewritten `src/lib.rs` (`IngestError` + re-exports), **new**
