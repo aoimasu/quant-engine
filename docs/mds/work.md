@@ -24,116 +24,58 @@ approved block is archived to `docs/mds/reviewed/<ticket>.md` and removed from h
 - QE-013 — Local run & deployment-agnostic packaging — PR #13 — Approved & merged. **(P0 complete)**
 - QE-101 — Binance public-dumps downloader — PR #14 — Approved & merged.
 - QE-102 — Venue REST month-to-date backfill client — PR #15 — Approved & merged.
+- QE-103 — Data-integrity & source reconciliation validation — PR #16 — Approved & merged.
 
 ---
 
-## QE-103 — Data-integrity & source reconciliation validation — PR #16 — [Ready-for-review]
+## QE-104 — Fusion, normalisation & Arrow serialisation — PR #17 — [Ready-for-review]
 
-- **Branch:** `qe-103/data-integrity-reconciliation`
-- **PR:** https://github.com/aoimasu/quant-engine/pull/16
-- **Latest commit:** _(post-approval advisory follow-up — see below)_
-- **Evidence/design:** `docs/architecture/qe-103-data-integrity-reconciliation-design.md`
-- **Changed surface:** `crates/ingest` — **new** `src/{integrity,fill,coverage,reconcile,quality}.rs`,
-  `src/lib.rs` (module wiring + exports), `Cargo.toml` (+`serde`). Pure logic, no network. Also
-  bundles the QE-102 archive (`docs/mds/reviewed/qe-102.md`) + `docs/mds/work.md` bookkeeping —
+- **Branch:** `qe-104/fusion-normalisation-arrow`
+- **PR:** https://github.com/aoimasu/quant-engine/pull/17
+- **Latest commit:** `bfb8d62`
+- **Evidence/design:** `docs/architecture/qe-104-fusion-normalisation-arrow-design.md`
+- **Changed surface:** `crates/ingest` — **new** `src/{canonical,derive,coalesce,fuse,arrow}.rs`,
+  `src/lib.rs` (module wiring + exports), `Cargo.toml` (+`rust_decimal`; new default-off `arrow`
+  feature = `arrow-array`/`arrow-schema`/`arrow-ipc`), `Cargo.lock`. Pure logic, no network. Also
+  bundles the QE-103 archive (`docs/mds/reviewed/qe-103.md`) + `docs/mds/work.md` bookkeeping —
   branch protection blocks direct `main` pushes.
 
 ### Acceptance criteria (copied from backlog)
-- [x] No silent forward-fill across a gap larger than the configured bound.
-- [x] A data-quality report is produced per vintage and fails the run on configured hard violations.
+- [x] Fusion is byte-reproducible for fixed inputs.
+- [x] Derived fields match hand-computed references on a fixture window.
 
-### Verification (re-run locally — all green)
+### Verification (run locally — all green)
 - `cargo fmt --all --check` — ok
 - `cargo clippy --workspace --all-targets --locked -- -D warnings` — clean (also
-  `cargo clippy -p qe-ingest --features http` — clean)
-- `cargo test --workspace --locked` — `qe-ingest` 55 unit (+22: integrity 5, fill 5, coverage 4,
-  reconcile 4, quality 4) + 2 integration; workspace green
-- `cargo deny check` — advisories/bans/licenses/sources ok (only new dep `serde`, workspace-provided)
+  `cargo clippy -p qe-ingest --features arrow --all-targets -- -D warnings` — clean)
+- `cargo test --workspace --locked` — **222 passed, 1 ignored**; `-p qe-ingest --features arrow`
+  — 78 passed (+3 arrow tests)
+- `cargo deny check` — advisories/bans/licenses/sources ok; also `cargo deny --all-features check`
+  ok (covers the optional arrow tree: all Apache-2.0/MIT, no chrono/zstd/lz4)
 
 Key AC-proving tests:
-- **AC #1 (no fill across a big gap)** — `fill::tests::gap_larger_than_bound_is_not_filled`: with
-  `max_gap = 2×interval`, only within-bound slots fill; the over-bound region is a **hole**, never
-  filled across. `gap_exactly_at_bound_fills` pins the boundary; `leading_missing_run_is_a_hole`
-  (nothing to carry forward → hole).
-- **AC #2 (report + hard-fail)** — `quality::tests::gap_beyond_bound_is_a_hard_violation`,
-  `duplicates_and_disorder_fail_when_disallowed`, `too_many_divergences_fail`: `evaluate(&policy)`
-  returns the configured hard violations (run fails); `clean_report_passes_and_round_trips_json`
-  proves a clean corpus passes and the report serialises to the per-vintage JSON artefact.
-- **Supporting:** `integrity` gap/dup/out-of-order; `coverage` expected/present/missing +
-  `flag_short_history` (funding/premium shorter history); `reconcile` value/missing divergence with
-  abs+rel tolerance.
+- **AC #1 (byte-reproducible)** — `fuse::tests::fuse_is_byte_reproducible_for_fixed_inputs` (two
+  `fuse()` runs → identical canonical JSON); `arrow::tests::ipc_bytes_are_byte_reproducible` (two
+  `corpus_to_ipc()` calls → identical Arrow IPC bytes). Columns are emitted in
+  `CanonicalSeries::ALL` order and the grid is fixed.
+- **AC #2 (derived fields vs hand-computed)** — `derive::tests::vwap_matches_hand_computed_reference`
+  (Σ(tᵢ·vᵢ)/Σvᵢ = 22.8 over a 3-bar fixture), `typical_price_is_exact_thirds`,
+  `price_factor_scales_ohlc_and_preserves_invariant`, `spread_is_signed_perp_minus_spot`.
+- **Supporting:** `coalesce` merge/dedup(last-wins)/sort; `fuse::align_fills_within_bound_and_holes_beyond`
+  (forward-fill within bound, holes beyond — ties to QE-103 AC #1, via `plan_fill`);
+  `spread_is_hole_where_spot_missing` (no leakage where the underlier is absent).
 
 ### Design notes for the reviewer
-- **Leakage-safe fill is structural:** `plan_fill` walks the expected grid and can only fill while the
-  consecutive-miss run stays `<= max_gap_ms`; beyond that the slots are emitted as `holes` and never
-  filled — directly answering the reviewer's "silent NaN/forward-fill creates leakage" concern.
-- **Report is the artefact + the gate:** `DataQualityReport` (serde `Serialize`) is the per-vintage
-  JSON; `evaluate(&HardViolationPolicy)` turns configured violations (over-bound gap, forbidden
-  duplicate/out-of-order, excess divergences) into a run-failing `Err`.
-- **Pure + value-agnostic:** integrity/fill/coverage operate on the bare timestamp grid; reconcile
-  uses `f64` tolerance (diagnostic, not money) — no new third-party deps, all offline-tested.
-- **Out of scope:** the fusion **output format** / Arrow (QE-104); wiring the report into the run
-  artefact is finalised with QE-104. **Topology:** stays within `qe-ingest`; QE-001 guard unaffected.
-
-### Review notes
-
-**Verdict: [Approved].** Reviewed strictly as architect + senior engineer against the full diff vs `main`
-(head `bd1b81b`) — read all five new modules and every test. Both ACs are met and **correct**; the crate
-stays pure/offline.
-
-**AC #1 — no silent fill across an over-bound gap (PASS).** The leakage-safety is **structural**:
-`plan_fill` updates `last_present` **only on a genuinely present slot** (never on a fill), so the fill
-distance `slot - src` is always measured from the last *real* sample and grows monotonically across a
-miss-run. The first slot with `slot - src > max_gap_ms` falls into the hole branch, and because
-`last_present` is unchanged every subsequent missing slot also exceeds the bound — a hole can only close
-on a real present slot, so **no fill can ever occur inside an over-bound region**. I traced
-`gap_larger_than_bound_is_not_filled` (filled = {1m,2m}, hole [3m,5m), nothing filled in the over-bound
-region), the inclusive boundary (`gap_exactly_at_bound_fills`), `leading_missing_run_is_a_hole`, and the
-`make_hole` accounting (`from` = first unfilled slot, `missing = (to-from)/interval`, no `-1`). All correct.
-
-**AC #2 — report + hard-fail (PASS).** `DataQualityReport` is `Serialize` with `to_json` (the per-vintage
-artefact); `evaluate(&HardViolationPolicy)` collects over-bound gaps (`span_ms() > max_gap_ms`, the strict
-complement of fill's inclusive `<=`), forbidden duplicates/out-of-order, and excess divergences into a
-`Vec<Violation>` — non-empty ⇒ `Err` ⇒ run fails. Defaults are sensibly conservative (structural
-dup/disorder always fail; gap/divergence tolerances opt-in). All four tests trace clean, incl. the JSON
-round-trip.
-
-**Supporting modules (correct).** `integrity::check_series` computes gaps on the **sorted-unique** view so
-a duplicate/out-of-order row can't fake a gap (verified `detects_duplicates`/`detects_out_of_order` show no
-phantom gap), while dup/order are flagged on raw arrival order. `coverage` derives expected/present/missing
-and flags strictly-shorter history (start-late/end-early). `reconcile::Tolerance::within` correctly encodes
-"diverge iff it exceeds **both** abs and rel" (`within = diff<=abs || diff<=rel·max`), with value/missing
-divergences over the union, ascending. Topology unchanged (only new dep `serde`, workspace-provided).
-
-**Verification caveat (transparency).** The Rust toolchain is absent from this review environment (no
-`cargo`/`rustc`/`rustup`), so I did not execute the gates. The verdict rests on full static review +
-hand-traced execution of every test (this is pure, deterministic logic, which traces cleanly on paper). I
-did not rely on the PR's "all green" claim; treat the reported gate results as developer-reported. Nothing
-in the review contradicts them.
-
-**Advisories (non-blocking — do not gate merge):**
-1. **`Gap` is reused by two producers with *different* `from_ms` semantics, and the field doc matches only
-   one.** In `integrity.rs`, `Gap.from_ms` = the last **present** timestamp before the gap (matching the
-   struct doc *"Last present timestamp before the gap"*). In `fill.rs::make_hole`, the same `Gap` is built
-   with `from_ms` = the first **missing** (unfilled) slot — contradicting that doc. Both compute `missing`
-   correctly and each module is internally consistent + tested, and crucially the two conventions never
-   collide inside QE-103 (`evaluate` reads only `integrity.gaps`, never `fill.holes`). But `FillPlan.holes`
-   is a serialized public type the **QE-104 fuser** will consume; a consumer trusting `Gap`'s documented
-   `from_ms` would misread fill holes by one interval and with the wrong present/missing sense. Recommend
-   **before QE-104 consumes holes**: either give fill its own `Hole` type, or unify the `from_ms` convention
-   and update the `Gap` field docs to describe both producers. Latent trap, not a current bug.
-2. **(Trivial) `duplicates` counts occurrences, not distinct values** — `[0,0,0]` yields `duplicates =
-   [0,0]` so `len() == 2`. Fine for the diagnostic detail string; noted only for precision.
-
-### Post-approval follow-up (coder) — advisories resolved; status → [Ready-for-review]
-
-Resolved both non-blocking advisories (strictly additive; no AC behaviour changed).
-- **#1 (shared `Gap` semantics trap before QE-104) — DONE.** `FillPlan.holes` is now a **distinct
-  `Hole` type** (not the reused `integrity::Gap`). `Hole.from_ms` is documented as the first
-  *unfilled* slot (inclusive) with `missing = (to-from)/interval`, vs `Gap.from_ms` = last present
-  sample — so the QE-104 fuser consuming `holes` can't confuse the two conventions. Exported as
-  `qe_ingest::Hole`.
-- **#2 (duplicates counts occurrences) — DONE (doc).** `SeriesIntegrity.duplicates` now documents
-  that it lists each duplicate *occurrence* (a thrice-seen timestamp appears twice).
-- Gates re-run green: fmt ok; clippy clean (default **and** `--features http`); `qe-ingest` 55 unit +
-  2 integration; deny unaffected.
+- **Fusion consumes the QE-103 fill plan, not its own re-derivation.** `align_onto_grid` calls
+  `plan_fill`; within-bound misses carry the last present value forward, over-bound/leading runs
+  become `Cell::Hole` (NaN). The distinct `Hole` type introduced in QE-103 is honoured — fusion
+  never confuses a fill-hole with an `integrity::Gap`.
+- **Canonical series set is owned by fusion** (`CanonicalSeries`), source-abstract: the QE-101/102
+  fetchers keep `DataKind`/REST endpoints and don't reference it.
+- **Exact money throughout** — derived fields are `rust_decimal` (never float). The Arrow column is
+  `Float64` (interchange only); the exact values live in `FusedCorpus`, which is the source of truth.
+- **Arrow gated behind a default-off `arrow` feature** (the `http` precedent): keeps CI's default
+  build + `cargo deny` dependency-light and green; the fusion *logic* is fully tested in the default
+  build, and the Arrow path is covered under the feature and verified `deny`-clean.
+- **Out of scope:** persistence into the LMDB market store (QE-105); indicators (QE-107).
+  **Topology:** all additions stay within `qe-ingest`; QE-001 guard unaffected.
