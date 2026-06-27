@@ -27,13 +27,16 @@ pub fn workspace_root() -> PathBuf {
 
 /// Parse a member crate's `Cargo.toml` text into `(package name, internal qe-* dependencies)`.
 ///
-/// Collects `qe-*` entries under `[dependencies]` and `[build-dependencies]` only — **dev-dependencies
-/// are excluded** (they compile for tests only and never enter a shipped data path, so they do not breach
-/// the production firewall). Matches the repo's uniform `qe-foo.workspace = true` style; an inline
-/// `qe-foo = { path = … }` is still captured (the `qe-` token is read up to `.`/space/`=`).
+/// Collects `qe-*` production dependencies — entries under `[dependencies]` / `[build-dependencies]`,
+/// their dependency-**table** forms (`[dependencies.qe-foo]`), and platform variants
+/// (`[target.'cfg(…)'.dependencies]` and `[target.'cfg(…)'.dependencies.qe-foo]`). **Dev-dependencies are
+/// excluded** in every form (they compile for tests only and never enter a shipped data path, so they do
+/// not breach the production firewall). Section headers are classified structurally (a quote-aware
+/// dotted-key parse), so the dependency-table / platform / inline forms are all caught — not just the
+/// repo's usual `qe-foo.workspace = true` lines.
 #[must_use]
 pub fn parse_manifest(text: &str) -> (Option<String>, BTreeSet<String>) {
-    let mut section = String::new();
+    let mut kind = SectionKind::Other;
     let mut name = None;
     let mut deps = BTreeSet::new();
     for raw in text.lines() {
@@ -42,22 +45,93 @@ pub fn parse_manifest(text: &str) -> (Option<String>, BTreeSet<String>) {
             continue;
         }
         if line.starts_with('[') {
-            section = line.to_string();
+            kind = classify_section(line);
+            // A `[dependencies.qe-foo]` table names the dependency in the header itself.
+            if let SectionKind::ProdDepTable(dep) = &kind {
+                if dep.starts_with("qe-") {
+                    deps.insert(dep.clone());
+                }
+            }
             continue;
         }
-        if section == "[package]" && line.starts_with("name") {
-            name = quoted_value(line);
-        }
-        let is_dep_section = section == "[dependencies]" || section == "[build-dependencies]";
-        if is_dep_section && line.starts_with("qe-") {
-            let dep: String = line
-                .chars()
-                .take_while(|c| *c != '.' && *c != ' ' && *c != '=' && *c != '\t')
-                .collect();
-            deps.insert(dep);
+        match kind {
+            SectionKind::Package if line.starts_with("name") => {
+                name = quoted_value(line);
+            }
+            SectionKind::ProdDeps if line.starts_with("qe-") => {
+                let dep: String = line
+                    .chars()
+                    .take_while(|c| *c != '.' && *c != ' ' && *c != '=' && *c != '\t')
+                    .collect();
+                deps.insert(dep);
+            }
+            _ => {}
         }
     }
     (name, deps)
+}
+
+/// The role of a `Cargo.toml` section for firewall parsing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SectionKind {
+    /// `[package]` — read the `name`.
+    Package,
+    /// `[dependencies]` / `[build-dependencies]` / `[target.*.dependencies]` — inner `qe-*` lines are deps.
+    ProdDeps,
+    /// `[dependencies.qe-foo]` / `[target.*.build-dependencies.qe-foo]` — the header names the dep.
+    ProdDepTable(String),
+    /// Anything else (incl. every `dev-dependencies` form — excluded from the production firewall).
+    Other,
+}
+
+/// Classify a `[section.header]` line. A section is a production-dependency section iff it contains a
+/// `dependencies` or `build-dependencies` path segment and **no** `dev-dependencies` segment; a segment
+/// after that names a dependency-table entry.
+fn classify_section(header: &str) -> SectionKind {
+    let inner = header.trim().trim_start_matches('[').trim_end_matches(']');
+    let segs = split_dotted_key(inner);
+    if segs.iter().any(|s| s == "package") {
+        return SectionKind::Package;
+    }
+    if segs.iter().any(|s| s == "dev-dependencies") {
+        return SectionKind::Other; // every dev-dependency form is excluded
+    }
+    if let Some(pos) = segs
+        .iter()
+        .position(|s| s == "dependencies" || s == "build-dependencies")
+    {
+        return match segs.get(pos + 1) {
+            Some(dep_name) => SectionKind::ProdDepTable(dep_name.clone()),
+            None => SectionKind::ProdDeps,
+        };
+    }
+    SectionKind::Other
+}
+
+/// Split a dotted TOML key into its segments, respecting single/double-quoted segments (so the dots
+/// inside a `target.'cfg(...)'` predicate do not split it). Quotes are stripped; segments trimmed.
+fn split_dotted_key(inner: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut quote: Option<char> = None;
+    for c in inner.chars() {
+        match quote {
+            Some(q) => {
+                if c == q {
+                    quote = None;
+                } else {
+                    cur.push(c);
+                }
+            }
+            None => match c {
+                '\'' | '"' => quote = Some(c),
+                '.' => out.push(std::mem::take(&mut cur)),
+                _ => cur.push(c),
+            },
+        }
+    }
+    out.push(cur);
+    out.iter().map(|s| s.trim().to_string()).collect()
 }
 
 /// Extract the first double-quoted value from a `key = "value"` line.
@@ -195,6 +269,59 @@ qe-ensemble.workspace = true
                 .iter()
                 .map(|s| s.to_string())
                 .collect()
+        );
+    }
+
+    #[test]
+    fn catches_dependency_table_and_platform_forms() {
+        // Regression for the pass-1 blocker: the dependency-TABLE form and platform deps are valid
+        // production dependencies cargo recognises, and must be caught — while their dev variants are not.
+        let toml = "\
+[package]
+name = \"qe-wfo\"
+
+[dependencies.qe-ensemble]
+workspace = true
+
+[build-dependencies.qe-vintage]
+workspace = true
+
+[target.'cfg(unix)'.dependencies]
+qe-runtime.workspace = true
+
+[target.'cfg(windows)'.dependencies.qe-venue]
+workspace = true
+
+[dev-dependencies.qe-validation]
+workspace = true
+
+[target.'cfg(unix)'.dev-dependencies]
+qe-storage.workspace = true
+";
+        let (_, deps) = parse_manifest(toml);
+        // All four production forms detected…
+        for expected in ["qe-ensemble", "qe-vintage", "qe-runtime", "qe-venue"] {
+            assert!(
+                deps.contains(expected),
+                "missed production dep {expected}: {deps:?}"
+            );
+        }
+        // …and both dev forms excluded.
+        assert!(
+            !deps.contains("qe-validation") && !deps.contains("qe-storage"),
+            "{deps:?}"
+        );
+    }
+
+    #[test]
+    fn split_dotted_key_respects_quotes() {
+        assert_eq!(
+            split_dotted_key("target.'cfg(unix)'.dependencies"),
+            vec!["target", "cfg(unix)", "dependencies"]
+        );
+        assert_eq!(
+            split_dotted_key("dependencies.qe-ensemble"),
+            vec!["dependencies", "qe-ensemble"]
         );
     }
 
