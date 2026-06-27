@@ -1,0 +1,23 @@
+[package]
+name = "qe-validation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Deterministic bootstrap & null RNG (QE-006) — reproducible p-values.
+qe-determinism.workspace = true
+rand_core.workspace = true
+# The robustness report is serialisable so gate G1 (QE-134) can consume/record it.
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+# Round-trip the RobustnessReport in tests.
+serde_json.workspace = true

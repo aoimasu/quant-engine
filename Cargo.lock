@@ -1582,6 +1582,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "qe-validation"
+version = "0.1.0"
+dependencies = [
+ "qe-determinism",
+ "rand_core 0.9.5",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "qe-venue"
 version = "0.1.0"
 dependencies = [

@@ -1,0 +1,160 @@
+//! qe-validation (QE-131) — the statistical robustness suite.
+//!
+//! A large quality-diversity archive is a multiple-testing machine: an undeflated out-of-sample Sharpe is
+//! the *expected* output of the search, not evidence of edge. This crate computes the published
+//! data-snooping diagnostics for a vintage and bundles them for gate G1 (QE-134):
+//!
+//! - [`dsr`] — the **Deflated Sharpe Ratio** with effective trials = archive cells × generations ×
+//!   windows.
+//! - [`pbo`] — **Probability of Backtest Overfitting** via Combinatorially Symmetric Cross-Validation.
+//! - [`spa`] — **White's Reality Check / Hansen's SPA** vs a best-of-N null.
+//! - [`nulls`] — **BTC-HODL** and **turnover-matched random-entry** benchmark nulls.
+//!
+//! It is downstream validation: pure statistics over return matrices + trial counts. It depends only on
+//! `qe-determinism` (reproducible bootstrap/null RNG, QE-006) — **no `qe-wfo`/`qe-ensemble`**, so it never
+//! touches the search⟂portfolio firewall.
+
+pub mod dsr;
+pub mod nulls;
+pub mod pbo;
+pub mod spa;
+pub mod stats;
+
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+pub use dsr::{
+    deflated_sharpe_ratio, effective_trials, expected_max_sharpe, probabilistic_sharpe_ratio,
+    trial_sharpe_variance,
+};
+pub use nulls::{buy_and_hold_returns, random_entry_returns, realised_turnover};
+pub use pbo::{pbo_cscv, PboReport};
+pub use spa::{reality_check_pvalue, SpaConfig};
+pub use stats::{
+    kurtosis, mean, normal_cdf, normal_ppf, sharpe_ratio, skewness, std_dev, variance,
+    EULER_MASCHERONI,
+};
+
+/// Errors from the robustness suite.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum ValidationError {
+    /// CSCV requires an even block count `≥ 2`.
+    #[error("CSCV block count must be even and >= 2, got {0}")]
+    OddBlockCount(usize),
+    /// The return matrix is empty or has fewer rows than blocks.
+    #[error("return matrix is empty or has fewer rows than blocks")]
+    EmptyMatrix,
+}
+
+/// The inputs needed to assess one vintage (the caller extracts these from the search/portfolio outputs).
+#[derive(Debug, Clone)]
+pub struct VintageStats<'a> {
+    /// The candidate ensemble's per-period net-of-cost returns.
+    pub candidate_returns: &'a [f64],
+    /// The per-trial return series (e.g. one per archive cell) — the deflation's trial population, and
+    /// the CSCV columns. `trial_returns[k]` is trial `k`'s series.
+    pub trial_returns: &'a [Vec<f64>],
+    /// Per-period performance of each trial **relative to the benchmark** (for the Reality Check / SPA).
+    pub excess_over_benchmark: &'a [Vec<f64>],
+    /// Effective number of trials = cells × generations × windows ([`effective_trials`]).
+    pub n_trials: usize,
+    /// CSCV block count (even, `≥ 2`).
+    pub cscv_blocks: usize,
+}
+
+/// The robustness diagnostics for a vintage — `serde` so gate G1 (QE-134) can consume/record it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RobustnessReport {
+    /// The candidate's raw (undeflated) in-sample Sharpe.
+    pub observed_sharpe: f64,
+    /// Deflated Sharpe Ratio — `P(true Sharpe > best-of-N noise)`.
+    pub dsr: f64,
+    /// Probability of Backtest Overfitting (CSCV).
+    pub pbo: f64,
+    /// White's Reality Check / SPA data-snooping p-value.
+    pub spa_pvalue: f64,
+    /// Effective number of trials the DSR deflated against.
+    pub n_trials: usize,
+}
+
+/// Compute DSR / PBO / SPA for a vintage (QE-131/D6, the AC entry point). The bootstrap p-value is seeded
+/// by `seed` for reproducibility (QE-006).
+///
+/// # Errors
+/// Propagates [`ValidationError`] from the CSCV stage (odd block count, empty matrix).
+pub fn assess(
+    stats: &VintageStats,
+    cfg: &SpaConfig,
+    seed: u64,
+) -> Result<RobustnessReport, ValidationError> {
+    let pbo_report = pbo_cscv(stats.trial_returns, stats.cscv_blocks)?;
+    let trial_variance = trial_sharpe_variance(stats.trial_returns);
+    Ok(RobustnessReport {
+        observed_sharpe: sharpe_ratio(stats.candidate_returns),
+        dsr: deflated_sharpe_ratio(stats.candidate_returns, trial_variance, stats.n_trials),
+        pbo: pbo_report.pbo,
+        spa_pvalue: reality_check_pvalue(stats.excess_over_benchmark, cfg, seed),
+        n_trials: stats.n_trials,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn assess_produces_a_full_report_and_round_trips() {
+        // A genuinely strong candidate, a small trial population, and excess-vs-benchmark series.
+        let candidate: Vec<f64> = (0..240)
+            .map(|i| 0.015 + 0.002 * ((i % 5) as f64 - 2.0))
+            .collect();
+        let trials: Vec<Vec<f64>> = (0..6)
+            .map(|k| {
+                (0..240)
+                    .map(|i| 0.01 + 0.001 * (k as f64) + 0.002 * ((i % 4) as f64 - 1.5))
+                    .collect()
+            })
+            .collect();
+        let excess: Vec<Vec<f64>> = trials
+            .iter()
+            .map(|t| t.iter().map(|x| x - 0.008).collect())
+            .collect();
+
+        let stats = VintageStats {
+            candidate_returns: &candidate,
+            trial_returns: &trials,
+            excess_over_benchmark: &excess,
+            n_trials: effective_trials(64, 30, 4),
+            cscv_blocks: 6,
+        };
+        let report = assess(&stats, &SpaConfig::with_defaults(), 2024).unwrap();
+
+        // All three diagnostics are populated and in-range.
+        assert!((0.0..=1.0).contains(&report.dsr));
+        assert!((0.0..=1.0).contains(&report.pbo));
+        assert!((0.0..=1.0).contains(&report.spa_pvalue));
+        assert_eq!(report.n_trials, 64 * 30 * 4);
+        assert!(report.observed_sharpe > 0.0);
+
+        // The report round-trips through serde (so G1 can record it).
+        let json = serde_json::to_string(&report).unwrap();
+        let back: RobustnessReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, report);
+    }
+
+    #[test]
+    fn assess_propagates_cscv_errors() {
+        let trials = vec![vec![0.01, 0.02]; 8];
+        let stats = VintageStats {
+            candidate_returns: &[0.01, 0.02],
+            trial_returns: &trials,
+            excess_over_benchmark: &trials,
+            n_trials: 100,
+            cscv_blocks: 3, // odd
+        };
+        assert!(matches!(
+            assess(&stats, &SpaConfig::with_defaults(), 1),
+            Err(ValidationError::OddBlockCount(3))
+        ));
+    }
+}
