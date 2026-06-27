@@ -5,9 +5,16 @@
 //!
 //! - [`reconstruct`] (QE-106) — deterministic multi-resolution bar roll-up (5m → 30m/4h…), with one
 //!   incremental fold shared by batch and streaming for byte-identical parity (QE-206).
+//! - [`indicator`] (QE-107) — the quantised indicator catalogue (≥20 indicators), finite-lookback +
+//!   batch/streaming-identical, the substrate the strategy genome reasons over.
 
+pub mod indicator;
 pub mod reconstruct;
 
+pub use indicator::{
+    catalogue, compute_batch, max_lookback, CatalogueConfig, Indicator, IndicatorSpec, QState,
+    Quantiser, Sample, CATALOGUE_VERSION,
+};
 pub use reconstruct::{reconstruct_batch, reconstruct_tiers, BarReconstructor, ReconError};
 
 /// Returns this crate's package name. Placeholder until later tickets add real APIs.

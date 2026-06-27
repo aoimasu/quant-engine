@@ -27,57 +27,139 @@ approved block is archived to `docs/mds/reviewed/<ticket>.md` and removed from h
 - QE-103 — Data-integrity & source reconciliation validation — PR #16 — Approved & merged.
 - QE-104 — Fusion, normalisation & Arrow serialisation — PR #17 — Approved & merged.
 - QE-105 — Persist fused market data to LMDB — PR #18 — Approved & merged.
+- QE-106 — Multi-resolution bar reconstruction (batch) — PR #19 — Approved & merged.
 
 ---
 
-## QE-106 — Multi-resolution bar reconstruction (batch) — PR #19 — [Ready-for-review]
+## QE-107 — Indicator catalogue (quantised, deterministic, parity-ready) — PR #20 — [Ready-for-review]
 
-- **Branch:** `qe-106/multi-resolution-bar-reconstruction`
-- **PR:** https://github.com/aoimasu/quant-engine/pull/19
-- **Latest commit:** `1ca1897`
-- **Evidence/design:** `docs/architecture/qe-106-multi-resolution-bar-reconstruction-design.md`
-- **Changed surface:** `crates/signal` (**new** `src/reconstruct.rs`, `lib.rs` wiring, `Cargo.toml`
-  +`rust_decimal`/`thiserror`), `crates/ingest` (**new** `src/recon.rs` + `tests/recon.rs`, `lib.rs`
-  wiring, `Cargo.toml` +`qe-signal`), `Cargo.lock`. No new third-party deps. Also bundles the QE-105
-  archive (`docs/mds/reviewed/qe-105.md`) + `docs/mds/work.md` bookkeeping — branch protection blocks
-  direct `main` pushes.
+- **Branch:** `qe-107/indicator-catalogue`
+- **PR:** https://github.com/aoimasu/quant-engine/pull/20
+- **Latest commit:** _(post-approval advisory follow-up — see below)_
+- **Evidence/design:** `docs/architecture/qe-107-indicator-catalogue-design.md`
+- **Changed surface:** `crates/signal` — **new** `src/indicator/{mod,quant,roll,price,flow}.rs`,
+  `lib.rs` wiring, `Cargo.toml` (rust_decimal +`maths` feature, +`thiserror`), `Cargo.lock`. No new
+  third-party crates (only the pure `maths` feature). Also bundles the QE-106 archive
+  (`docs/mds/reviewed/qe-106.md`) + `docs/mds/work.md` bookkeeping — branch protection blocks direct
+  `main` pushes.
 
 ### Acceptance criteria (copied from backlog)
-- [x] Batch-reconstructed bars equal streaming reconstruction on the same input (parity fixture).
+- [x] Each indicator's batch output equals its streaming output bar-for-bar.
+- [x] Declared lookback matches actual data dependency (verified).
 
 ### Verification (run locally — all green)
 - `cargo fmt --all --check` — ok
 - `cargo clippy --workspace --all-targets --locked -- -D warnings` — clean (also
   `cargo clippy -p qe-ingest --features arrow` — clean)
-- `cargo test --workspace --locked` — **238 passed, 1 ignored** (reconstruct 6, recon-cache
-  integration 2)
-- `cargo test -p qe-cli --test dependency_topology` — passes (new `qe-ingest→qe-signal` +
-  `qe-signal` staying `qe-domain`-only edges allowed; runtime↔training invariant untouched)
-- `cargo deny check` — advisories/bans/licenses/sources ok (no new third-party deps)
+- `cargo test --workspace --locked` — **255 passed, 1 ignored** (qe-signal 24, incl. the generic AC
+  tests over the whole catalogue)
+- `cargo test -p qe-cli --test dependency_topology` — passes (`qe-signal` stays `qe-domain`-only)
+- `cargo deny check` — advisories/bans/licenses/sources ok (no new crates; only the pure `maths`
+  feature on the existing `rust_decimal`)
 
-Key AC-proving tests:
-- **AC (batch == streaming parity)** — `reconstruct::tests::batch_equals_streaming_parity`: a 70-min
-  5m series fed as a batch vs one-at-a-time through `BarReconstructor` yields **identical** output
-  across the three 30m windows. Batch is literally streaming over the whole slice (one shared fold),
-  so parity is structural.
-- **Supporting:** `rolls_up_one_window_to_hand_computed_values` (OHLCV+trades roll-up vs
-  hand-computed), `windows_align_to_epoch_boundary_not_first_bar` (deterministic boundaries),
-  `reconstruct_tiers_yields_all_configured_tiers` (48×5m → 8×30m + 1×4h), error cases
-  (non-coarser target, wrong-resolution input).
-- **Cache bridge** (`crates/ingest/tests/recon.rs`): `reconstruct_caches_tiers_and_round_trips_under_lineage`
-  (reconstruct→cache→`scan_recon_bars`/`get_recon_bar` round-trip), `cached_tiers_are_stale_under_a_different_lineage`
-  (lineage tagging honoured).
+Key AC-proving tests (generic over the whole 22-indicator catalogue):
+- **AC #1 (batch == streaming)** — `ac1_batch_equals_streaming_for_every_indicator`: for every
+  indicator, `compute_batch` over a slice equals feeding the same samples one-at-a-time. Structural:
+  there is one `update` path; batch is literally the streaming loop.
+- **AC #2 (lookback == data dependency)** — proven from both sides:
+  - `ac2_warmup_emits_none_until_exactly_lookback_then_some` — each indicator emits `None` until it
+    has seen exactly `lookback` samples, then `Some` (consumes ≥ lookback).
+  - `ac2_latest_output_independent_of_out_of_window_samples` — perturbing a sample at index
+    `len-1-lookback` (just outside the latest window) leaves the latest state byte-identical (depends
+    on ≤ lookback). Together ⇒ dependency == lookback.
+- **Supporting:** `catalogue_has_at_least_twenty_indicators_with_unique_ids` (22, unique),
+  `every_indicator_respects_configured_state_count`, hand-computed SMA/RSI/Stoch/ROC, quantiser bin
+  edges, `Roll` stats, flow-factor scalar-skip + presence.
 
 ### Design notes for the reviewer
-- **One fold, shared by batch + streaming.** `BarReconstructor` is the single incremental fold;
-  `reconstruct_batch` = push-all + finish. So batch and streaming cannot diverge — the QE-206 parity
-  guarantee is structural, not a coincidence of two implementations.
-- **Storage-free hot-path logic.** `qe-signal` stays `qe-domain`-only (no LMDB) — reconstruction runs
-  identically in batch and in the latency-sensitive runtime (QE-003). The synthetic-store caching is
-  a separate `qe-ingest` bridge.
-- **Deterministic boundaries.** Window start = `floor_div(open_time, target_ms)·target_ms` — depends
-  only on the timestamp + target resolution, never on batch size / arrival order / thread count.
-- **Topology.** New `qe-ingest → qe-signal` edge is acyclic (signal is `qe-domain`-only); QE-001
-  guard re-runs green.
-- **Out of scope:** live-runtime streaming wiring (QE-205). The streaming `BarReconstructor` is
-  exposed now so QE-206 can prove parity against the live path.
+- **AC #1 is structural.** One `Indicator::update`; `compute_batch` = the streaming loop. Batch and
+  streaming cannot diverge — same as the QE-106 reconstruction pattern.
+- **AC #2 by FIR construction.** Every indicator's latest output reads **exactly the last `lookback`
+  samples** via a ring buffer (`Roll`) — nothing older. So declared lookback == data dependency,
+  which is the leakage-relevant property purge/embargo (QE-128/WFO) needs. The catalogue ships
+  finite-window variants (Cutler RSI, simple-mean ATR, windowed EMA) **on purpose** so this holds
+  strictly; IIR smoothing could be added later behind a declared embargo-aware lookback.
+- **Quantisation is point-wise.** `Quantiser::{Linear,Bands}` map a value → state with no rolling
+  quantile / dataset-wide fit, so the discrete state never peeks at future data and is identical
+  batch vs streaming. `num_states` is configurable via `CatalogueConfig`.
+- **Storage-free hot-path crate.** `qe-signal` stays `qe-domain`-only; `rust_decimal`'s pure `maths`
+  feature adds `Decimal::sqrt` (std-dev/Bollinger) with no new crates, so `cargo deny` is unaffected.
+- **Out of scope:** feature assembly/normalisation (QE-108); genome (QE-110).
+
+### Review notes
+
+**Verdict: [Approved].** Reviewed strictly as architect + senior engineer against the full diff vs `main`
+(head `5de015d`) — read all five `indicator/*` modules and **hand-verified every indicator's lookback vs
+data dependency**, which is the leakage-critical claim. Both ACs are met; the FIR discipline is exactly
+right for purge/embargo.
+
+**AC #1 — batch == streaming (PASS, structural).** The private `Kernel` blanket-impls `Indicator` with a
+single `update` path (`observe → warm-check → raw → quantise`), and `compute_batch` *is* the streaming
+`update` map. So batch and streaming cannot diverge; `ac1_batch_equals_streaming_for_every_indicator`
+runs the whole catalogue and (via the reset-then-stream) also validates `reset()`.
+
+**AC #2 — lookback == data dependency (PASS, hand-verified).** Structural FIR: every kernel holds its
+fields in `Roll(cap)` ring buffers, `lookback() == cap`, `warm() == is_full`, and every value fn reads
+**only** those cap-bounded windows — so the latest output depends on exactly the last `cap` samples.
+I checked all 22 declarations against the maths: `rsi_14→15`, `atr_pct_14→15`, `std_returns_20→21`,
+`mfi_14→15`, `signed_volume_ratio_14→15` correctly add the +1 for the consecutive-close delta;
+`macd_hist_12_26_9→34` reads exactly `c[0..33]` across its 9 windowed-EMA MACD values (slow 26 + signal
+9 − 1). The id keeps the conventional name while `spec.lookback` reports the *true* dependency — correct
+for purge/embargo. The two generic tests prove both directions (warm-at-exactly-lookback ⇒ ≥; perturbing
+the sample at `len-1-lookback` leaves the latest state byte-identical ⇒ ≤), and the perturbation test
+would catch any off-by-one over-read.
+
+**FIR variant choice — endorsed.** Cutler RSI (Σgain/Σloss), simple-mean ATR, and window-seeded EMA are
+deliberately finite-window so lookback is *exact*. This is the correct call: textbook Wilder/IIR
+smoothing has unbounded memory, so its true lookback is infinite and purge/embargo (QE-128) cannot bound
+leakage. Trading the textbook formula for an exact-lookback FIR variant is precisely the leakage-safety
+discipline this engine needs (and these feed a quantised genome, not a chart).
+
+**Quantisation (PASS).** `Quantiser::{Linear,Bands}` are pure point-wise maps of (value, fixed params) —
+no rolling quantile / dataset fit, so no future-data peek and identical batch vs streaming. Bin/clamp
+edges and the `Bands` "edges strictly below" rule are correct (RSI 100 → top bucket). `num_states`
+configurable via `CatalogueConfig` (≥2). 22 unique indicators.
+
+**Topology/deps (PASS).** `qe-signal` stays `qe-domain`-only; `rust_decimal` only gains the **pure**
+`maths` feature (`Decimal::sqrt`) — no new crate, so `cargo deny` and the QE-001 guard are unaffected.
+
+**Verification caveat (transparency).** The Rust toolchain is absent from this review environment, so I
+did not execute the gates. The verdict rests on full static review + hand-computation of the indicator
+maths and lookback arithmetic, and manifest-level dep confirmation. I did not rely on the PR's "all
+green" claim; treat the gate results as developer-reported. Nothing in the review contradicts them.
+
+**Advisories (non-blocking — do not gate merge):**
+1. **Flow-factor lookback is in units of *present scalars*, not bars — a leakage-relevant nuance for
+   QE-108/QE-128.** `ScalarKernel::observe` skips absent-scalar steps, so `spec.lookback` (e.g.
+   `funding_avg_8` = 8) counts the last 8 **present** funding samples. Under dense scalar input — as the
+   AC #2 tests use (`series(120)` has all scalars present) — present-scalar-lookback == bar-lookback and
+   the AC holds exactly. But under **sparse** input (real Binance funding posts every 8h while base bars
+   are 5m), 8 present samples span ~768 bars in time, so the latest output's dependency on the **time
+   axis** far exceeds `spec.lookback` bars. Since purge/embargo operates on time, sizing the embargo from
+   `spec.lookback` would *under-purge* flow factors under sparse input → potential train/test leakage.
+   Not a QE-107 defect (Sample population is QE-108's job; the catalogue's "last N present scalars"
+   contract is internally correct and documented, and the tests legitimately pass), but flag it so
+   **QE-108 feeds dense/aligned scalars** (so sample-lookback == bar-lookback) **or QE-128 sizes the
+   embargo for the coarsest flow-factor cadence**. This is exactly the subtle leakage vector the FIR
+   discipline exists to prevent, surfacing where "lookback in samples" ≠ "lookback in time".
+2. **(Trivial) Some value fns have implicit minimum-cap requirements not enforced at construction** —
+   e.g. `atr_pct` divides by `cap-1` (would panic at cap 1), `std_returns`/`signed_volume_ratio` assume
+   cap ≥ 2. The catalogue wires correct caps so it's unreachable, but a `debug_assert!(cap >= 2)` (or a
+   documented min) would harden a future kernel addition. Non-blocking.
+
+### Post-approval follow-up (coder) — advisories addressed; status → [Ready-for-review]
+
+Both non-blocking advisories addressed (additive: docs + two `debug_assert`s; no behaviour/AC change).
+- **#1 (flow-factor `lookback` counts present scalars, not bars — leakage nuance) — DONE (doc).**
+  Documented prominently on `IndicatorSpec::lookback` and the `flow` module header: for flow factors
+  `lookback` is in *present scalars*; under sparse scalar cadence the time-axis dependency exceeds it.
+  Recorded the **downstream contract**: QE-108 feeds dense, bar-aligned (forward-filled) scalars so
+  flow `lookback` is in bar units, **or** QE-128 sizes the embargo for the coarsest flow cadence.
+  With dense input (as the AC tests use) `lookback` is exact for every indicator. Not a QE-107 defect
+  — captured so QE-108/QE-128 cannot miss it.
+- **#2 (implicit min-cap requirements unenforced) — DONE.** Added `debug_assert!(lookback >= 2)` in
+  the bar-indicator builder (`kernel`) and `debug_assert!(lookback >= 1)` in the flow builder
+  (`scalar`), guarding a future mis-registration in debug builds. The catalogue's registered sizes
+  already satisfy these.
+- Gates re-run green: fmt ok; clippy clean; `qe-signal` 24 tests; workspace unaffected; deny
+  unchanged.

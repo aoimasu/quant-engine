@@ -12,6 +12,7 @@ workspace = true
 
 [dependencies]
 qe-domain.workspace = true
-# Exact decimal for summing volume during roll-up — never float money (QE-106).
-rust_decimal.workspace = true
+# Exact decimal for roll-up sums (QE-106) and indicator maths (QE-107). `maths` adds Decimal::sqrt
+# (Bollinger / std-dev) — pure, no extra crates, so cargo-deny is unaffected.
+rust_decimal = { workspace = true, features = ["maths"] }
 thiserror.workspace = true
