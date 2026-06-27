@@ -181,20 +181,22 @@ mod tests {
     #[test]
     fn overfit_matrix_has_high_pbo() {
         // Each strategy is great in exactly one half of time and terrible in the other, anti-correlated:
-        // whoever wins IS loses OOS ⇒ PBO near 1.
+        // whoever wins IS loses OOS ⇒ PBO near 1. A within-block oscillation gives every block a genuine
+        // (non-degenerate) Sharpe, so the ranking is driven by the anti-correlation, not a tie-break on a
+        // zero-dispersion mean.
         let t = 40;
         let matrix: Vec<Vec<f64>> = (0..t)
             .map(|i| {
-                let first_half = i < t / 2;
-                if first_half {
-                    vec![0.05, -0.05]
+                let osc = 0.01 * ((i % 3) as f64 - 1.0); // within-block dispersion ⇒ finite Sharpe
+                if i < t / 2 {
+                    vec![0.05 + osc, -0.05 + osc]
                 } else {
-                    vec![-0.05, 0.05]
+                    vec![-0.05 + osc, 0.05 + osc]
                 }
             })
             .collect();
         // Use 2 blocks so IS = one half, OOS = the other — the IS winner is the OOS loser.
         let report = pbo_cscv(&matrix, 2).unwrap();
-        assert_eq!(report.pbo, 1.0);
+        assert_eq!(report.pbo, 1.0, "logits: {:?}", report.logits);
     }
 }
