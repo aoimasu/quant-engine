@@ -29,8 +29,8 @@ approved block is archived to `docs/mds/reviewed/<ticket>.md` and removed from h
 ## QE-102 — Venue REST month-to-date backfill client — PR #15 — [Ready-for-review]
 
 - **Branch:** `qe-102/rest-backfill-client`
-- **PR:** _(set on `gh pr create`)_
-- **Latest commit:** _(see PR head)_
+- **PR:** https://github.com/aoimasu/quant-engine/pull/15
+- **Latest commit:** `ce34e6b`
 - **Evidence/design:** `docs/architecture/qe-102-rest-backfill-client-design.md`
 - **Changed surface:** `crates/ingest` — **new** `src/rest.rs` (`RestEndpoint`/`PageRequest`/URL
   builder, `RestSource` port, `parse_klines_json`, `RestError`; real `HttpRestSource` behind `http`),
