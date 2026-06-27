@@ -400,6 +400,52 @@ mod tests {
         );
     }
 
+    /// An independent as-of pick: the latest observation with `ts <= bar_ts` (QE-206's `<=` rule), found by
+    /// a linear max-by-ts scan — a per-bar *pull*, structurally unlike `replay`'s event-stream *push* merge.
+    fn as_of(obs: &[(i64, Decimal)], bar_ts: i64) -> Option<Decimal> {
+        obs.iter()
+            .filter(|(t, _)| *t <= bar_ts)
+            .max_by_key(|(t, _)| *t)
+            .map(|(_, v)| *v)
+    }
+
+    #[test]
+    fn replay_matches_an_independent_as_of_oracle() {
+        // The continuous-run test re-uses replay's own merge, so it proves equivalence but not the as-of
+        // *correctness* independently. This oracle builds the expected decisions by a different construction
+        // — for each bar, PULL the latest context with ts <= bar.open_time and observe it just before the
+        // bar — so a shared ordinal/sort bug in replay's push-merge cannot hide here.
+        let pipe = pipeline();
+        let w = window(bars(60));
+        let got = pipe
+            .replay(&w, vintage_of(vec![cycling_genome(3)]))
+            .unwrap();
+
+        let mut sorted = w.bars.clone();
+        sorted.sort_by_key(|b| b.open_time().millis());
+        sorted.dedup_by_key(|b| b.open_time().millis());
+
+        let mut oracle = EvaluatorSession::new(vintage_of(vec![cycling_genome(3)]), &cfg());
+        let mut expected = Vec::new();
+        for b in &sorted {
+            let t = b.open_time().millis();
+            if let Some(v) = as_of(&w.funding, t) {
+                oracle.observe_funding(v);
+            }
+            if let Some(v) = as_of(&w.open_interest, t) {
+                oracle.observe_open_interest(v);
+            }
+            if let Some(v) = as_of(&w.premium, t) {
+                oracle.observe_premium(v);
+            }
+            expected.push(oracle.on_bar(b));
+        }
+        assert_eq!(
+            got.decisions, expected,
+            "replay must match an independent per-bar as-of oracle"
+        );
+    }
+
     #[test]
     fn reconstructed_state_equals_a_continuous_run() {
         // Bootstrap over [0..n), go live, feed bar n; it must decide identically to one continuous session
