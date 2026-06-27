@@ -18,13 +18,12 @@ qe-storage.workspace = true
 rust_decimal.workspace = true
 # Genome serialisation (QE-110): the canonical vintage-lineage form is JSON.
 serde.workspace = true
+# JSONL persistence of strategy records (QE-123).
+serde_json.workspace = true
 # RngCore bound for deterministic adaptive operator selection (QE-112).
 rand_core.workspace = true
 # Embarrassingly-parallel, scheduling-independent batch evaluation (QE-118).
 rayon.workspace = true
-# Per-task seeded DetRng so parallel evaluation stays byte-deterministic (QE-118, QE-006).
+# Per-task seeded DetRng so parallel evaluation stays byte-deterministic (QE-118, QE-006);
+# also the Lineage carried by persisted strategy records (QE-123).
 qe-determinism.workspace = true
-
-[dev-dependencies]
-# Genome JSON round-trip in the QE-110 fixture test.
-serde_json.workspace = true

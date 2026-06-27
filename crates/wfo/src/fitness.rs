@@ -47,7 +47,10 @@ pub fn geom_return(returns: &[f64]) -> f64 {
 /// A genome's fitness as a **distribution** over evaluation windows (QE-113/D3): the mean per-window
 /// [`log_growth`] and the standard error of that mean. Noise-robustness needs `n ≥ 2`; at `n = 1` the
 /// standard error is `0.0` (no noise estimate available).
-#[derive(Debug, Clone, Copy, PartialEq)]
+///
+/// `serde`-serialisable so it can ride a persisted strategy record (QE-123). Persisted records are always
+/// finite (the quality gate rejects non-finite means), so JSON round-trips cleanly.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct NoiseRobustFitness {
     /// Mean per-window log-growth (`−∞` if ruined in any window).
     pub mean: f64,
