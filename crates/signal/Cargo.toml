@@ -16,3 +16,11 @@ qe-domain.workspace = true
 # (Bollinger / std-dev) — pure, no extra crates, so cargo-deny is unaffected.
 rust_decimal = { workspace = true, features = ["maths"] }
 thiserror.workspace = true
+# The strategy genome (QE-110) lives here as shared signal logic — a pure feature-vector → decision
+# mapping used by both training (qe-wfo) and runtime (qe-runtime), so it crosses the train/live boundary
+# only through this shared crate (QE-001 decoupling). serde for the genome's persisted representation.
+serde.workspace = true
+
+[dev-dependencies]
+# Round-trips the genome's serde representation in the genome tests (moved here with the genome, QE-110).
+serde_json.workspace = true

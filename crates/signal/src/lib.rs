@@ -11,13 +11,23 @@
 //!   WFO/DE consume), batch/streaming-identical.
 //! - [`regime`] (QE-125) — volatility / trend-vs-chop regime labels over history plus a per-regime
 //!   expectancy table, the regime tags QE-127's DE objective and QE-133's reporting read.
+//! - [`genome`] (QE-110) — the strategy genome representation + its pure `decide` (feature vector →
+//!   trading decision). It lives here, not in `qe-wfo`, because it is the one piece of strategy logic
+//!   **both** training (search) and the live runtime must run identically: the QE-001 decoupling
+//!   invariant requires train/live shared code to cross only through `signal`/`domain`. `qe-wfo`
+//!   re-exports it so the search side's API is unchanged.
 
 pub mod feature;
+pub mod genome;
 pub mod indicator;
 pub mod reconstruct;
 pub mod regime;
 
 pub use feature::{assemble_batch, FeatureAssembler, FeatureSchema, FeatureVector};
+pub use genome::{
+    Clause, Decision, ExitParams, Genome, PositionState, RiskParams, RuleSet, CLAUSES_PER_SET,
+    MAX_SIZE_BPS, REP_VERSION,
+};
 pub use indicator::{
     catalogue, compute_batch, max_lookback, CatalogueConfig, Indicator, IndicatorSpec, QState,
     Quantiser, Sample, CATALOGUE_VERSION,

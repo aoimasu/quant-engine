@@ -16,6 +16,14 @@ qe-risk.workspace = true
 qe-signal.workspace = true
 qe-storage.workspace = true
 qe-venue.workspace = true
+# The sealed vintage (chromosomes/ensemble/calibration) the evaluator session loads read-only (QE-207).
+# qe-vintage embeds the genome via the shared qe-signal crate, so this edge does NOT reach the training
+# side (qe-wfo) — the QE-001 train/live decoupling invariant holds (genome eval is shared via qe-signal).
+qe-vintage.workspace = true
 # Exact-decimal scalar context (funding/OI/premium) joined onto bars in the live factor join (QE-206).
 # A normal dependency is already visible to the crate's tests, so no separate dev-dependency is needed.
 rust_decimal.workspace = true
+
+[dev-dependencies]
+# Building a sealed Vintage fixture (its Lineage tag) for the evaluator-session tests (QE-207).
+qe-determinism.workspace = true

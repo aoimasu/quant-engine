@@ -41,7 +41,10 @@ pub mod backtest;
 pub mod cv;
 pub mod fitness;
 pub mod friction;
-pub mod genome;
+// The strategy genome moved to `qe-signal` (shared train/live signal logic, QE-001 decoupling). It is
+// re-exported here as `qe_wfo::genome` so the search side's `crate::genome::*` and public API are
+// unchanged.
+pub use qe_signal::genome;
 pub mod lifecycle;
 pub mod mapelites;
 pub mod operator;
@@ -65,10 +68,6 @@ pub use friction::{
     cost_sweep, simulate, Event, FeeSchedule, Fill, FrictionConfig, FundingStamp, Liquidity,
     PnlBreakdown, Position, SlippageModel,
 };
-pub use genome::{
-    Clause, Decision, ExitParams, Genome, PositionState, RiskParams, RuleSet, CLAUSES_PER_SET,
-    MAX_SIZE_BPS, REP_VERSION,
-};
 pub use lifecycle::{
     Phase, QualityGate, QualityThreshold, ThresholdPolicy, DEFAULT_MIN_EXPLOITATION_WINDOWS,
     DEFAULT_QUANTILE,
@@ -80,6 +79,10 @@ pub use mapelites::{
 pub use operator::{
     ApplicationOutcome, Operator, OperatorSelector, DEFAULT_EPSILON, DEFAULT_WINDOW,
     NOVELTY_REWARD, OPERATORS,
+};
+pub use qe_signal::genome::{
+    Clause, Decision, ExitParams, Genome, PositionState, RiskParams, RuleSet, CLAUSES_PER_SET,
+    MAX_SIZE_BPS, REP_VERSION,
 };
 pub use regularise::{
     coverage, local_crowding, neighbours, occupancy_entropy, BehaviouralRegulariser,
