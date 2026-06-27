@@ -37,11 +37,13 @@ Two read-only metrics on a direction archive:
 
 ### D2 — Behavioural neighbourhood & local crowding
 
-`neighbours(cell)` = the cells one ordinal step away in timescale **or** holding, **same family**
-(family is categorical — no ordering). So each cell has up to 4 neighbours (a 3×3 grid per family).
-`local_crowding(archive, direction, cell)` = the number of that cell's neighbours that are **occupied** —
-an interior cell (all neighbours filled) is maximally crowded; a frontier cell (few occupied neighbours)
-is novel.
+`neighbours(cell)` = the cells one step away along exactly one axis: timescale and holding are **ordinal**
+(±1 band); family is **categorical**, so every *other* family at the same (timescale, holding) is an
+equidistant neighbour. So a cell has up to `2 + 2 + (|FAMILIES|−1)` neighbours (edge-clamped for
+timescale/holding) — this connects the whole 45-cell behaviour space into one graph along which novelty
+pressure diffuses. `local_crowding(archive, direction, cell)` = the number of that cell's neighbours that
+are **occupied** — an interior cell (all neighbours filled) is maximally crowded; a frontier cell (few
+occupied neighbours) is novel.
 
 ### D3 — Niche penalty / novelty pressure (the regulariser)
 
@@ -62,9 +64,11 @@ degenerates to uniform selection (the ablation). Deterministic through the seede
 With a fixed reproduction budget and the Deep-Grid bound, **uniform** parent selection spends many
 reproductions on crowded interior cells that are already full (`Rejected`, no new coverage), while
 **novelty-pressure** selection concentrates the budget on frontier cells whose cell-local offspring land
-in empty neighbours. So at a fixed step count the regularised run reaches more distinct niches. The
-fixture demonstrates exactly this: the same seeded behaviour-space random walk run with `pressure > 0`
-covers strictly more cells than the `pressure = 0` ablation.
+in empty neighbours. So at a fixed, **pre-saturation** step count the regularised run reaches more
+distinct niches (once the graph saturates both reach the reachable maximum and the gap closes — the
+advantage is in the *rate* of discovery). The fixture demonstrates exactly this: a seeded behaviour-space
+random walk, summed over several seeds to wash out the random-neighbour noise, covers strictly more cells
+with `pressure > 0` than the `pressure = 0` ablation at a fixed pre-saturation budget.
 
 ## Module / API plan
 

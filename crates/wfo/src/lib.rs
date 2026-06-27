@@ -29,6 +29,8 @@
 //!   noise-robust geometric fitness, a minimum-trade gate, and SE-aware replacement.
 //! - [`thompson`] (QE-121) — Thompson-sampling parent selection: a per-niche Bayesian bandit whose reward
 //!   is the in-training novelty/improvement only (no OOS leakage).
+//! - [`regularise`] (QE-122) — behavioural regularisation: a novelty-pressure / niche-penalty parent-cell
+//!   selector that counters degenerate crowding, plus the coverage / occupancy-entropy diversity metrics.
 
 pub mod archive;
 pub mod backtest;
@@ -39,6 +41,7 @@ pub mod genome;
 pub mod lifecycle;
 pub mod mapelites;
 pub mod operator;
+pub mod regularise;
 pub mod thompson;
 pub mod variation;
 pub mod walkforward;
@@ -71,6 +74,10 @@ pub use mapelites::{
 pub use operator::{
     ApplicationOutcome, Operator, OperatorSelector, DEFAULT_EPSILON, DEFAULT_WINDOW,
     NOVELTY_REWARD, OPERATORS,
+};
+pub use regularise::{
+    coverage, local_crowding, neighbours, occupancy_entropy, BehaviouralRegulariser,
+    DEFAULT_NOVELTY_PRESSURE,
 };
 pub use thompson::{
     NichePrior, ThompsonParentSelector, DEFAULT_OBS_VAR, DEFAULT_PRIOR_MEAN, DEFAULT_PRIOR_VAR,
