@@ -96,6 +96,13 @@ impl SubPopulation {
             .max_by(|a, b| a.fitness.total_cmp(&b.fitness))
     }
 
+    /// The lowest-fitness elite, if any (ties broken by lowest index) — the candidate a full cell would
+    /// displace. Used by QE-119 to size the displaced-improvement `gain`.
+    #[must_use]
+    pub fn worst(&self) -> Option<&Elite> {
+        self.worst_index().map(|i| &self.elites[i])
+    }
+
     /// Index of the worst (min-fitness) elite, ties broken by lowest index (deterministic).
     fn worst_index(&self) -> Option<usize> {
         self.elites
@@ -238,6 +245,13 @@ impl MapElitesArchive {
         self.direction(direction)
             .sample_parent(rng)
             .map(|e| &e.genome)
+    }
+
+    /// Like [`sample_parent`](Self::sample_parent) but returns the whole [`Elite`] (genome + fitness) —
+    /// QE-119's variation driver needs the parent's fitness to size the displaced-improvement `gain`.
+    #[must_use]
+    pub fn sample_parent_elite(&self, direction: Direction, rng: &mut DetRng) -> Option<&Elite> {
+        self.direction(direction).sample_parent(rng)
     }
 
     /// Total occupied cells across both directions.
