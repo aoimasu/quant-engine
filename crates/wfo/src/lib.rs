@@ -16,12 +16,16 @@
 //!   absorbing near-ruin, plus noise-robust multi-window evaluation and SE-aware elite replacement.
 //! - [`cv`] (QE-113) — purged + embargoed cross-validation: leakage-free train/test splits whose
 //!   information windows are provably disjoint including the indicator lookback.
+//! - [`lifecycle`] (QE-114) — the phased-lifecycle quality gate: exploration→exploitation graduation by
+//!   evaluation depth plus a robust validation-distribution threshold, so only survivors persist and
+//!   early lucky candidates do not.
 
 pub mod archive;
 pub mod cv;
 pub mod fitness;
 pub mod friction;
 pub mod genome;
+pub mod lifecycle;
 pub mod operator;
 
 pub use archive::{
@@ -37,6 +41,10 @@ pub use friction::{
 pub use genome::{
     Clause, Decision, ExitParams, Genome, PositionState, RiskParams, RuleSet, CLAUSES_PER_SET,
     MAX_SIZE_BPS, REP_VERSION,
+};
+pub use lifecycle::{
+    Phase, QualityGate, QualityThreshold, ThresholdPolicy, DEFAULT_MIN_EXPLOITATION_WINDOWS,
+    DEFAULT_QUANTILE,
 };
 pub use operator::{
     ApplicationOutcome, Operator, OperatorSelector, DEFAULT_EPSILON, DEFAULT_WINDOW,

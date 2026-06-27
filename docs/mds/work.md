@@ -34,6 +34,7 @@ approved block is archived to `docs/mds/reviewed/<ticket>.md` and removed from h
 - QE-110 — Strategy genome representation (SPIKE) — PR #24 — Approved & merged.
 - QE-111 — QD/MAP-Elites archive & behaviour descriptors (SPIKE) — PR #25 — Approved & merged.
 - QE-112 — Adaptive operator selection (SPIKE) — PR #26 — Approved & merged.
+- QE-113 — Geometric fitness, noise-robust eval & purged/embargoed CV (SPIKE) — PR #27 — Approved & merged.
 
 ---
 
