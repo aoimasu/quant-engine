@@ -42,9 +42,37 @@ pub struct VintageContent {
 }
 
 impl VintageContent {
+    /// Validate the artefact's structural invariants — `weights` aligned one-to-one with `chromosomes`
+    /// and every weight finite. Called by [`Vintage::seal`], so a silent upstream bug (a non-finite
+    /// weight that would serialise to JSON `null` and fail re-load, or a weight/chromosome length
+    /// mismatch) surfaces as a clear error at seal time rather than a corrupt artefact.
+    ///
+    /// # Errors
+    /// [`VintageError::WeightChromosomeMismatch`] or [`VintageError::NonFiniteWeight`].
+    pub fn validate(&self) -> Result<(), VintageError> {
+        if self.weights.len() != self.chromosomes.len() {
+            return Err(VintageError::WeightChromosomeMismatch {
+                weights: self.weights.len(),
+                chromosomes: self.chromosomes.len(),
+            });
+        }
+        for (index, &value) in self.weights.iter().enumerate() {
+            if !value.is_finite() {
+                return Err(VintageError::NonFiniteWeight { index, value });
+            }
+        }
+        Ok(())
+    }
+
     /// Lowercase-hex SHA-256 over the record's canonical JSON — the **content hash** (same pattern as
     /// [`Lineage::id`]). Stable because every embedded type serialises deterministically (fixed field
-    /// order; `BTreeMap`-ordered calibration maps).
+    /// order; `BTreeMap`-ordered calibration maps; no `HashMap`/`HashSet` anywhere in the embedded types).
+    ///
+    /// **Hashing contract:** the hash is the digest of `serde_json`'s output. Its stability therefore
+    /// depends on (a) no map type with nondeterministic iteration order ever entering the hashed content,
+    /// and (b) `serde_json`'s number/whitespace formatting. Any future field addition must preserve (a);
+    /// a `serde_json` major bump that changed (b) would change every vintage hash (and so must bump
+    /// [`VINTAGE_FORMAT_VERSION`]).
     ///
     /// # Errors
     /// [`VintageError::Serialize`] if the content cannot be serialised.
@@ -64,11 +92,14 @@ pub struct Vintage {
 }
 
 impl Vintage {
-    /// Seal `content` by computing and pinning its content hash.
+    /// Seal `content` by [validating](VintageContent::validate) its invariants, then computing and
+    /// pinning its content hash.
     ///
     /// # Errors
-    /// Propagates a serialisation failure from [`VintageContent::content_hash`].
+    /// [`VintageContent::validate`] errors (non-finite or misaligned weights), or a serialisation
+    /// failure from [`VintageContent::content_hash`].
     pub fn seal(content: VintageContent) -> Result<Self, VintageError> {
+        content.validate()?;
         let content_hash = content.content_hash()?;
         Ok(Vintage {
             content,
@@ -172,6 +203,22 @@ pub enum VintageError {
         stored: String,
         /// The hash recomputed from the content.
         recomputed: String,
+    },
+    /// `weights` is not aligned one-to-one with `chromosomes`.
+    #[error("vintage has {weights} weights for {chromosomes} chromosomes (must be aligned)")]
+    WeightChromosomeMismatch {
+        /// Number of weights supplied.
+        weights: usize,
+        /// Number of chromosomes supplied.
+        chromosomes: usize,
+    },
+    /// A weight is not finite (would serialise to JSON `null` and fail re-load).
+    #[error("vintage weight {index} is not finite: {value}")]
+    NonFiniteWeight {
+        /// Index of the offending weight.
+        index: usize,
+        /// The non-finite value.
+        value: f64,
     },
     /// Underlying I/O error.
     #[error("vintage I/O error: {0}")]
@@ -284,6 +331,28 @@ mod tests {
         assert!(matches!(
             Vintage::load(buf.as_slice()),
             Err(VintageError::HashMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn seal_rejects_non_finite_and_misaligned_weights() {
+        // A non-finite weight would serialise to JSON `null` and fail re-load — caught at seal time.
+        let mut bad = content();
+        bad.weights[1] = f64::NAN;
+        assert!(matches!(
+            Vintage::seal(bad),
+            Err(VintageError::NonFiniteWeight { index: 1, .. })
+        ));
+
+        // Weights must be aligned one-to-one with chromosomes.
+        let mut misaligned = content();
+        misaligned.weights.pop(); // 1 weight for 2 chromosomes
+        assert!(matches!(
+            Vintage::seal(misaligned),
+            Err(VintageError::WeightChromosomeMismatch {
+                weights: 1,
+                chromosomes: 2,
+            })
         ));
     }
 

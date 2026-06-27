@@ -72,7 +72,11 @@ New crate `crates/vintage` (`qe-vintage`), added to `[workspace.dependencies]` f
   `content_hash()`.
 - `Vintage { content, content_hash }` (serde) + `seal`, `verify`, `write`, `load`.
 - `VintageRepository { root }` + `new`, `write`, `load`, `path_for`.
-- `VintageError { Serialize, Deserialize, HashMismatch, Io }` (thiserror), `VINTAGE_FORMAT_VERSION`.
+- `VintageContent::validate()` — checks `weights` is aligned one-to-one with `chromosomes` and every
+  weight is finite; called by `seal` so a silent upstream bug surfaces as a clear error, not a corrupt
+  artefact (post-review hardening).
+- `VintageError { Serialize, Deserialize, HashMismatch, WeightChromosomeMismatch, NonFiniteWeight, Io }`
+  (thiserror), `VINTAGE_FORMAT_VERSION`.
 - Deps: `qe-wfo` (Genome), `qe-risk` (CalibrationProfile), `qe-determinism` (Lineage), `serde`,
   `serde_json`, `sha2`, `thiserror`. (Downstream of the firewall — no `qe-ensemble` type dep; the
   ensemble is materialised as weights.)
@@ -100,7 +104,8 @@ New crate `crates/vintage` (`qe-vintage`), added to `[workspace.dependencies]` f
   "search"; out of scope here — QE-129 uses the type where it lives.
 - **JSON format.** Human-readable + matches QE-110's canonical genome JSON; a binary codec is a later
   size/speed optimisation behind the same `write`/`load` seam. `serde_json` cannot represent non-finite
-  floats, but weights are finite `[0,1]` (capacity-capped).
+  floats (they serialise to `null`), so `seal` rejects a non-finite weight up front via `validate()`
+  rather than producing an artefact that silently fails re-load.
 - **Hash stability depends on canonical serialisation.** Guaranteed here because every embedded type uses
   deterministic serde (fixed field order; `BTreeMap` for the calibration maps). Documented as a contract
   for any future field addition.
