@@ -139,11 +139,19 @@ fn pick_three_distinct(np: usize, target: usize, rng: &mut DetRng) -> (usize, us
     (picks[0], picks[1], picks[2])
 }
 
-/// Run the discrete-DE portfolio search over `pool` (per-strategy net-of-cost return series),
-/// maximising the cross-validated robust-basin score. Deterministic in `seed`.
-#[must_use]
-pub fn search_portfolio(pool: &[Vec<f64>], cfg: &SearchConfig, seed: u64) -> SearchResult {
-    let pool_size = pool.len();
+/// The DE/rand/1/bin engine, parameterised by a `score(members) -> f64` closure (QE-126 base CV score,
+/// or the QE-127 regime-aware score). Greedy (`≥`) replacement makes the best-so-far monotonic; one
+/// seeded `DetRng` drives the whole run, so it is byte-deterministic in `seed`. `pop_size` is clamped to
+/// `≥ 4` so three distinct donors always exist.
+pub(crate) fn run_de(
+    pool_size: usize,
+    pop_size: usize,
+    generations: usize,
+    cr: f64,
+    init_density: f64,
+    seed: u64,
+    score: impl Fn(&[usize]) -> f64,
+) -> SearchResult {
     if pool_size == 0 {
         return SearchResult {
             best: EnsembleMask(Vec::new()),
@@ -153,27 +161,22 @@ pub fn search_portfolio(pool: &[Vec<f64>], cfg: &SearchConfig, seed: u64) -> Sea
         };
     }
 
-    let np = cfg.pop_size.max(4);
+    let np = pop_size.max(4);
     let mut rng = seed_rng(seed);
 
     let mut pop: Vec<EnsembleMask> = (0..np)
-        .map(|_| random_mask(pool_size, cfg.init_density, &mut rng))
+        .map(|_| random_mask(pool_size, init_density, &mut rng))
         .collect();
-    let mut scores: Vec<f64> = pop
-        .iter()
-        .map(|m| cross_val_score(pool, &m.members(), cfg))
-        .collect();
+    let mut scores: Vec<f64> = pop.iter().map(|m| score(&m.members())).collect();
 
-    let mut history = Vec::with_capacity(cfg.generations);
-    for _gen in 0..cfg.generations {
+    let mut history = Vec::with_capacity(generations);
+    for _gen in 0..generations {
         for i in 0..np {
             let (a, b, c) = pick_three_distinct(np, i, &mut rng);
             let mutant = de_mutant(&pop[a], &pop[b], &pop[c]);
-            let trial = repair_nonempty(
-                binomial_crossover(&pop[i], &mutant, cfg.cr, &mut rng),
-                &mut rng,
-            );
-            let ts = cross_val_score(pool, &trial.members(), cfg);
+            let trial =
+                repair_nonempty(binomial_crossover(&pop[i], &mutant, cr, &mut rng), &mut rng);
+            let ts = score(&trial.members());
             if ts >= scores[i] {
                 pop[i] = trial;
                 scores[i] = ts;
@@ -192,9 +195,24 @@ pub fn search_portfolio(pool: &[Vec<f64>], cfg: &SearchConfig, seed: u64) -> Sea
     SearchResult {
         best: pop[bi].clone(),
         score: bs,
-        generations_run: cfg.generations,
+        generations_run: generations,
         history,
     }
+}
+
+/// Run the discrete-DE portfolio search over `pool` (per-strategy net-of-cost return series),
+/// maximising the cross-validated robust-basin score. Deterministic in `seed`.
+#[must_use]
+pub fn search_portfolio(pool: &[Vec<f64>], cfg: &SearchConfig, seed: u64) -> SearchResult {
+    run_de(
+        pool.len(),
+        cfg.pop_size,
+        cfg.generations,
+        cfg.cr,
+        cfg.init_density,
+        seed,
+        |members| cross_val_score(pool, members, cfg),
+    )
 }
 
 #[cfg(test)]
