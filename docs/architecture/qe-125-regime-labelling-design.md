@@ -101,6 +101,13 @@ New module `crates/signal/src/regime.rs`, re-exported from `qe_signal`:
 - **Boundary bars.** A `window` straddling a regime change is labelled by the mixed statistics — a few
   transition bars may be "wrong"; this does not affect the table's ability to separate the bulk of each
   regime. Documented.
+- **Median split fractures a near-constant-vol segment.** Because the split is the 50th percentile of the
+  *whole* series' rolling vols, a segment whose rolling vol is near-constant (near-zero spread) and forms
+  the majority will have the median land *inside* it, splitting that segment ~50/50 on noise. The robust,
+  construction-independent claim is therefore the *rate ordering between regimes* (a genuinely high-vol
+  segment carries a higher `Volatile` rate than a low-vol one), which is what the test asserts and what
+  the expectancy table needs — not a per-bar label within a uniform stretch. A calibrated/quantile or HMM
+  split is the downstream upgrade behind the same API.
 - **Alignment is the caller's contract.** `expectancy_table` pairs `returns[i]` with `labels[i]` by
   index; the caller must align its strategy returns to the same bar index (the warm-up `None`s are
   skipped, not dropped from the index).
