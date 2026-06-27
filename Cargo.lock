@@ -1417,6 +1417,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "qe-architecture"
+version = "0.1.0"
+
+[[package]]
 name = "qe-cli"
 version = "0.1.0"
 dependencies = [
