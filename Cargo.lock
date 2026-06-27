@@ -1589,6 +1589,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "qe-vintage"
+version = "0.1.0"
+dependencies = [
+ "qe-determinism",
+ "qe-risk",
+ "qe-wfo",
+ "rust_decimal",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+]
+
+[[package]]
 name = "qe-wfo"
 version = "0.1.0"
 dependencies = [

@@ -56,6 +56,7 @@ qe-wfo = { path = "crates/wfo" }
 qe-ensemble = { path = "crates/ensemble" }
 qe-venue = { path = "crates/venue" }
 qe-runtime = { path = "crates/runtime" }
+qe-vintage = { path = "crates/vintage" }
 
 [workspace.lints.rust]
 unsafe_code = "deny"
