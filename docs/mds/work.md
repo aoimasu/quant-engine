@@ -33,7 +33,7 @@ approved block is archived to `docs/mds/reviewed/<ticket>.md` and removed from h
 
 - **Branch:** `qe-105/persist-fused-market-lmdb`
 - **PR:** https://github.com/aoimasu/quant-engine/pull/18
-- **Latest commit:** `8296490`
+- **Latest commit:** _(post-approval advisory follow-up — see below)_
 - **Evidence/design:** `docs/architecture/qe-105-persist-fused-market-lmdb-design.md`
 - **Changed surface:** `crates/storage` (lineage ledger on `MarketStore` + tests), `crates/ingest`
   (**new** `src/persist.rs` + `tests/persist.rs`, `src/lib.rs` wiring, `Cargo.toml` +`qe-storage`),
@@ -75,3 +75,67 @@ Key AC-proving tests (`crates/ingest/tests/persist.rs`):
 - **Topology.** New `qe-ingest → qe-storage` edge is acyclic (storage depends only on `qe-domain`);
   the QE-001 guard (`runtime ⊥ wfo/ensemble`) is unaffected and its test re-runs green.
 - **Out of scope:** Parquet/DuckDB export (QE-135); persisting the Arrow blob.
+
+### Review notes
+
+**Verdict: [Approved].** Reviewed strictly as architect + senior engineer against the full diff vs `main`
+(head `8296490`) — read `persist.rs`, the `store.rs` ledger, both test files, the Cargo edge, and the
+storage manifest. The AC is met and **correct**; the design choices (typed persistence, lineage-keyed
+idempotency, ordering) are sound.
+
+**AC — reproducible + range-queryable (PASS).** `persist_fused` writes the typed records and the
+integration tests confirm: `scan_bars/funding/premium/futures` return **exactly** the persisted rows
+(incl. a half-open `[5m,11m)` sub-range yielding just the in-window bars), `same_inputs_persist_to_
+identical_stores` defines reproducibility as **identical query results** (the correct check — LMDB never
+guarantees byte-identical files, so comparing scans, not the on-disk bytes, is right), and
+`re_persisting_same_lineage_is_idempotent_noop` confirms a clean no-op.
+
+**Idempotency keyed by lineage (verified collision-safe).** The ledger lives in the shared `meta` db
+under a `lineage:` prefix; `lineages()` strips that prefix, so the `schema_version` key (which is not
+prefix-matched) can never be returned as a vintage, and recording a lineage never disturbs the schema
+record (`lineage_ledger_is_independent_of_schema_version_key` proves this directly). Ordering is **correct
+and deliberate**: `persist_fused` gates on `has_lineage` first and writes `record_lineage` **last**, so a
+crash mid-persist leaves the lineage *unrecorded* and a re-run re-writes everything (each `put_*` is an
+upsert → identical bytes) before recording — self-healing, never a false skip.
+
+**Typed persistence + topology (PASS).** `fused_bars` reuses QE-104 `coalesce_bars` + `adjust_bar`
+(verified: last-partition-wins coalesce + ×2 adjust → close 200/202), and `FusedMarket` carries typed
+`Bar`/funding/premium/futures — not the lossy scalar `FusedCorpus`. The new `qe-ingest → qe-storage` edge
+is **acyclic** (storage's only internal dep is `qe-domain`), so the QE-001 `runtime ⊥ wfo/ensemble`
+invariant is untouched; the existing MarketStore round-trip/range/prefix-isolation/schema tests are
+retained and unaffected.
+
+**Verification caveat (transparency).** The Rust toolchain is absent from this review environment, so I
+did not execute the gates (incl. the `dependency_topology` test and `cargo deny`). The verdict rests on
+full static review + hand-traced tests and manifest-level confirmation of acyclicity. I did not rely on
+the PR's "all green" claim; treat the gate results as developer-reported. Nothing in the review
+contradicts them.
+
+**Advisory (non-blocking — do not gate merge):**
+1. **The persist is not a single atomic transaction.** `persist_fused` issues five independent write
+   txns (`put_bars` / `put_funding` / `put_premium` / `put_futures` / `record_lineage`, each its own
+   commit via the QE-010 API). A crash mid-sequence leaves a *partially-written* vintage with no ledger
+   entry — which the lineage-last + upsert design correctly **self-heals** on the next run, and the AC
+   doesn't require atomicity, so this is fine for the intended single-writer offline batch persist. But a
+   concurrent reader during a persist can observe a half-written vintage, and the partial state is
+   transient on crash. If atomic vintage visibility is ever wanted, expose a MarketStore API that takes an
+   external `RwTxn` (or a batched `put_all`) so all records + the ledger commit together. Noted for
+   QE-135/runtime, not required here.
+
+### Post-approval follow-up (coder) — advisory addressed (doc); status → [Ready-for-review]
+
+The single non-blocking advisory (persist spans five write transactions, not one atomic txn → a
+concurrent reader can observe a partial vintage; a crash leaves transient partial state) is now
+**documented explicitly** on `persist_fused`, recording both the deliberate mitigation and the
+future option:
+- **Self-healing:** the lineage is recorded **last** + every `put_*` is an upsert, so a crash
+  mid-persist leaves the vintage *unrecorded* and the next run re-writes idempotently (heals the
+  partial state) rather than falsely skipping.
+- **Concurrent-reader caveat:** a reader concurrent with an in-progress persist may see a
+  partially-written vintage; sufficient for the QE-105 AC (a *completed* run is reproducible +
+  range-queryable).
+- **Future option (deferred):** for atomic vintage *visibility*, expose a `MarketStore` API taking
+  an external `RwTxn` and write all kinds + the ledger in one transaction. Left out of QE-105 — it
+  changes the storage public surface and is its own concern, as the reviewer framed it ("later").
+
+Doc-only change; no behaviour/AC change. Gates re-run: fmt ok; clippy clean; `qe-ingest` 81 tests.

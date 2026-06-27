@@ -86,6 +86,17 @@ pub enum PersistError {
 /// kind — each `put_*` is an upsert, so even a forced re-key is safe — then records the lineage so
 /// subsequent runs skip.
 ///
+/// **Atomicity / crash-safety.** This spans **five separate write transactions** (one per `put_*`
+/// plus the ledger), not one atomic transaction. Two consequences, both deliberate and bounded by
+/// the lineage-last ordering:
+/// - The lineage is recorded **last**, so a crash mid-persist leaves the vintage *unrecorded* — the
+///   next run re-enters the write path (not the skip path) and, because every `put_*` is an upsert,
+///   re-writing is idempotent and **self-heals** the partial state.
+/// - A reader concurrent with an in-progress persist may observe a **partially-written** vintage
+///   (e.g. bars present, futures not yet). For the QE-105 AC (a completed run is reproducible +
+///   range-queryable) this is sufficient. If atomic *vintage visibility* is needed later, expose a
+///   `MarketStore` API that accepts an external `RwTxn` and write all kinds + the ledger in one txn.
+///
 /// # Errors
 /// [`PersistError`] on any market-store failure.
 pub fn persist_fused(
