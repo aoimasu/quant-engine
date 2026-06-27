@@ -33,7 +33,7 @@ approved block is archived to `docs/mds/reviewed/<ticket>.md` and removed from h
 
 ---
 
-## QE-109 — Execution-friction & funding model — PR #22 — [Ready-for-review]
+## QE-109 — Execution-friction & funding model — PR #22 — [Approved]
 
 - **Branch:** `qe-109/execution-friction-funding`
 - **PR:** https://github.com/aoimasu/quant-engine/pull/22
