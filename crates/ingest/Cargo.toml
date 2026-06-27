@@ -20,6 +20,7 @@ http = ["dep:ureq"]
 # Raw-file caching only (no LMDB); fusion into qe-storage is QE-104.
 qe-config.workspace = true
 qe-domain.workspace = true
+serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 # Pure-Rust ZIP (deflate only) for reading CSV headers out of Binance dump archives (schema drift).

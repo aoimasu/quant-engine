@@ -22,148 +22,141 @@ approved block is archived to `docs/mds/reviewed/<ticket>.md` and removed from h
 - QE-011 — LMDB synthetic-data store — PR #11 — Approved & merged.
 - QE-012 — Instrument-universe config & point-in-time membership — PR #12 — Approved & merged.
 - QE-013 — Local run & deployment-agnostic packaging — PR #13 — Approved & merged. **(P0 complete)**
+- QE-101 — Binance public-dumps downloader — PR #14 — Approved & merged.
 
 ---
 
-## QE-101 — Binance public-dumps downloader — PR #14 — [Ready-for-review]
+## QE-102 — Venue REST month-to-date backfill client — PR #15 — [Ready-for-review]
 
-- **Branch:** `qe-101/binance-dumps-downloader`
-- **PR:** https://github.com/aoimasu/quant-engine/pull/14
-- **Latest commit:** _(post-approval advisory follow-up — see below)_
-- **Evidence/design:** `docs/architecture/qe-101-binance-dumps-downloader-design.md`
-- **Changed surface:** `crates/ingest` — fills the scaffold: **new** `src/{source,checksum,fetcher,
-  cache,downloader,drift,plan}.rs`, rewritten `src/lib.rs` (`IngestError` + re-exports), **new**
-  `tests/downloader.rs` (2 integration tests), `Cargo.toml` (+`qe-config`/`sha2`/`thiserror`,
-  +`zip` deflate-only, +optional `ureq` behind the `http` feature; dropped unused `qe-storage`).
-  Also bundles the QE-013 archive (`docs/mds/reviewed/qe-013.md`) + `docs/mds/work.md` bookkeeping —
-  branch protection blocks direct `main` pushes.
+- **Branch:** `qe-102/rest-backfill-client`
+- **PR:** https://github.com/aoimasu/quant-engine/pull/15
+- **Latest commit:** _(blocker-fix follow-up — see below)_
+- **Evidence/design:** `docs/architecture/qe-102-rest-backfill-client-design.md`
+- **Changed surface:** `crates/ingest` — **new** `src/rest.rs` (`RestEndpoint`/`PageRequest`/URL
+  builder, `RestSource` port, `parse_klines_json`, `RestError`; real `HttpRestSource` behind `http`),
+  **new** `src/backfill.rs` (`Backfiller`, `RetryPolicy`, `BackfillRequest`/`Result`); `src/lib.rs`
+  (module wiring, exports, +`IngestError::Rest`); `Cargo.toml` (+`serde_json`). Also bundles the
+  QE-101 archive (`docs/mds/reviewed/qe-101.md`) + `docs/mds/work.md` bookkeeping — branch protection
+  blocks direct `main` pushes.
 
 ### Acceptance criteria (copied from backlog)
-- [x] Re-running the downloader fetches nothing already present and verified.
-- [x] Corrupt/checksum-mismatched files are rejected and re-fetched.
+- [x] The fused corpus's latest bar is within one bar-interval of "now" at run time.
+- [x] Vendor/REST overlap region is retained for diffing.
 
 ### Verification (re-run locally — all green)
 - `cargo fmt --all --check` — ok
 - `cargo clippy --workspace --all-targets --locked -- -D warnings` — clean (also
-  `cargo clippy -p qe-ingest --features http` — the ureq adapter — clean)
-- `cargo test --workspace --locked` — `qe-ingest` 22 unit + 2 integration; workspace green
-- `cargo deny check` — advisories/bans/licenses/sources ok (the optional `ureq` uses **native-tls**
-  to avoid ring's non-allowlisted OpenSSL licence; `zip` is deflate-only, pure-Rust)
+  `cargo clippy -p qe-ingest --features http` — the ureq REST adapter — clean)
+- `cargo test --workspace --locked` — `qe-ingest` 33 unit (+10: rest 5, backfill 5) + 2 integration;
+  workspace green
+- `cargo deny check` — advisories/bans/licenses/sources ok (no new third-party deps beyond
+  `serde_json`, already in the workspace)
 
 Key AC-proving tests:
-- **AC #1 (idempotent / resumable)** — `downloader::tests::fetches_then_reruns_skip_everything` and
-  the integration `enumerate_download_and_rerun_is_idempotent`: a clean fetch then a re-run reports
-  all-skipped and issues **zero** network hits for already-verified files (shared hit counter).
-- **AC #2 (corrupt → rejected + re-fetched)** — `corrupt_transfer_is_rejected_and_refetched` (one
-  corrupt transfer → re-fetched to success, two hits) and
-  `persistently_corrupt_file_errors_and_is_not_cached` (never verifies → `ChecksumMismatch`, not
-  cached). Cache `tampered_file_is_not_verified` proves a truncated cache entry isn't trusted.
-- **Supporting:** `source` path/URL/checksum golden strings; `checksum` SHA-256 KAT + `.CHECKSUM`
-  parse; `plan` point-in-time enumeration (listing/delisting windows, daily/monthly granularity,
-  count-agnostic); `drift` added/removed/reordered + ZIP-header extraction + cross-month registry.
+- **AC #1 (latest bar within one interval of now)** — `backfill::tests::paginates_to_within_one_
+  interval_of_now`: pages a chunked dataset (limit = 2) until `latest_open_time_ms >= now - interval`.
+- **AC #2 (overlap retained)** — `retains_overlap_region_before_from`: with `overlap_ms = 2×interval`,
+  rows before `from_ms` come back in `overlap` (`[3m, 4m]`), the rest in `fresh`.
+- **Pagination / retry / rate-limit** — cursor pagination by `last_open_time + interval`;
+  `retries_rate_limit_then_succeeds` (RateLimited→Transient→ok within `max_retries`),
+  `gives_up_after_exhausting_retries`, `fatal_error_is_not_retried` (one call, no retry).
+- **`rest`** — golden URL strings (klines `interval=`, funding no-interval, OI `period=`);
+  `parse_klines_json` over Binance array + `/futures/data` object forms; malformed-JSON rejection.
 
 ### Design notes for the reviewer
-- **Port/adapter split:** the downloader logic runs against a `Fetcher` trait (the only network
-  seam), so the whole crate is tested offline with an in-memory fake. The real `HttpFetcher` (ureq +
-  system TLS) is **behind a default-off `http` feature** — CI's default build/test never compiles
-  the TLS stack; the live path is a thin adapter compiled + clippy-checked locally.
-- **Idempotent / resumable (AC #1):** `sync_file` skips any file present **and** whose bytes re-hash
-  to the stored `.sha256` sidecar; a re-run after interruption re-skips completed files. The skip
-  recomputes SHA-256, so a truncated cache entry is re-fetched rather than trusted.
-- **Corrupt → reject + re-fetch (AC #2):** verification happens after every fetch; a digest mismatch
-  is never cached and triggers exactly one re-fetch before erroring `ChecksumMismatch`.
-- **Point-in-time (QE-012):** `enumerate_targets` intersects each instrument's `[listed, delisted)`
-  window with the requested month window — never requesting data before listing or after delisting.
-  Reuses `qe_config::universe::parse_iso_date` so the crate adds **no** civil-date math.
-- **Schema drift:** `csv_header` extracts the header from the dump ZIP (pure-Rust `zip`, deflate);
-  `SchemaRegistry` baselines the first month per kind and flags later differing columns.
-- **Minimal deps / licences:** `sha2` (already present) + `zip` (deflate); HTTP/TLS optional. `cargo
-  deny` green. **Topology:** new `qe-ingest → qe-config` edge (→ `qe-domain` leaf); not `runtime`, so
-  the QE-001 guard is unaffected.
+- **Same port/adapter pattern as QE-101:** all backfill logic runs against the `RestSource` trait
+  (the only network seam), tested offline with a scripted fake; the real `HttpRestSource` (ureq +
+  system TLS) is **behind the default-off `http` feature** — never in CI's default build. The JSON→row
+  extraction (`parse_klines_json`) is a **pure, tested** function the adapter reuses.
+- **AC #1:** `Backfiller::backfill` pages forward (cursor = `last_open_time + interval_ms`) until the
+  newest row is within one `interval_ms` of `now_ms`; `now_ms` is passed in (binary supplies the
+  clock; tests pin it) for determinism.
+- **AC #2:** the cursor starts `overlap_ms` *before* the vendor right edge; rows with
+  `open_time < from_ms` are partitioned into `overlap` (retained for QE-103), never discarded.
+- **Rate-limit-aware retry:** `RetryPolicy` bounds attempts on `RateLimited`/`Transient` and surfaces
+  `Fatal` immediately — the seam QE-201's shared handler will formalise. Backoff *sleeping* lives in
+  the real adapter (honours `Retry-After`), so the core stays deterministic.
+- **Out of scope:** live streaming (QE-202); fusion + the actual reconciliation diff (QE-103/QE-104)
+  — QE-102 produces the rows + retained overlap. **Topology:** stays within `qe-ingest`; QE-001
+  guard unaffected.
 
 ### Review notes
 
-**Verdict: [Approved].** Reviewed strictly as architect + senior engineer against the full diff vs `main`
-(head `f6ad1bd`) — read every new src file and both integration tests. Both ACs are met and **correct**,
-the port/adapter boundary is clean, and the dependency/topology hygiene holds.
+**Verdict: [Reviewed].** Reviewed strictly as architect + senior engineer against the full diff vs `main`
+(head `ce34e6b`). **Both ACs pass and are well-tested** — the issue below is a non-AC correctness/safety
+bug on the explicitly-flagged retry/rate-limit path that I won't wave through.
 
-**AC #1 — idempotent / resumable (PASS).** `cache.is_verified` re-reads the cached bytes and re-hashes
-them against the trimmed `.sha256` sidecar (a missing file/sidecar or hash mismatch → `false`), so a
-truncated or tampered entry is **never trusted** (`tampered_file_is_not_verified`). `sync_file` returns
-`Skipped` on a verified hit **before any fetch**, so a re-run touches no network. The integration test
-`enumerate_download_and_rerun_is_idempotent` proves this with a shared `Rc<RefCell<usize>>` hit counter:
-after a 10-file fetch, the second `sync_all` reports `skipped == 10`, `fetched == 0`, and the counter is
-**unchanged** (zero network hits). I independently verified the 10-target count (BTC open-ended 3mo×2
-kinds = 6; ETH listed 2020-02-01 → Feb+Mar ×2 = 4).
+**What's correct (verified):**
+- **AC #1 (freshness).** `Backfiller::backfill` pages forward (`cursor = newest + interval_ms`) until
+  `newest >= now_ms - interval_ms`, with `now_ms` injected for determinism. Traced
+  `paginates_to_within_one_interval_of_now` by hand: stops at 9min for now=10min/interval=1min →
+  `latest >= now - interval`. ✓
+- **AC #2 (overlap retained).** Cursor starts `from_ms - overlap_ms`; the final `partition` puts
+  `open_time < from_ms` into `overlap`, the rest into `fresh`. Traced `retains_overlap_region_before_from`:
+  overlap = {3min, 4min}, fresh ≥ 5min incl. 10min. ✓
+- **Forward-progress guard is sound.** The `progressed` flag (a page yielding no row `> last_have`) plus
+  the `> last_have` dedup correctly break the loop on duplicate/non-advancing pages and on an empty page —
+  no infinite loop. Retry bounding (`attempts >= max_retries` before increment) gives exactly
+  `1 + max_retries` calls; `Fatal` returns on the first call. All five retry/pagination tests trace clean.
+- **Port/adapter + pure parse.** `RestSource` is the only seam; `parse_klines_json` is pure and correctly
+  classifies every malformed shape as `Fatal` (non-retryable). URL golden strings match the real fapi
+  layout (klines `interval=5m`, fundingRate no-interval, openInterestHist `period=1h` under
+  `/futures/data`). `HttpRestSource` is correctly `#[cfg(feature = "http")]`. Topology unchanged (stays in
+  `qe-ingest`; only new dep `serde_json`, already in-workspace).
 
-**AC #2 — corrupt → rejected + re-fetched (PASS).** `sync_file` fetches the authoritative checksum
-sidecar once, then loops `0..2`: each transfer is SHA-256-verified, a mismatch is discarded (**never
-cached**) and retried exactly once; a persistent mismatch returns `ChecksumMismatch` with nothing
-written. `corrupt_transfer_is_rejected_and_refetched` (1 corrupt + 1 good → `Refetched`, 2 hits, then
-cached) and `persistently_corrupt_file_errors_and_is_not_cached` (errors, not cached) confirm both
-branches.
+**Verification caveat (transparency).** The Rust toolchain is absent from this review environment (no
+`cargo`/`rustc`/`rustup`), so I did not execute the gates (incl. `--features http` clippy / `cargo deny`).
+The verdict rests on full static review + hand-traced execution of every test. The blocker below is a
+logic/spec mismatch visible purely in the source, independent of any gate.
 
-**Port/adapter split (PASS).** All orchestration runs against the `Fetcher` trait — the only network
-seam — and is fully exercised offline via in-memory fakes. The real `HttpFetcher` (ureq + native-tls) is
-behind `#[cfg(feature = "http")]` with `default = []`, so the default build/test never compiles the TLS
-stack; 404 vs other failures are distinguished at the `FetchError` boundary.
+### Feedback
 
-**Point-in-time enumeration (PASS).** `plan::overlaps` reduces to the exact half-open interval-intersection
-test `p_start < delisted && listed < p_end` (period `[p_start, p_end)` ∩ listing `[listed, delisted)`),
-with monthly `p_end` = next-month-start and daily `p_end` = start + 86_400_000. I traced both tests by
-hand — monthly ETH `[Mar15, Jun1)` → Mar/Apr/May (3); daily Feb-2020 listed Feb 10 → days 10..=29 (20).
-Date→timestamp reuses `qe_config::universe::parse_iso_date` (no civil-date conversion duplicated).
+1. **[BLOCKER] Rate-limit backoff is never applied — `retry_after_ms` is dead, and the live client will
+   hammer a 429 (contradicts the design's "honours Retry-After").**
+   `HttpRestSource::fetch_page` computes `retry_after_ms` from the `Retry-After` header and returns
+   `RestError::RateLimited { retry_after_ms }` **without sleeping**. `Backfiller::fetch_with_retry` then
+   matches `e @ (RestError::RateLimited { .. } | RestError::Transient(_))` — the `{ .. }` discards
+   `retry_after_ms` — and **retries immediately with zero delay**. Confirmed by grep: the only readers of
+   `retry_after_ms` are its `Display` impl and a test; nothing ever waits on it, and there is no
+   `sleep`/backoff anywhere in the crate. Consequences:
+   (a) The design note's claim *"Backoff sleeping lives in the real adapter (honours Retry-After)"* is
+   **false** — the adapter classifies but does not honour it.
+   (b) On a real HTTP 429, the live `http` client issues up to `max_retries` (default **5**) back-to-back
+   requests with no delay, which Binance escalates to a 418 IP ban — a real operational bug in the one
+   path that does live network I/O (and is not CI-covered, so review is the only gate).
+   **Resolve either way:** (i) make it true — sleep `retry_after_ms` (capped) in the adapter before
+   returning, or inject a `Sleeper`/clock into the `Backfiller` and sleep on `RateLimited` (keeps the core
+   testable with a fake sleeper, preserving determinism); **or** (ii) if rate-limit *waiting* is genuinely
+   deferred to QE-201's shared handler, correct the design note + the `RetryPolicy` doc to say so
+   explicitly ("`retry_after_ms` is surfaced for QE-201's handler; no backoff yet") and reply with
+   `{ANSWER}` justifying the deferral — I'll evaluate it objectively. As written, the code and the stated
+   design disagree, and the live behaviour is harmful.
 
-**Schema drift + golden paths (PASS).** `detect_drift` classifies added/removed/reordered correctly;
-`csv_header` extracts row 0 from the deflate ZIP with proper error mapping; `SchemaRegistry` baselines
-first-seen-per-kind and flags later differences. `source.rs` golden strings match the real
-`data.binance.vision` `futures/um` layout (daily klines with interval segment, monthly `fundingRate`
-without, daily `metrics`), URLs and `.CHECKSUM` sidecars included.
+2. **[Non-blocking] `PageRequest.symbol` / `BackfillRequest.symbol` are unvalidated `String`s** placed
+   directly into the URL without encoding. Upstream callers pass validated `InstrumentId`s, but the type
+   doesn't enforce it — consider taking `&InstrumentId` (as `source.rs`/`plan.rs` do) so the URL-safety
+   invariant is carried by the type rather than by convention. Not a blocker.
 
-**Deps / topology (PASS).** `Cargo.toml`: `http` feature-gated `ureq` with `default-features = false` +
-`native-tls` (avoids ring's non-allowlisted licence), `zip` deflate-only pure-Rust, dropped the unused
-`qe-storage`. `qe-ingest`'s only deps are `{qe-config, qe-domain, sha2, thiserror, zip, ureq}` — no
-`wfo`/`ensemble`/`runtime` — so the new `qe-ingest → qe-config (→ qe-domain leaf)` edge cannot affect the
-QE-001 `runtime ↮ wfo/ensemble` guard. Confirmed structurally from the manifest.
+### Post-review follow-up (coder) — BLOCKER fixed; status → [Ready-for-review]
 
-**Verification caveat (transparency).** I could **not** independently re-run the cargo gates this pass:
-the Rust toolchain is absent from this review environment (no `cargo`/`rustc`/`rustup`), so the
-default-vs-`http` clippy and `cargo deny` claims were not executed here. The verdict rests on full static
-review of all changed source, hand-verification of the interval/enumeration math and the golden paths,
-and manifest-level confirmation of the dependency topology. I did not rely on the PR's "all green" claim
-as evidence; treat the reported gate results as developer-reported. Nothing in the static review
-contradicts them.
+Agreed with the blocker and both notes — fixed.
+- **[BLOCKER] Rate-limit backoff now actually applied — DONE.** `retry_after_ms` is no longer dead.
+  Introduced a `Sleeper` **port** (`RealSleeper` = `thread::sleep` in production; a recording/no-op
+  fake in tests). `Backfiller::fetch_with_retry` now **waits before each retry**: the venue's
+  `Retry-After` (floored at `RetryPolicy.base_delay_ms`) for a `RateLimited`, else a linear
+  `base_delay_ms × attempt` for a `Transient` — so a 429 is never hammered (no 418 IP-ban risk).
+  `RetryPolicy` gained `base_delay_ms`; `Backfiller<S, Sl = RealSleeper>` with `new` (real) /
+  `with_sleeper` (injected). New assertions in `retries_rate_limit_then_succeeds_and_waits_retry_after`
+  prove `waits[0] == 2000` (Retry-After honoured) and the transient linear backoff; `fatal_error_is_
+  not_retried` now also asserts **zero** waits. The design note's "honours Retry-After" claim is now
+  true (and the doc updated to describe the `Sleeper` port).
+- **[non-blocking] `symbol` typed as `&InstrumentId` — DONE.** `PageRequest.symbol` and
+  `BackfillRequest.symbol` are now validated `InstrumentId`s (URL uses `.as_str()`), not raw `String`s.
+- Gates re-run green: fmt ok; clippy clean (default **and** `--features http`); `qe-ingest` 33 unit +
+  2 integration; deny unaffected.
 
-**Advisories (non-blocking — do not gate merge):**
-1. **404 handling doesn't yet match its documented intent.** `fetcher.rs` distinguishes
-   `FetchError::NotFound` *"so the planner can treat a missing period as no data rather than a hard
-   error"*, but `sync_file` maps it to `IngestError::NotFound` and `sync_all` records it in
-   `report.failed` like any failure. For windows that enumerate an as-yet-unpublished month (e.g. the
-   current month, or a gap), a benign 404 will surface as a "failure." No AC impact (the run continues
-   and idempotency/corruption both hold), but wire NotFound → a benign `missing`/skipped classification
-   before `report.failed` is used for alerting.
-2. **`csv_header` reads the entire decompressed entry into a `String`** just to take row 0 — for bulk
-   monthly CSVs (1m klines ≈ multi-MB decompressed) that's wasteful. A `BufReader::read_line` over the
-   ZIP entry reads only the header.
-3. **`SchemaRegistry` keys baselines on `format!("{kind:?}")`** (the Debug string) — functional but
-   couples map identity to Debug formatting. `DataKind` already derives `Eq/Copy`; derive `Hash` and key
-   on `DataKind` directly.
-4. **Minor duplication / DRY (trivial):** `plan::month_days` re-implements the leap/days-in-month rule
-   that `qe_config::universe` already has, and `checksum::sha256_hex` is the third hand-rolled per-byte
-   hex formatter in the workspace (lineage, cli vintage) — candidates for a shared helper.
-
-### Post-approval follow-up (coder) — advisories #1–#3 resolved; status → [Ready-for-review]
-
-Addressed the reviewer's non-blocking advisories (no AC behaviour weakened).
-- **#1 (NotFound intent/code gap) — DONE.** A 404 now means "no dump published for this period" and
-  yields the new `FileOutcome::Missing` (counted in `SyncReport.missing`), **not** a `failed` entry.
-  `sync_file` uses a `fetch_opt` that maps 404 → `Ok(None)`; the now-unreachable `IngestError::NotFound`
-  variant was removed. New test `missing_period_is_not_a_failure` (404 → Missing, nothing cached).
-- **#2 (csv_header read whole entry) — DONE.** `csv_header` now reads only the first line via a
-  `BufReader::read_line`, not the whole decompressed CSV.
-- **#3 (registry keyed on Debug string) — DONE.** Derived `Hash` on `DataKind` (its `Resolution`
-  already derives `Hash`) and keyed `SchemaRegistry` on `HashMap<DataKind, _>` directly.
-- **#4 (trivial leap-year/hex DRY) — left as-is:** `plan::month_days` can't reuse `qe-config`'s
-  private leap helper without widening that crate's API; the duplication is 4 lines and well-tested.
-- Gates re-run green: fmt ok; clippy clean (default **and** `--features http`); `qe-ingest` 23 unit
-  (+1) + 2 integration; deny unaffected.
+{ANSWER} On the blocker's "defer to QE-201?" option — I chose to **implement the wait now** rather
+than defer, because the design already claimed "honours Retry-After" and shipping the live `http`
+client without it is a real ban risk. The `Sleeper` port keeps it testable and is exactly the seam
+QE-201's shared handler will adopt (it can swap in a smarter backoff/`Sleeper`), so this is forward-
+compatible, not throwaway.
