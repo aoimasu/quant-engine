@@ -23,6 +23,8 @@
 //!   train→validate windows (leakage-free including lookback) that carry the archive across transitions.
 //! - [`mapelites`] (QE-118) — the QD MAP-Elites archive: per-direction Deep-Grid sub-populations over the
 //!   QE-111 niche grid, niche parent sampling, and embarrassingly-parallel deterministic evaluation.
+//! - [`variation`] (QE-119) — the variation operators (local-refine / explore / fresh-random) and the
+//!   adaptive-selection driver that allocates operator budget by productivity (QE-112 credit).
 
 pub mod archive;
 pub mod cv;
@@ -32,6 +34,7 @@ pub mod genome;
 pub mod lifecycle;
 pub mod mapelites;
 pub mod operator;
+pub mod variation;
 pub mod walkforward;
 
 pub use archive::{
@@ -59,6 +62,9 @@ pub use mapelites::{
 pub use operator::{
     ApplicationOutcome, Operator, OperatorSelector, DEFAULT_EPSILON, DEFAULT_WINDOW,
     NOVELTY_REWARD, OPERATORS,
+};
+pub use variation::{
+    explore, fresh_random, local_refine, StepReport, VariationDriver, LOCAL_SIZE_STEP,
 };
 pub use walkforward::{WalkForward, Window, WindowMode};
 
