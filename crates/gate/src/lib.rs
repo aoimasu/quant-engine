@@ -24,6 +24,9 @@ pub const DEFAULT_DSR_THRESHOLD: f64 = 0.95;
 pub const DEFAULT_SPA_ALPHA: f64 = 0.05;
 /// Default pre-registered OOS tolerance: the holdout Sharpe may fall at most this fraction below in-sample.
 pub const DEFAULT_OOS_TOLERANCE: f64 = 0.5;
+/// Default pre-registered minimum holdout length — below this the holdout is too small for the Sharpe /
+/// over-fit checks to mean anything, so the gate refuses to promote (rather than passing vacuously).
+pub const DEFAULT_MIN_HOLDOUT_SAMPLES: usize = 30;
 
 /// A time-blocked train / embargo / holdout split (QE-134/D1). The three ranges are contiguous, disjoint,
 /// and cover `0..n`; the `holdout` is the final slice and `embargo` is a purged gap between them.
@@ -64,6 +67,9 @@ pub struct G1Criteria {
     pub spa_alpha: f64,
     /// The fraction by which the holdout Sharpe may fall below in-sample before it is over-fit.
     pub oos_tolerance: f64,
+    /// The minimum number of holdout samples for the holdout checks to be meaningful (a smaller holdout is
+    /// refused rather than passed vacuously).
+    pub min_holdout_samples: usize,
 }
 
 impl G1Criteria {
@@ -75,6 +81,7 @@ impl G1Criteria {
             dsr_threshold: DEFAULT_DSR_THRESHOLD,
             spa_alpha: DEFAULT_SPA_ALPHA,
             oos_tolerance: DEFAULT_OOS_TOLERANCE,
+            min_holdout_samples: DEFAULT_MIN_HOLDOUT_SAMPLES,
         }
     }
 }
@@ -134,6 +141,12 @@ pub fn evaluate_g1(
     let oos_floor = in_sample_sharpe * (1.0 - criteria.oos_tolerance);
 
     let results = vec![
+        CriterionResult {
+            name: "holdout_has_sufficient_samples".to_string(),
+            passed: holdout_returns.len() >= criteria.min_holdout_samples,
+            value: holdout_returns.len() as f64,
+            threshold: criteria.min_holdout_samples as f64,
+        },
         CriterionResult {
             name: "net_of_cost_edge_persists".to_string(),
             passed: holdout_sharpe >= criteria.min_holdout_sharpe,
@@ -251,10 +264,21 @@ mod tests {
             &G1Criteria::with_defaults(),
         );
         // Every criterion carries its value + threshold, and the record round-trips through serde.
-        assert_eq!(decision.criteria.len(), 4);
+        assert_eq!(decision.criteria.len(), 5);
         let json = serde_json::to_string(&decision).unwrap();
         let back: G1Decision = serde_json::from_str(&json).unwrap();
         assert_eq!(back, decision);
+    }
+
+    #[test]
+    fn an_undersized_holdout_is_refused_not_passed_vacuously() {
+        // A too-short (here empty) holdout must not promote even if every other input looks fine — the
+        // holdout checks would otherwise be meaningless (sharpe_ratio of an empty series is 0).
+        let decision = evaluate_g1(0.0, &[], &good_robustness(), &G1Criteria::with_defaults());
+        assert!(!decision.promoted);
+        assert!(decision
+            .failed_criteria()
+            .contains(&"holdout_has_sufficient_samples"));
     }
 
     #[test]
