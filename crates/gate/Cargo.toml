@@ -1,0 +1,21 @@
+[package]
+name = "qe-gate"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The DSR/SPA diagnostics and net-of-cost Sharpe G1 judges (QE-131, the primary dependency).
+qe-validation.workspace = true
+# The recorded G1 decision + criteria are serialisable (auditable evidence).
+serde.workspace = true
+
+[dev-dependencies]
+# Round-trip the recorded decision in tests.
+serde_json.workspace = true
