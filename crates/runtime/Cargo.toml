@@ -16,6 +16,8 @@ qe-risk.workspace = true
 qe-signal.workspace = true
 qe-storage.workspace = true
 qe-venue.workspace = true
+# Exact-decimal scalar context (funding/OI/premium) joined onto bars in the live factor join (QE-206).
+rust_decimal.workspace = true
 
 [dev-dependencies]
 rust_decimal.workspace = true
