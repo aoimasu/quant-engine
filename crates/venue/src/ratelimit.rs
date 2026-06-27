@@ -63,7 +63,7 @@ impl RateLimiter {
             self.window_start_ms = now_ms;
             self.used = 0;
         }
-        if self.used + weight <= self.budget {
+        if self.used.saturating_add(weight) <= self.budget {
             self.used += weight;
             Acquire::Ready
         } else {
@@ -75,6 +75,13 @@ impl RateLimiter {
     /// Record a venue `Retry-After`: no `acquire` may proceed before `until_ms`.
     pub fn note_retry_after(&mut self, until_ms: i64) {
         self.next_allowed_ms = self.next_allowed_ms.max(until_ms);
+    }
+
+    /// The per-window weight budget. A request whose weight exceeds this can never fit and must be
+    /// rejected by the caller rather than fed to `acquire` (which would otherwise wait forever).
+    #[must_use]
+    pub fn budget(&self) -> u32 {
+        self.budget
     }
 }
 

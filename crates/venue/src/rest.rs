@@ -161,6 +161,17 @@ impl<T: RestTransport, C: Clock> VenueRestClient<T, C> {
             }
         }
 
+        // A request that can never fit the budget would wait forever in the rate-limit gate below
+        // (every window roll resets `used` to 0, but `0 + weight > budget` still blocks). Reject it
+        // up front as a fatal misconfiguration rather than hang.
+        if req.weight > self.limiter.budget() {
+            return Err(RestError::Fatal(format!(
+                "request weight {} exceeds the rate-limit budget {}",
+                req.weight,
+                self.limiter.budget()
+            )));
+        }
+
         let mut attempt = 0u32;
         let mut last = String::new();
         while attempt < self.max_attempts {
@@ -484,6 +495,22 @@ mod tests {
         let err = client.fetch(&req_window(1, 0, i_64_max())).unwrap_err();
         assert!(matches!(err, RestError::Exhausted { attempts: 3, .. }));
         assert_eq!(client.transport.hits(), 3);
+    }
+
+    #[test]
+    fn oversized_weight_is_rejected_not_hung() {
+        // A request weighing more than the whole window budget can never fit — it must fail fast as a
+        // misconfiguration, never spin the rate-limit gate forever or reach the transport.
+        let transport = FakeTransport::new(vec![Outcome::Ok(b"x".to_vec())]);
+        let mut client = VenueRestClient::new(transport, ManualClock::new(0))
+            .with_limiter(RateLimiter::new(10, 1_000));
+        let err = client.fetch(&req_window(11, 0, i_64_max())).unwrap_err();
+        assert!(matches!(err, RestError::Fatal(_)));
+        assert_eq!(
+            client.transport.hits(),
+            0,
+            "an unsatisfiable request never reaches the transport"
+        );
     }
 
     #[test]
