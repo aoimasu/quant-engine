@@ -1531,6 +1531,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "qe-report"
+version = "0.1.0"
+dependencies = [
+ "qe-validation",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "qe-risk"
 version = "0.1.0"
 dependencies = [

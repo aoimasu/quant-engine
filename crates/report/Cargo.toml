@@ -1,0 +1,21 @@
+[package]
+name = "qe-report"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The DSR/PBO/SPA section is qe_validation::RobustnessReport directly (QE-131, the primary dependency).
+qe-validation.workspace = true
+# Serialisable report (reproducibility + machine-readable counterpart to the markdown).
+serde.workspace = true
+
+[dev-dependencies]
+# Round-trip the report in tests.
+serde_json.workspace = true
