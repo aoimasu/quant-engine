@@ -11,15 +11,28 @@
 //! - [`cache`] — the local raw-file cache with digest sidecars.
 //! - [`downloader`] — the idempotent, resumable, checksum-verifying [`Downloader`].
 //! - [`checksum`] / [`drift`] — SHA-256 verification and CSV schema-drift detection.
+//!
+//! QE-102 adds the [`rest`]/[`backfill`] month-to-date client; QE-103 the
+//! [`integrity`]/[`fill`]/[`coverage`]/[`reconcile`]/[`quality`] validation layer. QE-104 adds
+//! **fusion**: [`canonical`] (the fixed series set), [`derive`] (VWAP, adjustments, spread),
+//! [`coalesce`] (daily→monthly), and [`fuse`] (temporal alignment onto the base grid →
+//! [`FusedCorpus`], byte-reproducible). Arrow record-batch/IPC output (`corpus_to_ipc`) is behind
+//! the default-off `arrow` feature, so CI's default build stays dependency-light.
 
+#[cfg(feature = "arrow")]
+pub mod arrow;
 pub mod backfill;
 pub mod cache;
+pub mod canonical;
 pub mod checksum;
+pub mod coalesce;
 pub mod coverage;
+pub mod derive;
 pub mod downloader;
 pub mod drift;
 pub mod fetcher;
 pub mod fill;
+pub mod fuse;
 pub mod integrity;
 pub mod plan;
 pub mod quality;
@@ -31,11 +44,15 @@ pub use backfill::{
     BackfillRequest, BackfillResult, Backfiller, RealSleeper, RetryPolicy, Sleeper,
 };
 pub use cache::RawCache;
+pub use canonical::CanonicalSeries;
+pub use coalesce::coalesce_bars;
 pub use coverage::{coverage, flag_short_history, Coverage, ShortCoverage};
+pub use derive::{adjust_bar, spread_to_underlier, typical_price, vwap, Adjustment};
 pub use downloader::{Downloader, FileOutcome, SyncReport};
 pub use drift::{csv_header, detect_drift, DriftStatus, SchemaRegistry};
 pub use fetcher::{FetchError, Fetcher};
 pub use fill::{plan_fill, FillPlan, FilledPoint, Hole};
+pub use fuse::{align_onto_grid, fuse, Cell, FusedColumn, FusedCorpus, FusionInput, Grid};
 pub use integrity::{check_series, Gap, SeriesIntegrity};
 pub use plan::enumerate_targets;
 pub use quality::{DataQualityReport, HardViolationPolicy, SeriesQuality, Violation};
@@ -50,6 +67,9 @@ pub use source::{DataKind, Date, DumpFile, Period, YearMonth, DEFAULT_BASE_URL};
 pub use fetcher::HttpFetcher;
 #[cfg(feature = "http")]
 pub use rest::HttpRestSource;
+
+#[cfg(feature = "arrow")]
+pub use arrow::{corpus_schema, corpus_to_ipc, corpus_to_record_batch};
 
 use thiserror::Error;
 
