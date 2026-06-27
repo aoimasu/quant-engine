@@ -37,7 +37,8 @@ pub fn assemble_and_cache_features(
     cfg: &CatalogueConfig,
     samples: &[Sample],
 ) -> Result<usize, FeatureCacheError> {
-    let lookback = FeatureSchema::from_catalogue(cfg).max_lookback();
+    let schema = FeatureSchema::from_catalogue(cfg);
+    let lookback = schema.max_lookback();
     let vectors = assemble_batch(cfg, samples);
     let mut cached = 0;
     for v in vectors.iter().filter(|v| v.is_complete()) {
@@ -48,7 +49,7 @@ pub fn assemble_and_cache_features(
             lookback: lookback as u32,
             time: Timestamp::from_millis(v.time_ms),
         };
-        store.put_indicator_state(&key, source_lineage, &v.to_bytes())?;
+        store.put_indicator_state(&key, source_lineage, &v.to_bytes(&schema))?;
         cached += 1;
     }
     Ok(cached)
@@ -76,5 +77,5 @@ pub fn read_cached_feature(
         time,
     };
     let bytes = store.get_indicator_state(&key, current_lineage)?;
-    Ok(bytes.and_then(|b| FeatureVector::from_bytes(&b, schema.len())))
+    Ok(bytes.and_then(|b| FeatureVector::from_bytes(&b, &schema)))
 }

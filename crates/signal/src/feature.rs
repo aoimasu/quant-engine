@@ -12,23 +12,24 @@ use crate::Sample;
 const NONE_SENTINEL: u16 = u16::MAX;
 
 /// The ordered contract a [`FeatureVector`] is interpreted against: indicator ids + lookbacks in
-/// catalogue order, plus the catalogue version.
+/// catalogue order, the catalogue version, and the per-indicator state count. The version + state
+/// count are embedded in each encoded vector's header so a decode against a mismatching schema fails
+/// loudly rather than silently mis-decoding.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FeatureSchema {
     ids: Vec<String>,
     lookbacks: Vec<usize>,
     version: u32,
+    num_states: u16,
 }
 
 impl FeatureSchema {
-    /// Derive the schema from the catalogue built with `cfg`.
-    #[must_use]
-    pub fn from_catalogue(cfg: &CatalogueConfig) -> Self {
-        let cat = catalogue(cfg);
-        let mut ids = Vec::with_capacity(cat.len());
-        let mut lookbacks = Vec::with_capacity(cat.len());
-        for ind in &cat {
-            let spec = ind.spec();
+    fn from_specs(specs: impl IntoIterator<Item = crate::indicator::IndicatorSpec>) -> Self {
+        let mut ids = Vec::new();
+        let mut lookbacks = Vec::new();
+        let mut num_states = 0u16;
+        for spec in specs {
+            num_states = spec.num_states; // uniform across the catalogue
             ids.push(spec.id);
             lookbacks.push(spec.lookback);
         }
@@ -36,7 +37,14 @@ impl FeatureSchema {
             ids,
             lookbacks,
             version: CATALOGUE_VERSION,
+            num_states,
         }
+    }
+
+    /// Derive the schema from the catalogue built with `cfg`.
+    #[must_use]
+    pub fn from_catalogue(cfg: &CatalogueConfig) -> Self {
+        FeatureSchema::from_specs(catalogue(cfg).iter().map(|i| i.spec()))
     }
 
     /// Number of features (== catalogue size).
@@ -63,6 +71,12 @@ impl FeatureSchema {
         self.version
     }
 
+    /// The per-indicator state count (uniform across the catalogue).
+    #[must_use]
+    pub fn num_states(&self) -> u16 {
+        self.num_states
+    }
+
     /// The maximum indicator lookback — the warmup before a vector can be complete.
     #[must_use]
     pub fn max_lookback(&self) -> usize {
@@ -87,11 +101,19 @@ impl FeatureVector {
         self.states.iter().all(Option::is_some)
     }
 
-    /// Encode to compact, deterministic bytes: `i64` time (BE) then one `u16` (BE) per slot, with
-    /// `0xFFFF` meaning `None`.
+    /// Encode to **self-describing**, deterministic bytes interpreted against `schema`:
+    ///
+    /// `[version u32 BE][num_states u16 BE][width u16 BE][time i64 BE]` then one `u16` (BE) per slot,
+    /// with `0xFFFF` meaning `None`. The header lets [`from_bytes`] reject a vector encoded under a
+    /// different catalogue version / state count, instead of silently mis-decoding (a same-lineage
+    /// catalogue change otherwise reads as garbage).
     #[must_use]
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(8 + self.states.len() * 2);
+    pub fn to_bytes(&self, schema: &FeatureSchema) -> Vec<u8> {
+        let width = self.states.len() as u16;
+        let mut out = Vec::with_capacity(16 + self.states.len() * 2);
+        out.extend_from_slice(&schema.version().to_be_bytes());
+        out.extend_from_slice(&schema.num_states().to_be_bytes());
+        out.extend_from_slice(&width.to_be_bytes());
         out.extend_from_slice(&self.time_ms.to_be_bytes());
         for slot in &self.states {
             let code = slot.map_or(NONE_SENTINEL, QState::index);
@@ -100,17 +122,29 @@ impl FeatureVector {
         out
     }
 
-    /// Decode `width` slots from bytes produced by [`to_bytes`]. Returns `None` on a length mismatch
-    /// or a state index `>= NONE_SENTINEL` other than the sentinel.
+    /// Decode bytes produced by [`to_bytes`], validating the header against `schema`.
+    ///
+    /// Returns `None` if the bytes are malformed, truncated, or the embedded version / state-count /
+    /// width does not match `schema` — so a catalogue change can never be silently mis-read.
     #[must_use]
-    pub fn from_bytes(bytes: &[u8], width: usize) -> Option<FeatureVector> {
-        if bytes.len() != 8 + width * 2 {
+    pub fn from_bytes(bytes: &[u8], schema: &FeatureSchema) -> Option<FeatureVector> {
+        let width = schema.len();
+        if bytes.len() != 16 + width * 2 {
             return None;
         }
-        let time_ms = i64::from_be_bytes(bytes[0..8].try_into().ok()?);
+        let version = u32::from_be_bytes(bytes[0..4].try_into().ok()?);
+        let num_states = u16::from_be_bytes(bytes[4..6].try_into().ok()?);
+        let stored_width = u16::from_be_bytes(bytes[6..8].try_into().ok()?);
+        if version != schema.version()
+            || num_states != schema.num_states()
+            || usize::from(stored_width) != width
+        {
+            return None;
+        }
+        let time_ms = i64::from_be_bytes(bytes[8..16].try_into().ok()?);
         let mut states = Vec::with_capacity(width);
         for i in 0..width {
-            let off = 8 + i * 2;
+            let off = 16 + i * 2;
             let code = u16::from_be_bytes(bytes[off..off + 2].try_into().ok()?);
             states.push(if code == NONE_SENTINEL {
                 None
@@ -139,18 +173,7 @@ impl FeatureAssembler {
     /// The schema this assembler produces vectors against.
     #[must_use]
     pub fn schema(&self) -> FeatureSchema {
-        let mut ids = Vec::with_capacity(self.catalogue.len());
-        let mut lookbacks = Vec::with_capacity(self.catalogue.len());
-        for ind in &self.catalogue {
-            let spec = ind.spec();
-            ids.push(spec.id);
-            lookbacks.push(spec.lookback);
-        }
-        FeatureSchema {
-            ids,
-            lookbacks,
-            version: CATALOGUE_VERSION,
-        }
+        FeatureSchema::from_specs(self.catalogue.iter().map(|i| i.spec()))
     }
 
     /// Feed one sample (in time order) and assemble its feature vector.
@@ -255,6 +278,14 @@ mod tests {
 
     #[test]
     fn byte_codec_round_trips() {
+        let real = FeatureSchema::from_catalogue(&CatalogueConfig::default());
+        // A 3-wide toy schema sharing the version + state count.
+        let toy = FeatureSchema {
+            ids: vec!["a".into(), "b".into(), "c".into()],
+            lookbacks: vec![1, 1, 1],
+            version: real.version(),
+            num_states: real.num_states(),
+        };
         let v = FeatureVector {
             time_ms: 1_700_000_000_000,
             states: vec![
@@ -263,20 +294,36 @@ mod tests {
                 Some(QState::from_index(0)),
             ],
         };
-        let bytes = v.to_bytes();
-        let back = FeatureVector::from_bytes(&bytes, 3).unwrap();
-        assert_eq!(back, v);
-        // Width mismatch fails.
-        assert!(FeatureVector::from_bytes(&bytes, 2).is_none());
+        let bytes = v.to_bytes(&toy);
+        assert_eq!(FeatureVector::from_bytes(&bytes, &toy).unwrap(), v);
+        // Width mismatch (real catalogue schema) fails.
+        assert!(FeatureVector::from_bytes(&bytes, &real).is_none());
+    }
+
+    #[test]
+    fn decode_rejects_state_count_mismatch() {
+        // Same catalogue size + width but a different num_states must reject the blob (no silent
+        // mis-decode under an unchanged lineage).
+        let cfg = CatalogueConfig::default();
+        let schema = FeatureSchema::from_catalogue(&cfg);
+        let v = assemble_batch(&cfg, &series(80)).pop().unwrap();
+        let bytes = v.to_bytes(&schema);
+
+        let other = FeatureSchema::from_catalogue(&CatalogueConfig { states: 9 });
+        assert_eq!(other.len(), schema.len());
+        assert_ne!(other.num_states(), schema.num_states());
+        assert!(FeatureVector::from_bytes(&bytes, &other).is_none());
     }
 
     #[test]
     fn complete_vector_round_trips_through_bytes() {
         let cfg = CatalogueConfig::default();
-        let samples = series(80);
-        let width = FeatureSchema::from_catalogue(&cfg).len();
-        let v = assemble_batch(&cfg, &samples).pop().unwrap();
+        let schema = FeatureSchema::from_catalogue(&cfg);
+        let v = assemble_batch(&cfg, &series(80)).pop().unwrap();
         assert!(v.is_complete());
-        assert_eq!(FeatureVector::from_bytes(&v.to_bytes(), width).unwrap(), v);
+        assert_eq!(
+            FeatureVector::from_bytes(&v.to_bytes(&schema), &schema).unwrap(),
+            v
+        );
     }
 }
