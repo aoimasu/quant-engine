@@ -90,7 +90,8 @@ enum SectionKind {
 fn classify_section(header: &str) -> SectionKind {
     let inner = header.trim().trim_start_matches('[').trim_end_matches(']');
     let segs = split_dotted_key(inner);
-    if segs.iter().any(|s| s == "package") {
+    // Exactly `[package]` — not `[package.metadata.*]`, whose `name` keys must not be read as the crate.
+    if segs.len() == 1 && segs[0] == "package" {
         return SectionKind::Package;
     }
     if segs.iter().any(|s| s == "dev-dependencies") {
@@ -311,6 +312,20 @@ qe-storage.workspace = true
             !deps.contains("qe-validation") && !deps.contains("qe-storage"),
             "{deps:?}"
         );
+    }
+
+    #[test]
+    fn package_metadata_name_is_not_read_as_the_crate_name() {
+        // `[package.metadata.*]` is not `[package]`; its `name` key must not become the crate name.
+        let toml = "\
+[package]
+name = \"qe-wfo\"
+
+[package.metadata.deb]
+name = \"some-debian-package\"
+";
+        let (name, _) = parse_manifest(toml);
+        assert_eq!(name.as_deref(), Some("qe-wfo"));
     }
 
     #[test]
