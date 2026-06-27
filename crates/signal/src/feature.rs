@@ -65,6 +65,13 @@ impl FeatureSchema {
         &self.ids
     }
 
+    /// The ordered per-indicator lookbacks (parallel to [`ids`](Self::ids)). The genotype-derived
+    /// "timescale" behaviour descriptor (QE-111) reads these for a genome's referenced features.
+    #[must_use]
+    pub fn lookbacks(&self) -> &[usize] {
+        &self.lookbacks
+    }
+
     /// The catalogue version this schema was built from.
     #[must_use]
     pub fn version(&self) -> u32 {

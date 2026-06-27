@@ -6,10 +6,18 @@
 //! - [`genome`] (QE-110) — the strategy genome: a fixed-structure rule-bank representation over
 //!   quantised feature states that the QD/DE search mutates, recombines, and niches; emits a per-bar
 //!   `Decision` stream the backtester (QE-120) drives through `friction`.
+//! - [`archive`] (QE-111) — the QD/MAP-Elites behaviour descriptors: genotype-derived family /
+//!   timescale / holding axes, the per-direction grid resolution + Deep-Grid sub-population size, and
+//!   the descriptor-stability metric that keeps a genome's niche stable across walk-forward windows.
 
+pub mod archive;
 pub mod friction;
 pub mod genome;
 
+pub use archive::{
+    cell_reassignment_rate, descriptor_for, family_of, grid_cells, Cell, HoldingBand,
+    IndicatorFamily, TimescaleBand, CELLS_PER_DIRECTION, STABILITY_THRESHOLD, SUBPOP_SIZE,
+};
 pub use friction::{
     cost_sweep, simulate, Event, FeeSchedule, Fill, FrictionConfig, FundingStamp, Liquidity,
     PnlBreakdown, Position, SlippageModel,
