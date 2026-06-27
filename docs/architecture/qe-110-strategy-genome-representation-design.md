@@ -108,6 +108,24 @@ RiskParams { size_bps: u16 }    // target notional as basis-points of allowed ca
 Determinism: evaluation is a pure function of `(genome, features, position)` — no RNG, no clock, no
 hidden state — so it is identical batch vs streaming and reproducible (QE-006).
 
+**Reference fixture trace.** The checked-in fixture genome (`fixture_genome()` in `genome.rs`) over
+3 features, state range `0..=4` — long when f0 **and** f1 are high `[3,4]` (`min_satisfied = 2`),
+short when f0 **and** f1 are low `[0,1]` (`min_satisfied = 2`), `max_holding_bars = 3`,
+`exit_on_opposite = true` — evaluates to these decisions (the AC test asserts each):
+
+| Case | Position | Features `[f0,f1,f2]` | Long fires | Short fires | Decision |
+|------|----------|-----------------------|-----------|------------|----------|
+| A | flat | `[4,4,0]` | yes (2/2) | no | `Enter(Long)` |
+| B | flat | `[4,2,0]` | no (1/2) | no | `Hold` |
+| C | flat | `[0,0,0]` | no | yes (2/2) | `Enter(Short)` |
+| D | flat | both banks armed on same band* | yes | yes | `Hold` (ambiguous) |
+| E | Long, held 3 | any | — | — | `Exit` (max holding) |
+| F | Long, held 1 | `[0,0,0]` | — | yes | `Exit` (opposite signal) |
+| G | Long, held 1 | `[4,2,0]` | — | no | `Hold` |
+
+\* Case D uses a separate genome whose long and short banks share one clause band, so a single input
+fires both — asserted by `both_banks_firing_is_ambiguous_hold`.
+
 ### D4 — Mutation / crossover surface + validity (for QE-112/QE-119)
 
 Operators get a **"mutate freely, then repair"** contract — the cheapest possible surface for DE and
@@ -184,3 +202,9 @@ New module `crates/wfo/src/genome.rs`, re-exported from `qe-wfo`:
 - **Size/stop minimalism.** Only `size_bps` + `max_holding` + opposite-signal exit live in the genome;
   hard stops / breakers are the runtime/risk layer (QE-116/QE-212), not the search genome — kept out
   deliberately to avoid the genome overfitting stop placement.
+- **`version` is stamped but not yet *enforced* on decode.** `REP_VERSION` is written into every genome
+  and normalised by `repair`, but nothing in this SPIKE rejects a mismatched `version` — `serde` will
+  deserialise an old/foreign version silently, and `is_valid` only checks the constraint manifold (not
+  the version). The D6 "loud decode mismatch" guarantee must therefore be wired at the genuine
+  decode/load entrypoint when genome persistence/lineage lands (QE-118 / vintage artefact, QE-129).
+  Tracked here so the promise is not lost.
