@@ -51,6 +51,21 @@ pub const FAMILIES: [IndicatorFamily; 5] = [
     IndicatorFamily::Flow,
 ];
 
+impl IndicatorFamily {
+    /// This family's position in [`FAMILIES`] (also its archive-axis index). Total — every variant
+    /// maps to a slot, so callers need no fallback.
+    #[must_use]
+    pub fn index(self) -> usize {
+        match self {
+            IndicatorFamily::Trend => 0,
+            IndicatorFamily::Momentum => 1,
+            IndicatorFamily::Volatility => 2,
+            IndicatorFamily::Volume => 3,
+            IndicatorFamily::Flow => 4,
+        }
+    }
+}
+
 /// Classify a catalogue indicator id (QE-107) into its [`IndicatorFamily`]. Returns `None` for an
 /// unrecognised id — test `family_classifier_covers_catalogue` fails loudly if a catalogue indicator
 /// is left unclassified.
@@ -219,8 +234,7 @@ pub fn descriptor_for(
         let Some(family) = family_of(id) else {
             continue;
         };
-        let fam_pos = FAMILIES.iter().position(|f| *f == family)?;
-        family_counts[fam_pos] += 1;
+        family_counts[family.index()] += 1;
         let lb = lookbacks.get(idx).copied().unwrap_or(0);
         max_lookback = Some(max_lookback.map_or(lb, |m| m.max(lb)));
     }
@@ -249,6 +263,13 @@ pub fn descriptor_for(
 /// descriptors `a == b` always, so the rate is `0.0 ≤ STABILITY_THRESHOLD`.
 #[must_use]
 pub fn cell_reassignment_rate(a: &[Option<Cell>], b: &[Option<Cell>]) -> f64 {
+    // The two evaluations must align one genome per slot; mismatched lengths would silently
+    // `zip`-truncate and under-count. Callers (QE-118) must pass parallel assignments.
+    debug_assert_eq!(
+        a.len(),
+        b.len(),
+        "cell_reassignment_rate: assignment slices must be the same length"
+    );
     let mut considered = 0usize;
     let mut reassigned = 0usize;
     for (x, y) in a.iter().zip(b.iter()) {
@@ -428,12 +449,18 @@ mod tests {
     fn genotype_derived_descriptors_are_window_stable() {
         let s = schema();
         let pop = population(&s);
-        // "Window A" and "window B" assignment — descriptor_for ignores window data, so identical.
+        // "Window A" and "window B" are two *independent* re-derivations (descriptor_for reads no
+        // window data, so a different window only differs in the schema instance, which we rebuild).
+        let schema_a = schema();
+        let schema_b = schema();
         let assign_a: Vec<Option<Cell>> = pop
             .iter()
-            .map(|g| descriptor_for(g, Direction::Long, &s))
+            .map(|g| descriptor_for(g, Direction::Long, &schema_a))
             .collect();
-        let assign_b = assign_a.clone(); // re-evaluation on any other window yields the same cells
+        let assign_b: Vec<Option<Cell>> = pop
+            .iter()
+            .map(|g| descriptor_for(g, Direction::Long, &schema_b))
+            .collect();
         let rate = cell_reassignment_rate(&assign_a, &assign_b);
         assert_eq!(rate, 0.0);
         assert!(rate <= STABILITY_THRESHOLD);
