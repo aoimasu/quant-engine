@@ -46,6 +46,8 @@ approved block is archived to `docs/mds/reviewed/<ticket>.md` and removed from h
 - QE-122 — Behavioural regularisation — PR #36 — Approved & merged.
 - QE-123 — Phased recording → Strategy repository — PR #37 — Approved & merged.
 - QE-124 — Elite robustness gates — PR #38 — Approved & merged.
+- QE-125 — Regime labelling — PR #39 — Approved & merged.
+- QE-126 — Discrete DE portfolio search — PR #40 — Approved & merged.
 
 ---
 
