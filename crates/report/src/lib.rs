@@ -89,7 +89,8 @@ pub struct VintageReport {
     pub content_hash: String,
     /// Net-of-cost performance.
     pub performance: PerformanceSummary,
-    /// Cost-sensitivity sweep (at least 1× and 2×).
+    /// Cost-sensitivity sweep. **Caller contract:** must include at least the `1.0×` and `2.0×` rows
+    /// (QE-133's required sweep); an empty vector renders a header-only table.
     pub cost_sensitivity: Vec<CostScenario>,
     /// DSR / PBO / SPA robustness diagnostics (QE-131).
     pub robustness: RobustnessReport,
