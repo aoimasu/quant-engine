@@ -25,8 +25,11 @@
 //!   QE-111 niche grid, niche parent sampling, and embarrassingly-parallel deterministic evaluation.
 //! - [`variation`] (QE-119) — the variation operators (local-refine / explore / fresh-random) and the
 //!   adaptive-selection driver that allocates operator budget by productivity (QE-112 credit).
+//! - [`backtest`] (QE-120) — the fitness engine: evaluates a genome net-of-cost over a bar series with
+//!   noise-robust geometric fitness, a minimum-trade gate, and SE-aware replacement.
 
 pub mod archive;
+pub mod backtest;
 pub mod cv;
 pub mod fitness;
 pub mod friction;
@@ -40,6 +43,9 @@ pub mod walkforward;
 pub use archive::{
     cell_reassignment_rate, descriptor_for, family_of, grid_cells, Cell, HoldingBand,
     IndicatorFamily, TimescaleBand, CELLS_PER_DIRECTION, STABILITY_THRESHOLD, SUBPOP_SIZE,
+};
+pub use backtest::{
+    backtest, BacktestConfig, BacktestResult, Bar, DEFAULT_MIN_TRADES, DEFAULT_WINDOWS,
 };
 pub use cv::{Fold, PurgedKFold};
 pub use fitness::{geom_return, log_growth, should_replace, NoiseRobustFitness, DEFAULT_K_SIGMA};
