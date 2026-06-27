@@ -37,6 +37,7 @@ pub mod integrity;
 pub mod persist;
 pub mod plan;
 pub mod quality;
+pub mod recon;
 pub mod reconcile;
 pub mod rest;
 pub mod source;
@@ -60,6 +61,7 @@ pub use persist::{
 };
 pub use plan::enumerate_targets;
 pub use quality::{DataQualityReport, HardViolationPolicy, SeriesQuality, Violation};
+pub use recon::{cache_reconstructed_tiers, ReconCacheError};
 pub use reconcile::{diff_overlap, Divergence, Tolerance};
 pub use rest::{
     parse_klines_json, PageRequest, RestEndpoint, RestError, RestSource, TimedRow,

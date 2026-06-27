@@ -12,3 +12,6 @@ workspace = true
 
 [dependencies]
 qe-domain.workspace = true
+# Exact decimal for summing volume during roll-up — never float money (QE-106).
+rust_decimal.workspace = true
+thiserror.workspace = true

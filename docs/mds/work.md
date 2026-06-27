@@ -26,116 +26,58 @@ approved block is archived to `docs/mds/reviewed/<ticket>.md` and removed from h
 - QE-102 — Venue REST month-to-date backfill client — PR #15 — Approved & merged.
 - QE-103 — Data-integrity & source reconciliation validation — PR #16 — Approved & merged.
 - QE-104 — Fusion, normalisation & Arrow serialisation — PR #17 — Approved & merged.
+- QE-105 — Persist fused market data to LMDB — PR #18 — Approved & merged.
 
 ---
 
-## QE-105 — Persist fused market data to LMDB — PR #18 — [Ready-for-review]
+## QE-106 — Multi-resolution bar reconstruction (batch) — PR #19 — [Ready-for-review]
 
-- **Branch:** `qe-105/persist-fused-market-lmdb`
-- **PR:** https://github.com/aoimasu/quant-engine/pull/18
-- **Latest commit:** _(post-approval advisory follow-up — see below)_
-- **Evidence/design:** `docs/architecture/qe-105-persist-fused-market-lmdb-design.md`
-- **Changed surface:** `crates/storage` (lineage ledger on `MarketStore` + tests), `crates/ingest`
-  (**new** `src/persist.rs` + `tests/persist.rs`, `src/lib.rs` wiring, `Cargo.toml` +`qe-storage`),
-  `Cargo.lock`. No new third-party deps. Also bundles the QE-104 archive
-  (`docs/mds/reviewed/qe-104.md`) + `docs/mds/work.md` bookkeeping — branch protection blocks
+- **Branch:** `qe-106/multi-resolution-bar-reconstruction`
+- **PR:** https://github.com/aoimasu/quant-engine/pull/19
+- **Latest commit:** `1ca1897`
+- **Evidence/design:** `docs/architecture/qe-106-multi-resolution-bar-reconstruction-design.md`
+- **Changed surface:** `crates/signal` (**new** `src/reconstruct.rs`, `lib.rs` wiring, `Cargo.toml`
+  +`rust_decimal`/`thiserror`), `crates/ingest` (**new** `src/recon.rs` + `tests/recon.rs`, `lib.rs`
+  wiring, `Cargo.toml` +`qe-signal`), `Cargo.lock`. No new third-party deps. Also bundles the QE-105
+  archive (`docs/mds/reviewed/qe-105.md`) + `docs/mds/work.md` bookkeeping — branch protection blocks
   direct `main` pushes.
 
 ### Acceptance criteria (copied from backlog)
-- [x] A full ingest→fuse→persist run is reproducible and range-queryable.
+- [x] Batch-reconstructed bars equal streaming reconstruction on the same input (parity fixture).
 
 ### Verification (run locally — all green)
 - `cargo fmt --all --check` — ok
 - `cargo clippy --workspace --all-targets --locked -- -D warnings` — clean (also
   `cargo clippy -p qe-ingest --features arrow` — clean)
-- `cargo test --workspace --locked` — **230 passed, 1 ignored** (storage lineage 2, persist unit 2,
-  persist integration 3)
-- `cargo test -p qe-cli --test dependency_topology` — passes (new `qe-ingest→qe-storage` edge allowed)
-- `cargo deny check` — advisories/bans/licenses/sources ok (no new third-party deps; `qe-storage` is
-  a workspace crate)
+- `cargo test --workspace --locked` — **238 passed, 1 ignored** (reconstruct 6, recon-cache
+  integration 2)
+- `cargo test -p qe-cli --test dependency_topology` — passes (new `qe-ingest→qe-signal` +
+  `qe-signal` staying `qe-domain`-only edges allowed; runtime↔training invariant untouched)
+- `cargo deny check` — advisories/bans/licenses/sources ok (no new third-party deps)
 
-Key AC-proving tests (`crates/ingest/tests/persist.rs`):
-- `full_fuse_persist_run_is_range_queryable` — after `persist_fused`, `scan_bars`/`scan_funding`/
-  `scan_premium`/`scan_futures` return exactly the persisted rows (incl. a sub-range scan), and the
-  store records the vintage lineage.
-- `same_inputs_persist_to_identical_stores` — identical inputs → identical scans from two fresh
-  stores (**reproducible**).
-- `re_persisting_same_lineage_is_idempotent_noop` — re-running the same lineage writes nothing; the
-  store is unchanged (**idempotent**).
+Key AC-proving tests:
+- **AC (batch == streaming parity)** — `reconstruct::tests::batch_equals_streaming_parity`: a 70-min
+  5m series fed as a batch vs one-at-a-time through `BarReconstructor` yields **identical** output
+  across the three 30m windows. Batch is literally streaming over the whole slice (one shared fold),
+  so parity is structural.
+- **Supporting:** `rolls_up_one_window_to_hand_computed_values` (OHLCV+trades roll-up vs
+  hand-computed), `windows_align_to_epoch_boundary_not_first_bar` (deterministic boundaries),
+  `reconstruct_tiers_yields_all_configured_tiers` (48×5m → 8×30m + 1×4h), error cases
+  (non-coarser target, wrong-resolution input).
+- **Cache bridge** (`crates/ingest/tests/recon.rs`): `reconstruct_caches_tiers_and_round_trips_under_lineage`
+  (reconstruct→cache→`scan_recon_bars`/`get_recon_bar` round-trip), `cached_tiers_are_stale_under_a_different_lineage`
+  (lineage tagging honoured).
 
 ### Design notes for the reviewer
-- **Typed persistence, not the scalar corpus.** The store schema is typed (`Bar`/funding/premium/
-  futures); `persist` writes a typed `FusedMarket` (coalesced + adjusted bars via QE-104 `fused_bars`
-  + the typed scalar samples). The Arrow/JSON `FusedCorpus` stays the analytical artefact (its blob
-  persistence / Parquet export is QE-135, out of scope).
-- **Idempotency keyed by lineage.** Record-key `put_*` is already an upsert; the new `meta`-db
-  lineage ledger makes the default `persist_fused` path a clean skip when the vintage is already
-  recorded, and gives the store an auditable provenance (`lineages()`). The `lineage:` prefix cannot
-  collide with the `schema_version` key.
-- **Topology.** New `qe-ingest → qe-storage` edge is acyclic (storage depends only on `qe-domain`);
-  the QE-001 guard (`runtime ⊥ wfo/ensemble`) is unaffected and its test re-runs green.
-- **Out of scope:** Parquet/DuckDB export (QE-135); persisting the Arrow blob.
-
-### Review notes
-
-**Verdict: [Approved].** Reviewed strictly as architect + senior engineer against the full diff vs `main`
-(head `8296490`) — read `persist.rs`, the `store.rs` ledger, both test files, the Cargo edge, and the
-storage manifest. The AC is met and **correct**; the design choices (typed persistence, lineage-keyed
-idempotency, ordering) are sound.
-
-**AC — reproducible + range-queryable (PASS).** `persist_fused` writes the typed records and the
-integration tests confirm: `scan_bars/funding/premium/futures` return **exactly** the persisted rows
-(incl. a half-open `[5m,11m)` sub-range yielding just the in-window bars), `same_inputs_persist_to_
-identical_stores` defines reproducibility as **identical query results** (the correct check — LMDB never
-guarantees byte-identical files, so comparing scans, not the on-disk bytes, is right), and
-`re_persisting_same_lineage_is_idempotent_noop` confirms a clean no-op.
-
-**Idempotency keyed by lineage (verified collision-safe).** The ledger lives in the shared `meta` db
-under a `lineage:` prefix; `lineages()` strips that prefix, so the `schema_version` key (which is not
-prefix-matched) can never be returned as a vintage, and recording a lineage never disturbs the schema
-record (`lineage_ledger_is_independent_of_schema_version_key` proves this directly). Ordering is **correct
-and deliberate**: `persist_fused` gates on `has_lineage` first and writes `record_lineage` **last**, so a
-crash mid-persist leaves the lineage *unrecorded* and a re-run re-writes everything (each `put_*` is an
-upsert → identical bytes) before recording — self-healing, never a false skip.
-
-**Typed persistence + topology (PASS).** `fused_bars` reuses QE-104 `coalesce_bars` + `adjust_bar`
-(verified: last-partition-wins coalesce + ×2 adjust → close 200/202), and `FusedMarket` carries typed
-`Bar`/funding/premium/futures — not the lossy scalar `FusedCorpus`. The new `qe-ingest → qe-storage` edge
-is **acyclic** (storage's only internal dep is `qe-domain`), so the QE-001 `runtime ⊥ wfo/ensemble`
-invariant is untouched; the existing MarketStore round-trip/range/prefix-isolation/schema tests are
-retained and unaffected.
-
-**Verification caveat (transparency).** The Rust toolchain is absent from this review environment, so I
-did not execute the gates (incl. the `dependency_topology` test and `cargo deny`). The verdict rests on
-full static review + hand-traced tests and manifest-level confirmation of acyclicity. I did not rely on
-the PR's "all green" claim; treat the gate results as developer-reported. Nothing in the review
-contradicts them.
-
-**Advisory (non-blocking — do not gate merge):**
-1. **The persist is not a single atomic transaction.** `persist_fused` issues five independent write
-   txns (`put_bars` / `put_funding` / `put_premium` / `put_futures` / `record_lineage`, each its own
-   commit via the QE-010 API). A crash mid-sequence leaves a *partially-written* vintage with no ledger
-   entry — which the lineage-last + upsert design correctly **self-heals** on the next run, and the AC
-   doesn't require atomicity, so this is fine for the intended single-writer offline batch persist. But a
-   concurrent reader during a persist can observe a half-written vintage, and the partial state is
-   transient on crash. If atomic vintage visibility is ever wanted, expose a MarketStore API that takes an
-   external `RwTxn` (or a batched `put_all`) so all records + the ledger commit together. Noted for
-   QE-135/runtime, not required here.
-
-### Post-approval follow-up (coder) — advisory addressed (doc); status → [Ready-for-review]
-
-The single non-blocking advisory (persist spans five write transactions, not one atomic txn → a
-concurrent reader can observe a partial vintage; a crash leaves transient partial state) is now
-**documented explicitly** on `persist_fused`, recording both the deliberate mitigation and the
-future option:
-- **Self-healing:** the lineage is recorded **last** + every `put_*` is an upsert, so a crash
-  mid-persist leaves the vintage *unrecorded* and the next run re-writes idempotently (heals the
-  partial state) rather than falsely skipping.
-- **Concurrent-reader caveat:** a reader concurrent with an in-progress persist may see a
-  partially-written vintage; sufficient for the QE-105 AC (a *completed* run is reproducible +
-  range-queryable).
-- **Future option (deferred):** for atomic vintage *visibility*, expose a `MarketStore` API taking
-  an external `RwTxn` and write all kinds + the ledger in one transaction. Left out of QE-105 — it
-  changes the storage public surface and is its own concern, as the reviewer framed it ("later").
-
-Doc-only change; no behaviour/AC change. Gates re-run: fmt ok; clippy clean; `qe-ingest` 81 tests.
+- **One fold, shared by batch + streaming.** `BarReconstructor` is the single incremental fold;
+  `reconstruct_batch` = push-all + finish. So batch and streaming cannot diverge — the QE-206 parity
+  guarantee is structural, not a coincidence of two implementations.
+- **Storage-free hot-path logic.** `qe-signal` stays `qe-domain`-only (no LMDB) — reconstruction runs
+  identically in batch and in the latency-sensitive runtime (QE-003). The synthetic-store caching is
+  a separate `qe-ingest` bridge.
+- **Deterministic boundaries.** Window start = `floor_div(open_time, target_ms)·target_ms` — depends
+  only on the timestamp + target resolution, never on batch size / arrival order / thread count.
+- **Topology.** New `qe-ingest → qe-signal` edge is acyclic (signal is `qe-domain`-only); QE-001
+  guard re-runs green.
+- **Out of scope:** live-runtime streaming wiring (QE-205). The streaming `BarReconstructor` is
+  exposed now so QE-206 can prove parity against the live path.
