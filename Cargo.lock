@@ -1510,6 +1510,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "qe-gate"
+version = "0.1.0"
+dependencies = [
+ "qe-validation",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "qe-ingest"
 version = "0.1.0"
 dependencies = [
