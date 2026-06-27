@@ -30,6 +30,7 @@ pub mod coverage;
 pub mod derive;
 pub mod downloader;
 pub mod drift;
+pub mod features;
 pub mod fetcher;
 pub mod fill;
 pub mod fuse;
@@ -52,6 +53,9 @@ pub use coverage::{coverage, flag_short_history, Coverage, ShortCoverage};
 pub use derive::{adjust_bar, spread_to_underlier, typical_price, vwap, Adjustment};
 pub use downloader::{Downloader, FileOutcome, SyncReport};
 pub use drift::{csv_header, detect_drift, DriftStatus, SchemaRegistry};
+pub use features::{
+    assemble_and_cache_features, read_cached_feature, FeatureCacheError, FEATURE_VECTOR_ID,
+};
 pub use fetcher::{FetchError, Fetcher};
 pub use fill::{plan_fill, FillPlan, FilledPoint, Hole};
 pub use fuse::{align_onto_grid, fuse, Cell, FusedColumn, FusedCorpus, FusionInput, Grid};

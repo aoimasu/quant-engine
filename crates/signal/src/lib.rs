@@ -7,10 +7,14 @@
 //!   incremental fold shared by batch and streaming for byte-identical parity (QE-206).
 //! - [`indicator`] (QE-107) — the quantised indicator catalogue (≥20 indicators), finite-lookback +
 //!   batch/streaming-identical, the substrate the strategy genome reasons over.
+//! - [`feature`] (QE-108) — per-bar feature-vector assembly from the catalogue states (the rows
+//!   WFO/DE consume), batch/streaming-identical.
 
+pub mod feature;
 pub mod indicator;
 pub mod reconstruct;
 
+pub use feature::{assemble_batch, FeatureAssembler, FeatureSchema, FeatureVector};
 pub use indicator::{
     catalogue, compute_batch, max_lookback, CatalogueConfig, Indicator, IndicatorSpec, QState,
     Quantiser, Sample, CATALOGUE_VERSION,

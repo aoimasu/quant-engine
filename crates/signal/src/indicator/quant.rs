@@ -10,6 +10,12 @@ use rust_decimal::Decimal;
 pub struct QState(u16);
 
 impl QState {
+    /// Construct a state from its 0-based bucket index (used by the feature-vector codec).
+    #[must_use]
+    pub fn from_index(index: u16) -> Self {
+        QState(index)
+    }
+
     /// The 0-based bucket index.
     #[must_use]
     pub fn index(self) -> u16 {
