@@ -27,6 +27,8 @@
 //!   adaptive-selection driver that allocates operator budget by productivity (QE-112 credit).
 //! - [`backtest`] (QE-120) — the fitness engine: evaluates a genome net-of-cost over a bar series with
 //!   noise-robust geometric fitness, a minimum-trade gate, and SE-aware replacement.
+//! - [`thompson`] (QE-121) — Thompson-sampling parent selection: a per-niche Bayesian bandit whose reward
+//!   is the in-training novelty/improvement only (no OOS leakage).
 
 pub mod archive;
 pub mod backtest;
@@ -37,6 +39,7 @@ pub mod genome;
 pub mod lifecycle;
 pub mod mapelites;
 pub mod operator;
+pub mod thompson;
 pub mod variation;
 pub mod walkforward;
 
@@ -68,6 +71,9 @@ pub use mapelites::{
 pub use operator::{
     ApplicationOutcome, Operator, OperatorSelector, DEFAULT_EPSILON, DEFAULT_WINDOW,
     NOVELTY_REWARD, OPERATORS,
+};
+pub use thompson::{
+    NichePrior, ThompsonParentSelector, DEFAULT_OBS_VAR, DEFAULT_PRIOR_MEAN, DEFAULT_PRIOR_VAR,
 };
 pub use variation::{
     explore, fresh_random, local_refine, StepReport, VariationDriver, LOCAL_SIZE_STEP,
