@@ -1594,6 +1594,8 @@ dependencies = [
  "qe-signal",
  "qe-storage",
  "rust_decimal",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
