@@ -9,10 +9,13 @@
 //!   batch/streaming-identical, the substrate the strategy genome reasons over.
 //! - [`feature`] (QE-108) — per-bar feature-vector assembly from the catalogue states (the rows
 //!   WFO/DE consume), batch/streaming-identical.
+//! - [`regime`] (QE-125) — volatility / trend-vs-chop regime labels over history plus a per-regime
+//!   expectancy table, the regime tags QE-127's DE objective and QE-133's reporting read.
 
 pub mod feature;
 pub mod indicator;
 pub mod reconstruct;
+pub mod regime;
 
 pub use feature::{assemble_batch, FeatureAssembler, FeatureSchema, FeatureVector};
 pub use indicator::{
@@ -20,6 +23,10 @@ pub use indicator::{
     Quantiser, Sample, CATALOGUE_VERSION,
 };
 pub use reconstruct::{reconstruct_batch, reconstruct_tiers, BarReconstructor, ReconError};
+pub use regime::{
+    expectancy_table, label_regimes, ExpectancyTable, Regime, RegimeConfig, RegimeExpectancy,
+    TrendState, VolState, DEFAULT_REGIME_WINDOW, DEFAULT_TREND_THRESHOLD,
+};
 
 /// Returns this crate's package name. Placeholder until later tickets add real APIs.
 #[must_use]
