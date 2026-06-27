@@ -44,9 +44,13 @@ Two modules added to `qe-ingest`:
 
 ### `backfill.rs` — the paginated, retried backfiller
 
-- `RetryPolicy { max_retries }` — bounded retries on `RateLimited`/`Transient`; `Fatal` is not
-  retried. (Backoff *sleeping* belongs to the real adapter / QE-201's handler; the core just bounds
-  attempts, so tests stay deterministic and fast.)
+- `RetryPolicy { max_retries, base_delay_ms }` — bounded retries on `RateLimited`/`Transient`;
+  `Fatal` is not retried. **The backoff is actually applied**: before each retry the backfiller waits
+  via an injected `Sleeper` — the rate limit's `Retry-After` (floored at `base_delay_ms`) for a 429,
+  else a linear `base_delay_ms × attempt` for a transient blip — so a 429 is never hammered (avoids a
+  Binance 418 IP ban). The `Sleeper` is a port: `RealSleeper` (`thread::sleep`) in production, a
+  recording/no-op fake in tests, so the wait is honoured live yet instant + assertable offline.
+  (QE-201 will formalise this into the shared venue handler.)
 - `Backfiller<S: RestSource>` — `backfill(req_template, interval_ms, from_ms, now_ms, overlap_ms) ->
   Result<BackfillResult, IngestError>`:
   1. start the cursor at `from_ms - overlap_ms` so the first pages re-cover the vendor's tail (the
@@ -67,7 +71,8 @@ Two modules added to `qe-ingest`:
   vendor's right edge, and rows with `open_time < from_ms` are returned separately as `overlap` —
   never discarded.
 - **Paginated / retried / rate-limit-aware:** cursor pagination by `last_open_time + interval`; the
-  retry policy bounds attempts on `RateLimited`/`Transient` and surfaces `Fatal` immediately —
+  retry policy bounds attempts on `RateLimited`/`Transient`, **waits the venue's `Retry-After` (via
+  the `Sleeper` port) before retrying** so a 429 is not hammered, and surfaces `Fatal` immediately —
   exactly the seam QE-201's shared handler will formalise.
 - **Offline-testable:** all logic runs against the `RestSource` port with a scripted fake (chunked
   pages, an injected rate-limit-then-success, an always-fail); `parse_klines_json` is pure. The real

@@ -6,7 +6,7 @@
 #[cfg(feature = "http")]
 use std::io::Read;
 
-use qe_domain::Resolution;
+use qe_domain::{InstrumentId, Resolution};
 use thiserror::Error;
 
 /// The default Binance USD-M futures REST base URL (no trailing slash).
@@ -57,8 +57,8 @@ impl RestEndpoint {
 pub struct PageRequest {
     /// The endpoint to read.
     pub endpoint: RestEndpoint,
-    /// The instrument symbol (e.g. `"BTCUSDT"`).
-    pub symbol: String,
+    /// The instrument (validated; e.g. `BTCUSDT`).
+    pub symbol: InstrumentId,
     /// Inclusive page start (epoch ms).
     pub start_ms: i64,
     /// Max rows to return.
@@ -69,7 +69,11 @@ impl PageRequest {
     /// The full request URL for `base` (no trailing slash, e.g. [`DEFAULT_REST_BASE`]).
     #[must_use]
     pub fn url(&self, base: &str) -> String {
-        let mut url = format!("{base}{}?symbol={}", self.endpoint.path(), self.symbol);
+        let mut url = format!(
+            "{base}{}?symbol={}",
+            self.endpoint.path(),
+            self.symbol.as_str()
+        );
         if let Some((k, v)) = self.endpoint.interval_param() {
             url.push_str(&format!("&{k}={v}"));
         }
@@ -205,11 +209,15 @@ impl RestSource for HttpRestSource {
 mod tests {
     use super::*;
 
+    fn inst(s: &str) -> InstrumentId {
+        InstrumentId::new(s).unwrap()
+    }
+
     #[test]
     fn kline_url_has_interval_and_window() {
         let req = PageRequest {
             endpoint: RestEndpoint::Klines(Resolution::M5),
-            symbol: "BTCUSDT".to_owned(),
+            symbol: inst("BTCUSDT"),
             start_ms: 1_700_000_000_000,
             limit: 1500,
         };
@@ -223,7 +231,7 @@ mod tests {
     fn funding_url_has_no_interval_and_oi_uses_period() {
         let funding = PageRequest {
             endpoint: RestEndpoint::FundingRate,
-            symbol: "ETHUSDT".to_owned(),
+            symbol: inst("ETHUSDT"),
             start_ms: 100,
             limit: 1000,
         };
@@ -233,7 +241,7 @@ mod tests {
         );
         let oi = PageRequest {
             endpoint: RestEndpoint::OpenInterestHist(Resolution::H1),
-            symbol: "BTCUSDT".to_owned(),
+            symbol: inst("BTCUSDT"),
             start_ms: 0,
             limit: 500,
         };

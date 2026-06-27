@@ -1,24 +1,53 @@
 //! The paginated, retried month-to-date backfiller.
 //!
 //! Pages a [`RestSource`] forward from the vendor's right edge to `now`, retaining the vendor↔REST
-//! overlap region for reconciliation (QE-103). Pagination and the retry policy run against the port,
-//! so the whole flow is tested offline.
+//! overlap region for reconciliation (QE-103). Pagination, the retry policy, and the **rate-limit
+//! backoff** all run against ports ([`RestSource`] + [`Sleeper`]), so the whole flow — including the
+//! `Retry-After` wait — is tested offline without real sleeping.
+
+use qe_domain::InstrumentId;
 
 use crate::rest::{PageRequest, RestEndpoint, RestError, RestSource, TimedRow};
 use crate::IngestError;
 
-/// Bounded-retry policy. `Fatal` errors are never retried; `RateLimited`/`Transient` are retried up
-/// to `max_retries` times. (Backoff *sleeping* lives in the real adapter / QE-201's shared handler;
-/// the core only bounds attempts, keeping tests deterministic.)
+/// Waits between retries. Injected so the backoff is honoured in production yet instant + assertable
+/// in tests (a fake records the requested durations).
+pub trait Sleeper {
+    /// Block for `ms` milliseconds (a no-op for `ms == 0`).
+    fn sleep_ms(&self, ms: u64);
+}
+
+/// The production sleeper — `std::thread::sleep`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RealSleeper;
+
+impl Sleeper for RealSleeper {
+    fn sleep_ms(&self, ms: u64) {
+        if ms > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(ms));
+        }
+    }
+}
+
+/// Bounded-retry policy with backoff. `Fatal` errors are never retried; `RateLimited`/`Transient`
+/// are retried up to `max_retries` times, **waiting first** (the venue's `Retry-After` for a rate
+/// limit, else a linear `base_delay_ms` backoff) so a 429 is not hammered. (QE-201 will formalise
+/// this into the shared venue handler.)
 #[derive(Debug, Clone, Copy)]
 pub struct RetryPolicy {
     /// Max retry attempts after the first try.
     pub max_retries: u32,
+    /// Base backoff for a `Transient` error (multiplied by the attempt number); also the floor for a
+    /// rate-limit wait when the venue supplied no `Retry-After`.
+    pub base_delay_ms: u64,
 }
 
 impl Default for RetryPolicy {
     fn default() -> Self {
-        Self { max_retries: 5 }
+        Self {
+            max_retries: 5,
+            base_delay_ms: 500,
+        }
     }
 }
 
@@ -27,8 +56,8 @@ impl Default for RetryPolicy {
 pub struct BackfillRequest {
     /// Endpoint to page.
     pub endpoint: RestEndpoint,
-    /// Instrument symbol.
-    pub symbol: String,
+    /// Instrument.
+    pub symbol: InstrumentId,
     /// Bar interval in ms (the pagination step and the AC #1 freshness tolerance).
     pub interval_ms: i64,
     /// The vendor's right edge — `fresh` rows start here.
@@ -52,23 +81,41 @@ pub struct BackfillResult {
     pub latest_open_time_ms: Option<i64>,
 }
 
-/// Pages a [`RestSource`] forward to now under a [`RetryPolicy`].
-pub struct Backfiller<S: RestSource> {
+/// Pages a [`RestSource`] forward to now under a [`RetryPolicy`], waiting via a [`Sleeper`].
+pub struct Backfiller<S: RestSource, Sl: Sleeper = RealSleeper> {
     source: S,
     retry: RetryPolicy,
+    sleeper: Sl,
 }
 
-impl<S: RestSource> Backfiller<S> {
-    /// A backfiller over `source` with `retry`.
+impl<S: RestSource> Backfiller<S, RealSleeper> {
+    /// A backfiller over `source` with `retry`, using the real (thread-sleeping) backoff.
     pub fn new(source: S, retry: RetryPolicy) -> Self {
-        Self { source, retry }
+        Self {
+            source,
+            retry,
+            sleeper: RealSleeper,
+        }
+    }
+}
+
+impl<S: RestSource, Sl: Sleeper> Backfiller<S, Sl> {
+    /// A backfiller with an injected `sleeper` (tests use a recording/no-op one).
+    pub fn with_sleeper(source: S, retry: RetryPolicy, sleeper: Sl) -> Self {
+        Self {
+            source,
+            retry,
+            sleeper,
+        }
     }
 
-    /// Fetch one page, retrying retryable errors up to the policy's `max_retries`.
+    /// Fetch one page, retrying retryable errors up to the policy's `max_retries` and **waiting**
+    /// before each retry: the rate limit's `Retry-After` (floored at `base_delay_ms`), or a linear
+    /// `base_delay_ms × attempt` backoff for a transient error. `Fatal` is not retried.
     fn fetch_with_retry(&self, req: &PageRequest) -> Result<Vec<TimedRow>, IngestError> {
         let mut attempts = 0;
         loop {
-            match self.source.fetch_page(req) {
+            let wait_ms = match self.source.fetch_page(req) {
                 Ok(rows) => return Ok(rows),
                 Err(RestError::Fatal(m)) => return Err(IngestError::Rest(format!("fatal: {m}"))),
                 Err(e @ (RestError::RateLimited { .. } | RestError::Transient(_))) => {
@@ -78,8 +125,16 @@ impl<S: RestSource> Backfiller<S> {
                         )));
                     }
                     attempts += 1;
+                    match e {
+                        RestError::RateLimited { retry_after_ms } => {
+                            retry_after_ms.max(self.retry.base_delay_ms)
+                        }
+                        // Linear backoff for a transient blip.
+                        _ => self.retry.base_delay_ms * u64::from(attempts),
+                    }
                 }
-            }
+            };
+            self.sleeper.sleep_ms(wait_ms);
         }
     }
 
@@ -140,6 +195,10 @@ mod tests {
 
     const MIN: i64 = 60_000;
 
+    fn inst() -> InstrumentId {
+        InstrumentId::new("BTCUSDT").unwrap()
+    }
+
     /// A fake REST source that paginates a fixed ascending dataset (rows with `open_time >=
     /// start_ms`, up to `limit`), optionally erroring on the first scripted calls.
     struct FakeRest {
@@ -184,10 +243,21 @@ mod tests {
         }
     }
 
+    /// A sleeper that records requested waits instead of blocking (proves backoff without slowness).
+    #[derive(Default)]
+    struct RecordingSleeper {
+        waits: RefCell<Vec<u64>>,
+    }
+    impl Sleeper for RecordingSleeper {
+        fn sleep_ms(&self, ms: u64) {
+            self.waits.borrow_mut().push(ms);
+        }
+    }
+
     fn req(from: i64, now: i64, overlap: i64) -> BackfillRequest {
         BackfillRequest {
             endpoint: RestEndpoint::Klines(Resolution::M1),
-            symbol: "BTCUSDT".to_owned(),
+            symbol: inst(),
             interval_ms: MIN,
             from_ms: from,
             now_ms: now,
@@ -228,16 +298,27 @@ mod tests {
     }
 
     #[test]
-    fn retries_rate_limit_then_succeeds() {
+    fn retries_rate_limit_then_succeeds_and_waits_retry_after() {
         let times: Vec<i64> = (0..=3).map(|i| i * MIN).collect();
         let source = FakeRest::new(&times).with_errors(vec![
-            RestError::RateLimited { retry_after_ms: 10 },
+            RestError::RateLimited {
+                retry_after_ms: 2_000,
+            },
             RestError::Transient("blip".to_owned()),
         ]);
-        let bf = Backfiller::new(source, RetryPolicy { max_retries: 3 });
-        // First two calls error (retried), third serves the page → succeeds.
+        let policy = RetryPolicy {
+            max_retries: 3,
+            base_delay_ms: 100,
+        };
+        let bf = Backfiller::with_sleeper(source, policy, RecordingSleeper::default());
         let res = bf.backfill(&req(0, 3 * MIN, 0)).unwrap();
         assert_eq!(res.latest_open_time_ms, Some(3 * MIN));
+
+        // The rate limit's Retry-After (2000ms, ≥ base) is honoured, then the transient linear backoff
+        // (base 100 × cumulative attempt 2 = 200).
+        let waits = bf.sleeper.waits.borrow();
+        assert_eq!(waits[0], 2_000, "must wait the venue's Retry-After");
+        assert_eq!(waits[1], 200, "transient backoff = base × attempt(2)");
     }
 
     #[test]
@@ -247,7 +328,14 @@ mod tests {
             RestError::Transient("b".to_owned()),
             RestError::Transient("c".to_owned()),
         ]);
-        let bf = Backfiller::new(source, RetryPolicy { max_retries: 1 });
+        let bf = Backfiller::with_sleeper(
+            source,
+            RetryPolicy {
+                max_retries: 1,
+                base_delay_ms: 0,
+            },
+            RecordingSleeper::default(),
+        );
         let err = bf.backfill(&req(0, MIN, 0)).unwrap_err();
         assert!(matches!(err, IngestError::Rest(_)));
     }
@@ -255,9 +343,17 @@ mod tests {
     #[test]
     fn fatal_error_is_not_retried() {
         let source = FakeRest::new(&[0, MIN]).with_errors(vec![RestError::Fatal("bad".to_owned())]);
-        let bf = Backfiller::new(source, RetryPolicy { max_retries: 5 });
+        let bf = Backfiller::with_sleeper(
+            source,
+            RetryPolicy {
+                max_retries: 5,
+                base_delay_ms: 0,
+            },
+            RecordingSleeper::default(),
+        );
         let err = bf.backfill(&req(0, MIN, 0)).unwrap_err();
         assert!(matches!(err, IngestError::Rest(_)));
         assert_eq!(*bf.source.calls.borrow(), 1, "fatal must not retry");
+        assert!(bf.sleeper.waits.borrow().is_empty(), "fatal must not wait");
     }
 }

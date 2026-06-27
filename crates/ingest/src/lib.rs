@@ -22,7 +22,9 @@ pub mod plan;
 pub mod rest;
 pub mod source;
 
-pub use backfill::{BackfillRequest, BackfillResult, Backfiller, RetryPolicy};
+pub use backfill::{
+    BackfillRequest, BackfillResult, Backfiller, RealSleeper, RetryPolicy, Sleeper,
+};
 pub use cache::RawCache;
 pub use downloader::{Downloader, FileOutcome, SyncReport};
 pub use drift::{csv_header, detect_drift, DriftStatus, SchemaRegistry};

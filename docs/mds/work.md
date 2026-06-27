@@ -30,7 +30,7 @@ approved block is archived to `docs/mds/reviewed/<ticket>.md` and removed from h
 
 - **Branch:** `qe-102/rest-backfill-client`
 - **PR:** https://github.com/aoimasu/quant-engine/pull/15
-- **Latest commit:** `ce34e6b`
+- **Latest commit:** _(blocker-fix follow-up — see below)_
 - **Evidence/design:** `docs/architecture/qe-102-rest-backfill-client-design.md`
 - **Changed surface:** `crates/ingest` — **new** `src/rest.rs` (`RestEndpoint`/`PageRequest`/URL
   builder, `RestSource` port, `parse_klines_json`, `RestError`; real `HttpRestSource` behind `http`),
@@ -82,4 +82,81 @@ Key AC-proving tests:
 
 ### Review notes
 
-_(awaiting dedicated review agent — `start-review-ticket` against this branch/diff vs the ACs above)_
+**Verdict: [Reviewed].** Reviewed strictly as architect + senior engineer against the full diff vs `main`
+(head `ce34e6b`). **Both ACs pass and are well-tested** — the issue below is a non-AC correctness/safety
+bug on the explicitly-flagged retry/rate-limit path that I won't wave through.
+
+**What's correct (verified):**
+- **AC #1 (freshness).** `Backfiller::backfill` pages forward (`cursor = newest + interval_ms`) until
+  `newest >= now_ms - interval_ms`, with `now_ms` injected for determinism. Traced
+  `paginates_to_within_one_interval_of_now` by hand: stops at 9min for now=10min/interval=1min →
+  `latest >= now - interval`. ✓
+- **AC #2 (overlap retained).** Cursor starts `from_ms - overlap_ms`; the final `partition` puts
+  `open_time < from_ms` into `overlap`, the rest into `fresh`. Traced `retains_overlap_region_before_from`:
+  overlap = {3min, 4min}, fresh ≥ 5min incl. 10min. ✓
+- **Forward-progress guard is sound.** The `progressed` flag (a page yielding no row `> last_have`) plus
+  the `> last_have` dedup correctly break the loop on duplicate/non-advancing pages and on an empty page —
+  no infinite loop. Retry bounding (`attempts >= max_retries` before increment) gives exactly
+  `1 + max_retries` calls; `Fatal` returns on the first call. All five retry/pagination tests trace clean.
+- **Port/adapter + pure parse.** `RestSource` is the only seam; `parse_klines_json` is pure and correctly
+  classifies every malformed shape as `Fatal` (non-retryable). URL golden strings match the real fapi
+  layout (klines `interval=5m`, fundingRate no-interval, openInterestHist `period=1h` under
+  `/futures/data`). `HttpRestSource` is correctly `#[cfg(feature = "http")]`. Topology unchanged (stays in
+  `qe-ingest`; only new dep `serde_json`, already in-workspace).
+
+**Verification caveat (transparency).** The Rust toolchain is absent from this review environment (no
+`cargo`/`rustc`/`rustup`), so I did not execute the gates (incl. `--features http` clippy / `cargo deny`).
+The verdict rests on full static review + hand-traced execution of every test. The blocker below is a
+logic/spec mismatch visible purely in the source, independent of any gate.
+
+### Feedback
+
+1. **[BLOCKER] Rate-limit backoff is never applied — `retry_after_ms` is dead, and the live client will
+   hammer a 429 (contradicts the design's "honours Retry-After").**
+   `HttpRestSource::fetch_page` computes `retry_after_ms` from the `Retry-After` header and returns
+   `RestError::RateLimited { retry_after_ms }` **without sleeping**. `Backfiller::fetch_with_retry` then
+   matches `e @ (RestError::RateLimited { .. } | RestError::Transient(_))` — the `{ .. }` discards
+   `retry_after_ms` — and **retries immediately with zero delay**. Confirmed by grep: the only readers of
+   `retry_after_ms` are its `Display` impl and a test; nothing ever waits on it, and there is no
+   `sleep`/backoff anywhere in the crate. Consequences:
+   (a) The design note's claim *"Backoff sleeping lives in the real adapter (honours Retry-After)"* is
+   **false** — the adapter classifies but does not honour it.
+   (b) On a real HTTP 429, the live `http` client issues up to `max_retries` (default **5**) back-to-back
+   requests with no delay, which Binance escalates to a 418 IP ban — a real operational bug in the one
+   path that does live network I/O (and is not CI-covered, so review is the only gate).
+   **Resolve either way:** (i) make it true — sleep `retry_after_ms` (capped) in the adapter before
+   returning, or inject a `Sleeper`/clock into the `Backfiller` and sleep on `RateLimited` (keeps the core
+   testable with a fake sleeper, preserving determinism); **or** (ii) if rate-limit *waiting* is genuinely
+   deferred to QE-201's shared handler, correct the design note + the `RetryPolicy` doc to say so
+   explicitly ("`retry_after_ms` is surfaced for QE-201's handler; no backoff yet") and reply with
+   `{ANSWER}` justifying the deferral — I'll evaluate it objectively. As written, the code and the stated
+   design disagree, and the live behaviour is harmful.
+
+2. **[Non-blocking] `PageRequest.symbol` / `BackfillRequest.symbol` are unvalidated `String`s** placed
+   directly into the URL without encoding. Upstream callers pass validated `InstrumentId`s, but the type
+   doesn't enforce it — consider taking `&InstrumentId` (as `source.rs`/`plan.rs` do) so the URL-safety
+   invariant is carried by the type rather than by convention. Not a blocker.
+
+### Post-review follow-up (coder) — BLOCKER fixed; status → [Ready-for-review]
+
+Agreed with the blocker and both notes — fixed.
+- **[BLOCKER] Rate-limit backoff now actually applied — DONE.** `retry_after_ms` is no longer dead.
+  Introduced a `Sleeper` **port** (`RealSleeper` = `thread::sleep` in production; a recording/no-op
+  fake in tests). `Backfiller::fetch_with_retry` now **waits before each retry**: the venue's
+  `Retry-After` (floored at `RetryPolicy.base_delay_ms`) for a `RateLimited`, else a linear
+  `base_delay_ms × attempt` for a `Transient` — so a 429 is never hammered (no 418 IP-ban risk).
+  `RetryPolicy` gained `base_delay_ms`; `Backfiller<S, Sl = RealSleeper>` with `new` (real) /
+  `with_sleeper` (injected). New assertions in `retries_rate_limit_then_succeeds_and_waits_retry_after`
+  prove `waits[0] == 2000` (Retry-After honoured) and the transient linear backoff; `fatal_error_is_
+  not_retried` now also asserts **zero** waits. The design note's "honours Retry-After" claim is now
+  true (and the doc updated to describe the `Sleeper` port).
+- **[non-blocking] `symbol` typed as `&InstrumentId` — DONE.** `PageRequest.symbol` and
+  `BackfillRequest.symbol` are now validated `InstrumentId`s (URL uses `.as_str()`), not raw `String`s.
+- Gates re-run green: fmt ok; clippy clean (default **and** `--features http`); `qe-ingest` 33 unit +
+  2 integration; deny unaffected.
+
+{ANSWER} On the blocker's "defer to QE-201?" option — I chose to **implement the wait now** rather
+than defer, because the design already claimed "honours Retry-After" and shipping the live `http`
+client without it is a real ban risk. The `Sleeper` port keeps it testable and is exactly the seam
+QE-201's shared handler will adopt (it can swap in a smarter backoff/`Sleeper`), so this is forward-
+compatible, not throwaway.
