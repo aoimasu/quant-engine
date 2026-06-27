@@ -8,14 +8,21 @@
 //!   fold-cross-validated, leave-one-out scoring that converges on a robust basin, net-of-cost.
 //! - [`regime`] (QE-127) — the correlation penalty + per-regime expectancy constraint: a regime-aware
 //!   objective/search that rejects ensembles which are not net-positive in every labelled regime (QE-125).
+//! - [`capacity`] (QE-128) — capacity analysis: estimate per-strategy capacity from an impact model ×
+//!   turnover × target AUM and cap ensemble weights so none exceeds its modelled capacity at size.
 //!
 //! Deliberately independent of `qe-wfo`: the search ⟂ portfolio firewall (QE-001/QE-132).
 
+pub mod capacity;
 pub mod de;
 pub mod objective;
 pub mod regime;
 pub mod search;
 
+pub use capacity::{
+    cap_weights, capacity, CapacityModel, StrategyProfile, DEFAULT_EDGE_RETENTION,
+    DEFAULT_HALF_SPREAD, DEFAULT_IMPACT_COEFF,
+};
 pub use de::{binomial_crossover, de_mutant, EnsembleMask, DEFAULT_CR};
 pub use objective::{
     cdar, combined_returns, cvar, leave_one_out_min, objective, pearson,
