@@ -1619,6 +1619,8 @@ name = "qe-venue"
 version = "0.1.0"
 dependencies = [
  "qe-domain",
+ "thiserror",
+ "ureq",
 ]
 
 [[package]]
