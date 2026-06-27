@@ -24,6 +24,9 @@ arrow = ["dep:arrow-array", "dep:arrow-schema", "dep:arrow-ipc"]
 # Raw-file caching + offline fusion only (no LMDB); persistence into qe-storage is QE-105.
 qe-config.workspace = true
 qe-domain.workspace = true
+# Pure multi-resolution bar reconstruction (QE-106) cached into the synthetic store. qe-signal is
+# storage-free (depends only on qe-domain), so this edge stays acyclic.
+qe-signal.workspace = true
 # The LMDB market store (QE-010) the fused corpus is persisted into (QE-105). Acyclic: qe-storage
 # depends only on qe-domain, so this introduces no dependency cycle and no QE-001 topology breach.
 qe-storage.workspace = true
