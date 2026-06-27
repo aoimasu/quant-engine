@@ -42,6 +42,7 @@ approved block is archived to `docs/mds/reviewed/<ticket>.md` and removed from h
 - QE-118 — QD MAP-Elites archive implementation — PR #32 — Approved & merged.
 - QE-119 — Variation operators + adaptive selection — PR #33 — Approved & merged.
 - QE-120 — Strategy backtester (fitness engine) — PR #34 — Approved & merged.
+- QE-121 — Thompson-sampling parent selection — PR #35 — Approved & merged.
 
 ---
 
