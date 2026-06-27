@@ -1,0 +1,30 @@
+[package]
+name = "qe-vintage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The chromosomes (strategy genomes, QE-110) embedded in the vintage.
+qe-wfo.workspace = true
+# The per-vintage calibration profile sidecar (QE-116) that rides the vintage.
+qe-risk.workspace = true
+# The resolvable lineage tag (QE-006) — same content-hash pattern as Lineage::id.
+qe-determinism.workspace = true
+# Canonical JSON content + the vintage artefact serialisation.
+serde.workspace = true
+serde_json.workspace = true
+# SHA-256 content hash over the canonical JSON.
+sha2.workspace = true
+# Typed errors.
+thiserror.workspace = true
+
+[dev-dependencies]
+# Construct a Fraction (Decimal) for the calibration fixture in the round-trip tests.
+rust_decimal.workspace = true
