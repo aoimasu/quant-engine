@@ -41,6 +41,7 @@ approved block is archived to `docs/mds/reviewed/<ticket>.md` and removed from h
 - QE-117 — Walk-forward window manager — PR #31 — Approved & merged.
 - QE-118 — QD MAP-Elites archive implementation — PR #32 — Approved & merged.
 - QE-119 — Variation operators + adaptive selection — PR #33 — Approved & merged.
+- QE-120 — Strategy backtester (fitness engine) — PR #34 — Approved & merged.
 
 ---
 
