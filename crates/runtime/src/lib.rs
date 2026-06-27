@@ -2,8 +2,12 @@
 //!
 //! Scaffold crate established in QE-001; real APIs land in later tickets. QE-009 wires in the
 //! risk/kill-switch contract: the runtime's order port is, by its type, an order gate that holds an
-//! out-of-band kill handle.
+//! out-of-band kill handle. QE-205 adds the live kline source ([`live_kline`]): REST-prime + wss-stitch
+//! feeding the shared QE-106 reconstructor, so live coarser bars match batch reconstruction exactly.
 
+pub mod live_kline;
+
+pub use live_kline::LiveKlineSource;
 pub use qe_risk::{KillHandle, KillSwitch};
 
 /// The runtime's live order-submission port.
