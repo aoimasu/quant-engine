@@ -29,6 +29,10 @@ pub const DEFAULT_PRIOR_VAR: f64 = 1.0;
 /// Default per-observation reward variance.
 pub const DEFAULT_OBS_VAR: f64 = 1.0;
 
+/// Floor on a prior's `var` / `obs_var`. A sane positive minimum (not `f64::MIN_POSITIVE`) so that
+/// `1/var` cannot overflow to a non-finite precision even if a caller passes a near-zero variance.
+const MIN_VARIANCE: f64 = 1e-12;
+
 /// The Normal–Normal prior + observation model for a niche's mean reward.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct NichePrior {
@@ -70,8 +74,8 @@ impl ThompsonParentSelector {
     pub fn new(prior: NichePrior) -> Self {
         let prior = NichePrior {
             mean: prior.mean,
-            var: prior.var.max(f64::MIN_POSITIVE),
-            obs_var: prior.obs_var.max(f64::MIN_POSITIVE),
+            var: prior.var.max(MIN_VARIANCE),
+            obs_var: prior.obs_var.max(MIN_VARIANCE),
         };
         ThompsonParentSelector {
             prior,
@@ -331,6 +335,26 @@ mod tests {
                     .0,
                 cell
             );
+        }
+    }
+
+    #[test]
+    fn degenerate_prior_variance_stays_finite() {
+        // A caller passing a (near-)zero variance is floored to MIN_VARIANCE, so `1/var` cannot blow up
+        // to a non-finite precision and selection stays finite/deterministic — no NaN footgun.
+        let s = schema();
+        let (arc, cell_a, _cell_b) = two_niche_archive(&s);
+        let mut sel = ThompsonParentSelector::new(NichePrior {
+            mean: 0.0,
+            var: 0.0,
+            obs_var: 0.0,
+        });
+        sel.record(cell_a, &ApplicationOutcome::ImprovedElite { gain: 1.0 });
+        assert!(sel.posterior_mean(&cell_a).is_finite());
+        let mut rng = task_rng(3, 0);
+        for _ in 0..50 {
+            let picked = sel.select_parent(&arc, Direction::Long, &mut rng);
+            assert!(picked.is_some());
         }
     }
 }
