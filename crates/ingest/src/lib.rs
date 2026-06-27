@@ -34,6 +34,7 @@ pub mod fetcher;
 pub mod fill;
 pub mod fuse;
 pub mod integrity;
+pub mod persist;
 pub mod plan;
 pub mod quality;
 pub mod reconcile;
@@ -54,6 +55,9 @@ pub use fetcher::{FetchError, Fetcher};
 pub use fill::{plan_fill, FillPlan, FilledPoint, Hole};
 pub use fuse::{align_onto_grid, fuse, Cell, FusedColumn, FusedCorpus, FusionInput, Grid};
 pub use integrity::{check_series, Gap, SeriesIntegrity};
+pub use persist::{
+    fused_bars, persist_fused, FusedMarket, PersistError, PersistReport, PersistStatus,
+};
 pub use plan::enumerate_targets;
 pub use quality::{DataQualityReport, HardViolationPolicy, SeriesQuality, Violation};
 pub use reconcile::{diff_overlap, Divergence, Tolerance};

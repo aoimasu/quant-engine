@@ -266,7 +266,60 @@ impl MarketStore {
         let rtxn = self.env.read_txn()?;
         scan_series(&self.futures, &rtxn, &series_prefix(instrument), from, to)
     }
+
+    // ---- vintage lineage ledger (QE-105) ----------------------------------------------------
+
+    /// Record that the vintage `lineage_id` has been persisted into this store.
+    ///
+    /// Returns `true` if the id was newly recorded, `false` if it was already present — letting a
+    /// persist step skip re-writing an already-persisted vintage (idempotency keyed by lineage).
+    /// Stored in the `meta` db under a `lineage:` prefix, so it cannot collide with the
+    /// schema-version key.
+    ///
+    /// # Errors
+    /// [`StorageError`] on an LMDB failure.
+    pub fn record_lineage(&self, lineage_id: &str) -> Result<bool, StorageError> {
+        let key = format!("{LINEAGE_PREFIX}{lineage_id}");
+        let mut wtxn = self.env.write_txn()?;
+        let existed = self.meta.get(&wtxn, &key)?.is_some();
+        if !existed {
+            self.meta.put(&mut wtxn, &key, "1")?;
+        }
+        wtxn.commit()?;
+        Ok(!existed)
+    }
+
+    /// Whether `lineage_id` has already been recorded as persisted.
+    ///
+    /// # Errors
+    /// [`StorageError`] on an LMDB failure.
+    pub fn has_lineage(&self, lineage_id: &str) -> Result<bool, StorageError> {
+        let rtxn = self.env.read_txn()?;
+        Ok(self
+            .meta
+            .get(&rtxn, &format!("{LINEAGE_PREFIX}{lineage_id}"))?
+            .is_some())
+    }
+
+    /// All vintage lineage ids recorded in this store, ascending.
+    ///
+    /// # Errors
+    /// [`StorageError`] on an LMDB failure.
+    pub fn lineages(&self) -> Result<Vec<String>, StorageError> {
+        let rtxn = self.env.read_txn()?;
+        let mut out = Vec::new();
+        for item in self.meta.prefix_iter(&rtxn, LINEAGE_PREFIX)? {
+            let (key, _) = item?;
+            if let Some(id) = key.strip_prefix(LINEAGE_PREFIX) {
+                out.push(id.to_owned());
+            }
+        }
+        Ok(out)
+    }
 }
+
+/// `meta`-db key prefix for the vintage lineage ledger (QE-105).
+const LINEAGE_PREFIX: &str = "lineage:";
 
 /// Prefix-scan a database, returning values whose key-time falls in `[from, to)`, in order.
 ///
