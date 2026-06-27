@@ -334,6 +334,12 @@ mod tests {
             "genome should clear the trade gate"
         );
         assert!(lo.trades >= cheap.min_trades);
+        // `decide` is cost-blind, so the trade sequence is identical — the fitness drop is pure cost
+        // drag, not fewer trades. Asserting equal trade counts makes the net-of-cost proof airtight.
+        assert_eq!(
+            lo.trades, hi.trades,
+            "cost must not change the trade sequence"
+        );
         // Higher costs strictly drag both fitness and net P&L.
         assert!(
             hi.fitness.mean < lo.fitness.mean,
