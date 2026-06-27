@@ -146,6 +146,26 @@ impl PositionState {
             bars_held,
         }
     }
+
+    /// Advance the position by one bar given the [`Decision`] taken on it — the bookkeeping counterpart
+    /// to [`Genome::decide`] (which *consumes* a `PositionState`). Co-located with `decide` so the
+    /// decide/advance pair is a **single source of truth** shared by training (backtest) and the live
+    /// runtime (evaluator); a divergence here would silently break train/live decision parity.
+    ///
+    /// `Enter(dir)` opens at `bars_held = 0` (the entry bar); `Hold` increments `bars_held` while held (or
+    /// stays flat); `Exit` returns to flat. `decide` then exits a held position once `bars_held ≥
+    /// max_holding_bars`.
+    #[must_use]
+    pub fn advance(self, decision: Decision) -> PositionState {
+        match decision {
+            Decision::Enter(dir) => PositionState::held(dir, 0),
+            Decision::Exit => PositionState::flat(),
+            Decision::Hold => match self.dir {
+                Some(dir) => PositionState::held(dir, self.bars_held + 1),
+                None => PositionState::flat(),
+            },
+        }
+    }
 }
 
 /// The genome's per-bar output: a pure trading signal. Position size is *not* here — the backtester
@@ -531,6 +551,24 @@ mod tests {
         for _ in 0..5 {
             assert_eq!(g.decide(&f, PositionState::flat()), first);
         }
+    }
+
+    #[test]
+    fn position_advance_is_the_decide_counterpart() {
+        // Enter opens at bars_held 0; Hold increments while held; Exit flattens; Hold while flat stays flat.
+        let entered = PositionState::flat().advance(Decision::Enter(Direction::Long));
+        assert_eq!(entered, PositionState::held(Direction::Long, 0));
+        let held1 = entered.advance(Decision::Hold);
+        assert_eq!(held1, PositionState::held(Direction::Long, 1));
+        assert_eq!(
+            held1.advance(Decision::Hold),
+            PositionState::held(Direction::Long, 2)
+        );
+        assert_eq!(held1.advance(Decision::Exit), PositionState::flat());
+        assert_eq!(
+            PositionState::flat().advance(Decision::Hold),
+            PositionState::flat()
+        );
     }
 
     #[test]

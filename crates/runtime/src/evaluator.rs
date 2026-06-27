@@ -103,7 +103,9 @@ impl EvaluatorSession {
         let mut decisions = Vec::with_capacity(self.vintage.content.chromosomes.len());
         for (i, genome) in self.vintage.content.chromosomes.iter().enumerate() {
             let decision = genome.decide(&fv, self.positions[i]);
-            self.positions[i] = advance(self.positions[i], decision);
+            // `advance` is the shared decide/advance counterpart in qe-signal — one source of truth so
+            // live and training (backtest) bookkeeping cannot drift (train/live decision parity).
+            self.positions[i] = self.positions[i].advance(decision);
             decisions.push(ChromosomeDecision { index: i, decision });
         }
         EvalOutput {
@@ -135,19 +137,6 @@ impl EvaluatorSession {
     #[must_use]
     pub fn chromosome_count(&self) -> usize {
         self.vintage.content.chromosomes.len()
-    }
-}
-
-/// Advance a position given the decision taken on a bar. Mirrors the backtest's bookkeeping: `bars_held`
-/// is 0 on the entry bar and increments while held; an `Exit` returns to flat.
-fn advance(position: PositionState, decision: Decision) -> PositionState {
-    match decision {
-        Decision::Enter(dir) => PositionState::held(dir, 0),
-        Decision::Exit => PositionState::flat(),
-        Decision::Hold => match position.dir {
-            Some(dir) => PositionState::held(dir, position.bars_held + 1),
-            None => PositionState::flat(),
-        },
     }
 }
 
