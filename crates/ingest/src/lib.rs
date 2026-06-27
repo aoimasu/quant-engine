@@ -15,10 +15,15 @@
 pub mod backfill;
 pub mod cache;
 pub mod checksum;
+pub mod coverage;
 pub mod downloader;
 pub mod drift;
 pub mod fetcher;
+pub mod fill;
+pub mod integrity;
 pub mod plan;
+pub mod quality;
+pub mod reconcile;
 pub mod rest;
 pub mod source;
 
@@ -26,10 +31,15 @@ pub use backfill::{
     BackfillRequest, BackfillResult, Backfiller, RealSleeper, RetryPolicy, Sleeper,
 };
 pub use cache::RawCache;
+pub use coverage::{coverage, flag_short_history, Coverage, ShortCoverage};
 pub use downloader::{Downloader, FileOutcome, SyncReport};
 pub use drift::{csv_header, detect_drift, DriftStatus, SchemaRegistry};
 pub use fetcher::{FetchError, Fetcher};
+pub use fill::{plan_fill, FillPlan, FilledPoint};
+pub use integrity::{check_series, Gap, SeriesIntegrity};
 pub use plan::enumerate_targets;
+pub use quality::{DataQualityReport, HardViolationPolicy, SeriesQuality, Violation};
+pub use reconcile::{diff_overlap, Divergence, Tolerance};
 pub use rest::{
     parse_klines_json, PageRequest, RestEndpoint, RestError, RestSource, TimedRow,
     DEFAULT_REST_BASE,
