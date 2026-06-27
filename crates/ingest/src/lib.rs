@@ -35,7 +35,7 @@ pub use coverage::{coverage, flag_short_history, Coverage, ShortCoverage};
 pub use downloader::{Downloader, FileOutcome, SyncReport};
 pub use drift::{csv_header, detect_drift, DriftStatus, SchemaRegistry};
 pub use fetcher::{FetchError, Fetcher};
-pub use fill::{plan_fill, FillPlan, FilledPoint};
+pub use fill::{plan_fill, FillPlan, FilledPoint, Hole};
 pub use integrity::{check_series, Gap, SeriesIntegrity};
 pub use plan::enumerate_targets;
 pub use quality::{DataQualityReport, HardViolationPolicy, SeriesQuality, Violation};

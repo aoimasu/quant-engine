@@ -30,7 +30,8 @@ impl Gap {
 pub struct SeriesIntegrity {
     /// Gaps (consecutive Δ greater than one interval).
     pub gaps: Vec<Gap>,
-    /// Timestamps that appear more than once.
+    /// Each duplicate **occurrence** (a timestamp is listed once per extra appearance, so a value
+    /// seen three times appears twice here).
     pub duplicates: Vec<i64>,
     /// Timestamps that are strictly less than their predecessor (sequence not sorted).
     pub out_of_order: Vec<i64>,

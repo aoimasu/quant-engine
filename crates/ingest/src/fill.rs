@@ -9,7 +9,21 @@
 
 use serde::Serialize;
 
-use crate::integrity::Gap;
+/// An unfilled run of slots — a gap too wide to forward-fill across.
+///
+/// Distinct from [`crate::integrity::Gap`] **on purpose**: a `Hole`'s `from_ms` is the **first
+/// unfilled slot** (inclusive) and `missing = (to - from) / interval`, whereas a `Gap`'s `from_ms`
+/// is the **last present sample** before the gap. The QE-104 fuser consumes `Hole`s (the leakage-safe
+/// holes to leave as NaN), so the two must not be confused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct Hole {
+    /// First unfilled slot (inclusive).
+    pub from_ms: i64,
+    /// First slot after the hole (exclusive) — a present sample or the grid end.
+    pub to_ms: i64,
+    /// Number of unfilled slots in `[from_ms, to_ms)`.
+    pub missing: u64,
+}
 
 /// A missing slot that is filled forward from an earlier present sample.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -25,8 +39,8 @@ pub struct FilledPoint {
 pub struct FillPlan {
     /// Slots filled forward (within the bound).
     pub filled: Vec<FilledPoint>,
-    /// Gaps left unfilled because they exceed `max_gap_ms` — leakage-safe holes.
-    pub holes: Vec<Gap>,
+    /// Runs left unfilled because they exceed `max_gap_ms` — leakage-safe holes (QE-104 leaves NaN).
+    pub holes: Vec<Hole>,
 }
 
 /// Plan a leakage-safe forward-fill over the expected grid `start, start+interval, … < end`.
@@ -89,9 +103,9 @@ pub fn plan_fill(
 
 /// Build a hole spanning `[from_ms, to_ms)` where `from_ms` is the first **unfilled** slot, so the
 /// number of holed slots is `(to - from) / interval` (no `-1` — `from` is itself missing).
-fn make_hole(from_ms: i64, to_ms: i64, interval_ms: i64) -> Gap {
+fn make_hole(from_ms: i64, to_ms: i64, interval_ms: i64) -> Hole {
     let missing = ((to_ms - from_ms) / interval_ms).max(0) as u64;
-    Gap {
+    Hole {
         from_ms,
         to_ms,
         missing,

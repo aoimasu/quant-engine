@@ -31,7 +31,7 @@ approved block is archived to `docs/mds/reviewed/<ticket>.md` and removed from h
 
 - **Branch:** `qe-103/data-integrity-reconciliation`
 - **PR:** https://github.com/aoimasu/quant-engine/pull/16
-- **Latest commit:** `bd1b81b`
+- **Latest commit:** _(post-approval advisory follow-up — see below)_
 - **Evidence/design:** `docs/architecture/qe-103-data-integrity-reconciliation-design.md`
 - **Changed surface:** `crates/ingest` — **new** `src/{integrity,fill,coverage,reconcile,quality}.rs`,
   `src/lib.rs` (module wiring + exports), `Cargo.toml` (+`serde`). Pure logic, no network. Also
@@ -77,4 +77,63 @@ Key AC-proving tests:
 
 ### Review notes
 
-_(awaiting dedicated review agent — `start-review-ticket` against this branch/diff vs the ACs above)_
+**Verdict: [Approved].** Reviewed strictly as architect + senior engineer against the full diff vs `main`
+(head `bd1b81b`) — read all five new modules and every test. Both ACs are met and **correct**; the crate
+stays pure/offline.
+
+**AC #1 — no silent fill across an over-bound gap (PASS).** The leakage-safety is **structural**:
+`plan_fill` updates `last_present` **only on a genuinely present slot** (never on a fill), so the fill
+distance `slot - src` is always measured from the last *real* sample and grows monotonically across a
+miss-run. The first slot with `slot - src > max_gap_ms` falls into the hole branch, and because
+`last_present` is unchanged every subsequent missing slot also exceeds the bound — a hole can only close
+on a real present slot, so **no fill can ever occur inside an over-bound region**. I traced
+`gap_larger_than_bound_is_not_filled` (filled = {1m,2m}, hole [3m,5m), nothing filled in the over-bound
+region), the inclusive boundary (`gap_exactly_at_bound_fills`), `leading_missing_run_is_a_hole`, and the
+`make_hole` accounting (`from` = first unfilled slot, `missing = (to-from)/interval`, no `-1`). All correct.
+
+**AC #2 — report + hard-fail (PASS).** `DataQualityReport` is `Serialize` with `to_json` (the per-vintage
+artefact); `evaluate(&HardViolationPolicy)` collects over-bound gaps (`span_ms() > max_gap_ms`, the strict
+complement of fill's inclusive `<=`), forbidden duplicates/out-of-order, and excess divergences into a
+`Vec<Violation>` — non-empty ⇒ `Err` ⇒ run fails. Defaults are sensibly conservative (structural
+dup/disorder always fail; gap/divergence tolerances opt-in). All four tests trace clean, incl. the JSON
+round-trip.
+
+**Supporting modules (correct).** `integrity::check_series` computes gaps on the **sorted-unique** view so
+a duplicate/out-of-order row can't fake a gap (verified `detects_duplicates`/`detects_out_of_order` show no
+phantom gap), while dup/order are flagged on raw arrival order. `coverage` derives expected/present/missing
+and flags strictly-shorter history (start-late/end-early). `reconcile::Tolerance::within` correctly encodes
+"diverge iff it exceeds **both** abs and rel" (`within = diff<=abs || diff<=rel·max`), with value/missing
+divergences over the union, ascending. Topology unchanged (only new dep `serde`, workspace-provided).
+
+**Verification caveat (transparency).** The Rust toolchain is absent from this review environment (no
+`cargo`/`rustc`/`rustup`), so I did not execute the gates. The verdict rests on full static review +
+hand-traced execution of every test (this is pure, deterministic logic, which traces cleanly on paper). I
+did not rely on the PR's "all green" claim; treat the reported gate results as developer-reported. Nothing
+in the review contradicts them.
+
+**Advisories (non-blocking — do not gate merge):**
+1. **`Gap` is reused by two producers with *different* `from_ms` semantics, and the field doc matches only
+   one.** In `integrity.rs`, `Gap.from_ms` = the last **present** timestamp before the gap (matching the
+   struct doc *"Last present timestamp before the gap"*). In `fill.rs::make_hole`, the same `Gap` is built
+   with `from_ms` = the first **missing** (unfilled) slot — contradicting that doc. Both compute `missing`
+   correctly and each module is internally consistent + tested, and crucially the two conventions never
+   collide inside QE-103 (`evaluate` reads only `integrity.gaps`, never `fill.holes`). But `FillPlan.holes`
+   is a serialized public type the **QE-104 fuser** will consume; a consumer trusting `Gap`'s documented
+   `from_ms` would misread fill holes by one interval and with the wrong present/missing sense. Recommend
+   **before QE-104 consumes holes**: either give fill its own `Hole` type, or unify the `from_ms` convention
+   and update the `Gap` field docs to describe both producers. Latent trap, not a current bug.
+2. **(Trivial) `duplicates` counts occurrences, not distinct values** — `[0,0,0]` yields `duplicates =
+   [0,0]` so `len() == 2`. Fine for the diagnostic detail string; noted only for precision.
+
+### Post-approval follow-up (coder) — advisories resolved; status → [Ready-for-review]
+
+Resolved both non-blocking advisories (strictly additive; no AC behaviour changed).
+- **#1 (shared `Gap` semantics trap before QE-104) — DONE.** `FillPlan.holes` is now a **distinct
+  `Hole` type** (not the reused `integrity::Gap`). `Hole.from_ms` is documented as the first
+  *unfilled* slot (inclusive) with `missing = (to-from)/interval`, vs `Gap.from_ms` = last present
+  sample — so the QE-104 fuser consuming `holes` can't confuse the two conventions. Exported as
+  `qe_ingest::Hole`.
+- **#2 (duplicates counts occurrences) — DONE (doc).** `SeriesIntegrity.duplicates` now documents
+  that it lists each duplicate *occurrence* (a thrice-seen timestamp appears twice).
+- Gates re-run green: fmt ok; clippy clean (default **and** `--features http`); `qe-ingest` 55 unit +
+  2 integration; deny unaffected.
