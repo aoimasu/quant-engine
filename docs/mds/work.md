@@ -38,6 +38,7 @@ approved block is archived to `docs/mds/reviewed/<ticket>.md` and removed from h
 - QE-114 — Phased-lifecycle quality gate (SPIKE) — PR #28 — Approved & merged.
 - QE-115 — Ensemble discrete differential evolution (SPIKE) — PR #29 — Approved & merged.
 - QE-116 — Calibration profile & circuit-breaker model (SPIKE) — PR #30 — Approved & merged.
+- QE-117 — Walk-forward window manager — PR #31 — Approved & merged.
 
 ---
 

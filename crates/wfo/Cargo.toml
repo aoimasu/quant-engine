@@ -20,9 +20,11 @@ rust_decimal.workspace = true
 serde.workspace = true
 # RngCore bound for deterministic adaptive operator selection (QE-112).
 rand_core.workspace = true
+# Embarrassingly-parallel, scheduling-independent batch evaluation (QE-118).
+rayon.workspace = true
+# Per-task seeded DetRng so parallel evaluation stays byte-deterministic (QE-118, QE-006).
+qe-determinism.workspace = true
 
 [dev-dependencies]
 # Genome JSON round-trip in the QE-110 fixture test.
 serde_json.workspace = true
-# Seeded DetRng for the QE-112 operator-selection simulation tests.
-qe-determinism.workspace = true
