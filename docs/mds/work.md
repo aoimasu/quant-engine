@@ -27,57 +27,61 @@ approved block is archived to `docs/mds/reviewed/<ticket>.md` and removed from h
 - QE-103 — Data-integrity & source reconciliation validation — PR #16 — Approved & merged.
 - QE-104 — Fusion, normalisation & Arrow serialisation — PR #17 — Approved & merged.
 - QE-105 — Persist fused market data to LMDB — PR #18 — Approved & merged.
+- QE-106 — Multi-resolution bar reconstruction (batch) — PR #19 — Approved & merged.
 
 ---
 
-## QE-106 — Multi-resolution bar reconstruction (batch) — PR #19 — [Ready-for-review]
+## QE-107 — Indicator catalogue (quantised, deterministic, parity-ready) — PR #20 — [Ready-for-review]
 
-- **Branch:** `qe-106/multi-resolution-bar-reconstruction`
-- **PR:** https://github.com/aoimasu/quant-engine/pull/19
-- **Latest commit:** `1ca1897`
-- **Evidence/design:** `docs/architecture/qe-106-multi-resolution-bar-reconstruction-design.md`
-- **Changed surface:** `crates/signal` (**new** `src/reconstruct.rs`, `lib.rs` wiring, `Cargo.toml`
-  +`rust_decimal`/`thiserror`), `crates/ingest` (**new** `src/recon.rs` + `tests/recon.rs`, `lib.rs`
-  wiring, `Cargo.toml` +`qe-signal`), `Cargo.lock`. No new third-party deps. Also bundles the QE-105
-  archive (`docs/mds/reviewed/qe-105.md`) + `docs/mds/work.md` bookkeeping — branch protection blocks
-  direct `main` pushes.
+- **Branch:** `qe-107/indicator-catalogue`
+- **PR:** https://github.com/aoimasu/quant-engine/pull/20
+- **Latest commit:** `5de015d`
+- **Evidence/design:** `docs/architecture/qe-107-indicator-catalogue-design.md`
+- **Changed surface:** `crates/signal` — **new** `src/indicator/{mod,quant,roll,price,flow}.rs`,
+  `lib.rs` wiring, `Cargo.toml` (rust_decimal +`maths` feature, +`thiserror`), `Cargo.lock`. No new
+  third-party crates (only the pure `maths` feature). Also bundles the QE-106 archive
+  (`docs/mds/reviewed/qe-106.md`) + `docs/mds/work.md` bookkeeping — branch protection blocks direct
+  `main` pushes.
 
 ### Acceptance criteria (copied from backlog)
-- [x] Batch-reconstructed bars equal streaming reconstruction on the same input (parity fixture).
+- [x] Each indicator's batch output equals its streaming output bar-for-bar.
+- [x] Declared lookback matches actual data dependency (verified).
 
 ### Verification (run locally — all green)
 - `cargo fmt --all --check` — ok
 - `cargo clippy --workspace --all-targets --locked -- -D warnings` — clean (also
   `cargo clippy -p qe-ingest --features arrow` — clean)
-- `cargo test --workspace --locked` — **238 passed, 1 ignored** (reconstruct 6, recon-cache
-  integration 2)
-- `cargo test -p qe-cli --test dependency_topology` — passes (new `qe-ingest→qe-signal` +
-  `qe-signal` staying `qe-domain`-only edges allowed; runtime↔training invariant untouched)
-- `cargo deny check` — advisories/bans/licenses/sources ok (no new third-party deps)
+- `cargo test --workspace --locked` — **255 passed, 1 ignored** (qe-signal 24, incl. the generic AC
+  tests over the whole catalogue)
+- `cargo test -p qe-cli --test dependency_topology` — passes (`qe-signal` stays `qe-domain`-only)
+- `cargo deny check` — advisories/bans/licenses/sources ok (no new crates; only the pure `maths`
+  feature on the existing `rust_decimal`)
 
-Key AC-proving tests:
-- **AC (batch == streaming parity)** — `reconstruct::tests::batch_equals_streaming_parity`: a 70-min
-  5m series fed as a batch vs one-at-a-time through `BarReconstructor` yields **identical** output
-  across the three 30m windows. Batch is literally streaming over the whole slice (one shared fold),
-  so parity is structural.
-- **Supporting:** `rolls_up_one_window_to_hand_computed_values` (OHLCV+trades roll-up vs
-  hand-computed), `windows_align_to_epoch_boundary_not_first_bar` (deterministic boundaries),
-  `reconstruct_tiers_yields_all_configured_tiers` (48×5m → 8×30m + 1×4h), error cases
-  (non-coarser target, wrong-resolution input).
-- **Cache bridge** (`crates/ingest/tests/recon.rs`): `reconstruct_caches_tiers_and_round_trips_under_lineage`
-  (reconstruct→cache→`scan_recon_bars`/`get_recon_bar` round-trip), `cached_tiers_are_stale_under_a_different_lineage`
-  (lineage tagging honoured).
+Key AC-proving tests (generic over the whole 22-indicator catalogue):
+- **AC #1 (batch == streaming)** — `ac1_batch_equals_streaming_for_every_indicator`: for every
+  indicator, `compute_batch` over a slice equals feeding the same samples one-at-a-time. Structural:
+  there is one `update` path; batch is literally the streaming loop.
+- **AC #2 (lookback == data dependency)** — proven from both sides:
+  - `ac2_warmup_emits_none_until_exactly_lookback_then_some` — each indicator emits `None` until it
+    has seen exactly `lookback` samples, then `Some` (consumes ≥ lookback).
+  - `ac2_latest_output_independent_of_out_of_window_samples` — perturbing a sample at index
+    `len-1-lookback` (just outside the latest window) leaves the latest state byte-identical (depends
+    on ≤ lookback). Together ⇒ dependency == lookback.
+- **Supporting:** `catalogue_has_at_least_twenty_indicators_with_unique_ids` (22, unique),
+  `every_indicator_respects_configured_state_count`, hand-computed SMA/RSI/Stoch/ROC, quantiser bin
+  edges, `Roll` stats, flow-factor scalar-skip + presence.
 
 ### Design notes for the reviewer
-- **One fold, shared by batch + streaming.** `BarReconstructor` is the single incremental fold;
-  `reconstruct_batch` = push-all + finish. So batch and streaming cannot diverge — the QE-206 parity
-  guarantee is structural, not a coincidence of two implementations.
-- **Storage-free hot-path logic.** `qe-signal` stays `qe-domain`-only (no LMDB) — reconstruction runs
-  identically in batch and in the latency-sensitive runtime (QE-003). The synthetic-store caching is
-  a separate `qe-ingest` bridge.
-- **Deterministic boundaries.** Window start = `floor_div(open_time, target_ms)·target_ms` — depends
-  only on the timestamp + target resolution, never on batch size / arrival order / thread count.
-- **Topology.** New `qe-ingest → qe-signal` edge is acyclic (signal is `qe-domain`-only); QE-001
-  guard re-runs green.
-- **Out of scope:** live-runtime streaming wiring (QE-205). The streaming `BarReconstructor` is
-  exposed now so QE-206 can prove parity against the live path.
+- **AC #1 is structural.** One `Indicator::update`; `compute_batch` = the streaming loop. Batch and
+  streaming cannot diverge — same as the QE-106 reconstruction pattern.
+- **AC #2 by FIR construction.** Every indicator's latest output reads **exactly the last `lookback`
+  samples** via a ring buffer (`Roll`) — nothing older. So declared lookback == data dependency,
+  which is the leakage-relevant property purge/embargo (QE-128/WFO) needs. The catalogue ships
+  finite-window variants (Cutler RSI, simple-mean ATR, windowed EMA) **on purpose** so this holds
+  strictly; IIR smoothing could be added later behind a declared embargo-aware lookback.
+- **Quantisation is point-wise.** `Quantiser::{Linear,Bands}` map a value → state with no rolling
+  quantile / dataset-wide fit, so the discrete state never peeks at future data and is identical
+  batch vs streaming. `num_states` is configurable via `CatalogueConfig`.
+- **Storage-free hot-path crate.** `qe-signal` stays `qe-domain`-only; `rust_decimal`'s pure `maths`
+  feature adds `Decimal::sqrt` (std-dev/Bollinger) with no new crates, so `cargo deny` is unaffected.
+- **Out of scope:** feature assembly/normalisation (QE-108); genome (QE-110).
