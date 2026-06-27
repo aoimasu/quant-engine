@@ -23,6 +23,8 @@ qe-vintage.workspace = true
 # Exact-decimal scalar context (funding/OI/premium) joined onto bars in the live factor join (QE-206).
 # A normal dependency is already visible to the crate's tests, so no separate dev-dependency is needed.
 rust_decimal.workspace = true
+# Typed bootstrap errors (QE-209) — reconstruction / REST / decode.
+thiserror.workspace = true
 
 [dev-dependencies]
 # Building a sealed Vintage fixture (its Lineage tag) for the evaluator-session tests (QE-207).
