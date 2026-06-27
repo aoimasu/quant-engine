@@ -30,8 +30,8 @@ approved block is archived to `docs/mds/reviewed/<ticket>.md` and removed from h
 ## QE-103 — Data-integrity & source reconciliation validation — PR #16 — [Ready-for-review]
 
 - **Branch:** `qe-103/data-integrity-reconciliation`
-- **PR:** _(set on `gh pr create`)_
-- **Latest commit:** _(see PR head)_
+- **PR:** https://github.com/aoimasu/quant-engine/pull/16
+- **Latest commit:** `bd1b81b`
 - **Evidence/design:** `docs/architecture/qe-103-data-integrity-reconciliation-design.md`
 - **Changed surface:** `crates/ingest` — **new** `src/{integrity,fill,coverage,reconcile,quality}.rs`,
   `src/lib.rs` (module wiring + exports), `Cargo.toml` (+`serde`). Pure logic, no network. Also
