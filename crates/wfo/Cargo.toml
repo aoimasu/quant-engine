@@ -16,3 +16,9 @@ qe-signal.workspace = true
 qe-storage.workspace = true
 # Exact decimal for cost / funding / P&L arithmetic — never float money (QE-109).
 rust_decimal.workspace = true
+# Genome serialisation (QE-110): the canonical vintage-lineage form is JSON.
+serde.workspace = true
+
+[dev-dependencies]
+# Genome JSON round-trip in the QE-110 fixture test.
+serde_json.workspace = true
