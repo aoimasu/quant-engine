@@ -16,7 +16,7 @@ use std::path::PathBuf;
 
 use qe_determinism::Lineage;
 use qe_risk::CalibrationProfile;
-use qe_wfo::Genome;
+use qe_signal::Genome;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -259,7 +259,9 @@ fn hex(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
     use qe_risk::{CalibrationProfile, Fraction};
-    use qe_wfo::{Clause, ExitParams, Genome, RiskParams, RuleSet, CLAUSES_PER_SET, REP_VERSION};
+    use qe_signal::{
+        Clause, ExitParams, Genome, RiskParams, RuleSet, CLAUSES_PER_SET, REP_VERSION,
+    };
     use rust_decimal::Decimal;
 
     fn genome(hold: u16) -> Genome {

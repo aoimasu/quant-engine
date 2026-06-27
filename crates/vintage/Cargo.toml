@@ -11,8 +11,10 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-# The chromosomes (strategy genomes, QE-110) embedded in the vintage.
-qe-wfo.workspace = true
+# The chromosomes (strategy genomes, QE-110) embedded in the vintage. The genome lives in the shared
+# `qe-signal` crate (not `qe-wfo`) so the vintage — handed to the live runtime — does not transitively
+# pull in the training side, honouring the QE-001 train/live decoupling invariant.
+qe-signal.workspace = true
 # The per-vintage calibration profile sidecar (QE-116) that rides the vintage.
 qe-risk.workspace = true
 # The resolvable lineage tag (QE-006) — same content-hash pattern as Lineage::id.

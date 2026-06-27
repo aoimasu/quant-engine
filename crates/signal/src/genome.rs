@@ -18,8 +18,8 @@
 
 use std::collections::BTreeSet;
 
+use crate::{FeatureSchema, FeatureVector};
 use qe_domain::Direction;
-use qe_signal::{FeatureSchema, FeatureVector};
 use serde::{Deserialize, Serialize};
 
 /// Representation version, stamped into every genome for lineage and decode-mismatch safety. A future
@@ -288,7 +288,7 @@ impl Genome {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use qe_signal::{CatalogueConfig, QState};
+    use crate::{CatalogueConfig, QState};
 
     // --- helpers -----------------------------------------------------------------------------
 
