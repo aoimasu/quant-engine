@@ -22,7 +22,9 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 /// The vintage artefact format version. Part of the hashed content, so a format change changes the hash.
-pub const VINTAGE_FORMAT_VERSION: u16 = 1;
+///
+/// `2` (QE-130): added [`VintageContent::worst_case_loss`].
+pub const VINTAGE_FORMAT_VERSION: u16 = 2;
 
 /// The hashed content of a vintage — everything the content hash covers.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -37,18 +39,25 @@ pub struct VintageContent {
     pub weights: Vec<f64>,
     /// The per-vintage calibration sidecar (QE-116).
     pub calibration: CalibrationProfile,
+    /// Worst-case capital loss (a positive fraction) under the QE-130 stress set — the figure the
+    /// vintage carries to gate G3 (QE-308). `None` until the stress engine
+    /// (`qe_ensemble::stress::worst_case_loss`) has been run and its bare figure attached. Stored as a
+    /// plain `f64`, not the `StressReport` type, so the vintage keeps no `qe-ensemble` dependency.
+    pub worst_case_loss: Option<f64>,
     /// The lineage that produced this vintage (QE-006).
     pub lineage: Lineage,
 }
 
 impl VintageContent {
     /// Validate the artefact's structural invariants — `weights` aligned one-to-one with `chromosomes`
-    /// and every weight finite. Called by [`Vintage::seal`], so a silent upstream bug (a non-finite
-    /// weight that would serialise to JSON `null` and fail re-load, or a weight/chromosome length
-    /// mismatch) surfaces as a clear error at seal time rather than a corrupt artefact.
+    /// and every weight finite, and `worst_case_loss` (if present) a finite non-negative fraction.
+    /// Called by [`Vintage::seal`], so a silent upstream bug (a non-finite weight that would serialise
+    /// to JSON `null` and fail re-load, a weight/chromosome length mismatch, or a nonsensical loss
+    /// figure) surfaces as a clear error at seal time rather than a corrupt artefact.
     ///
     /// # Errors
-    /// [`VintageError::WeightChromosomeMismatch`] or [`VintageError::NonFiniteWeight`].
+    /// [`VintageError::WeightChromosomeMismatch`], [`VintageError::NonFiniteWeight`], or
+    /// [`VintageError::InvalidWorstCaseLoss`].
     pub fn validate(&self) -> Result<(), VintageError> {
         if self.weights.len() != self.chromosomes.len() {
             return Err(VintageError::WeightChromosomeMismatch {
@@ -59,6 +68,11 @@ impl VintageContent {
         for (index, &value) in self.weights.iter().enumerate() {
             if !value.is_finite() {
                 return Err(VintageError::NonFiniteWeight { index, value });
+            }
+        }
+        if let Some(loss) = self.worst_case_loss {
+            if !loss.is_finite() || loss < 0.0 {
+                return Err(VintageError::InvalidWorstCaseLoss { value: loss });
             }
         }
         Ok(())
@@ -220,6 +234,12 @@ pub enum VintageError {
         /// The non-finite value.
         value: f64,
     },
+    /// `worst_case_loss` is not a finite, non-negative fraction (QE-130).
+    #[error("vintage worst_case_loss must be a finite non-negative fraction, got {value}")]
+    InvalidWorstCaseLoss {
+        /// The offending value.
+        value: f64,
+    },
     /// Underlying I/O error.
     #[error("vintage I/O error: {0}")]
     Io(#[from] std::io::Error),
@@ -294,6 +314,7 @@ mod tests {
             chromosomes: vec![genome(10), genome(25)],
             weights: vec![0.6, 0.4],
             calibration: calibration(),
+            worst_case_loss: Some(0.28), // QE-130 stress figure
             lineage: lineage(),
         }
     }
@@ -331,6 +352,33 @@ mod tests {
         assert!(matches!(
             Vintage::load(buf.as_slice()),
             Err(VintageError::HashMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn vintage_carries_worst_case_loss_and_rejects_an_invalid_one() {
+        // The QE-130 worst-case-loss figure round-trips with the vintage (and is in the hash).
+        let sealed = Vintage::seal(content()).unwrap();
+        assert_eq!(sealed.content.worst_case_loss, Some(0.28));
+        let mut buf: Vec<u8> = Vec::new();
+        sealed.write(&mut buf).unwrap();
+        let loaded = Vintage::load(buf.as_slice()).unwrap();
+        assert_eq!(loaded.content.worst_case_loss, Some(0.28));
+
+        // A different figure changes the hash (it is part of the hashed content).
+        let mut other = content();
+        other.worst_case_loss = Some(0.40);
+        assert_ne!(
+            Vintage::seal(other).unwrap().content_hash,
+            sealed.content_hash
+        );
+
+        // A negative or non-finite loss is rejected at seal time.
+        let mut negative = content();
+        negative.worst_case_loss = Some(-0.1);
+        assert!(matches!(
+            Vintage::seal(negative),
+            Err(VintageError::InvalidWorstCaseLoss { .. })
         ));
     }
 

@@ -10,6 +10,9 @@
 //!   objective/search that rejects ensembles which are not net-positive in every labelled regime (QE-125).
 //! - [`capacity`] (QE-128) — capacity analysis: estimate per-strategy capacity from an impact model ×
 //!   turnover × target AUM and cap ensemble weights so none exceeds its modelled capacity at size.
+//! - [`stress`] (QE-130) — stress / worst-case-loss: run a candidate ensemble through historical crash
+//!   windows + synthetic shocks (gap, funding-spike, ADL) and report the worst peak-to-trough capital
+//!   loss that rides the vintage and feeds gate G3 (QE-308).
 //!
 //! Deliberately independent of `qe-wfo`: the search ⟂ portfolio firewall (QE-001/QE-132).
 
@@ -18,6 +21,7 @@ pub mod de;
 pub mod objective;
 pub mod regime;
 pub mod search;
+pub mod stress;
 
 pub use capacity::{
     cap_weights, capacity, CapacityModel, StrategyProfile, DEFAULT_EDGE_RETENTION,
@@ -36,6 +40,11 @@ pub use regime::{
 pub use search::{
     cross_val_score, search_portfolio, SearchConfig, SearchResult, DEFAULT_FOLDS,
     DEFAULT_GENERATIONS, DEFAULT_INIT_DENSITY, DEFAULT_POP_SIZE,
+};
+pub use stress::{
+    default_synthetic_shocks, max_drawdown, scenario_loss, weighted_combined, worst_case_loss,
+    ScenarioLoss, StressReport, StressScenario, DEFAULT_ADL_HAIRCUT, DEFAULT_FUNDING_PERIODS,
+    DEFAULT_FUNDING_PER_PERIOD, DEFAULT_GAP_RETURN,
 };
 
 /// Returns this crate's package name. Placeholder until later tickets add real APIs.
