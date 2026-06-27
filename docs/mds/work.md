@@ -44,6 +44,7 @@ approved block is archived to `docs/mds/reviewed/<ticket>.md` and removed from h
 - QE-120 — Strategy backtester (fitness engine) — PR #34 — Approved & merged.
 - QE-121 — Thompson-sampling parent selection — PR #35 — Approved & merged.
 - QE-122 — Behavioural regularisation — PR #36 — Approved & merged.
+- QE-123 — Phased recording → Strategy repository — PR #37 — Approved & merged.
 
 ---
 
