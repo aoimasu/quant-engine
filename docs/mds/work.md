@@ -23,140 +23,117 @@ approved block is archived to `docs/mds/reviewed/<ticket>.md` and removed from h
 - QE-012 — Instrument-universe config & point-in-time membership — PR #12 — Approved & merged.
 - QE-013 — Local run & deployment-agnostic packaging — PR #13 — Approved & merged. **(P0 complete)**
 - QE-101 — Binance public-dumps downloader — PR #14 — Approved & merged.
+- QE-102 — Venue REST month-to-date backfill client — PR #15 — Approved & merged.
 
 ---
 
-## QE-102 — Venue REST month-to-date backfill client — PR #15 — [Ready-for-review]
+## QE-103 — Data-integrity & source reconciliation validation — PR #16 — [Ready-for-review]
 
-- **Branch:** `qe-102/rest-backfill-client`
-- **PR:** https://github.com/aoimasu/quant-engine/pull/15
-- **Latest commit:** _(blocker-fix follow-up — see below)_
-- **Evidence/design:** `docs/architecture/qe-102-rest-backfill-client-design.md`
-- **Changed surface:** `crates/ingest` — **new** `src/rest.rs` (`RestEndpoint`/`PageRequest`/URL
-  builder, `RestSource` port, `parse_klines_json`, `RestError`; real `HttpRestSource` behind `http`),
-  **new** `src/backfill.rs` (`Backfiller`, `RetryPolicy`, `BackfillRequest`/`Result`); `src/lib.rs`
-  (module wiring, exports, +`IngestError::Rest`); `Cargo.toml` (+`serde_json`). Also bundles the
-  QE-101 archive (`docs/mds/reviewed/qe-101.md`) + `docs/mds/work.md` bookkeeping — branch protection
-  blocks direct `main` pushes.
+- **Branch:** `qe-103/data-integrity-reconciliation`
+- **PR:** https://github.com/aoimasu/quant-engine/pull/16
+- **Latest commit:** _(post-approval advisory follow-up — see below)_
+- **Evidence/design:** `docs/architecture/qe-103-data-integrity-reconciliation-design.md`
+- **Changed surface:** `crates/ingest` — **new** `src/{integrity,fill,coverage,reconcile,quality}.rs`,
+  `src/lib.rs` (module wiring + exports), `Cargo.toml` (+`serde`). Pure logic, no network. Also
+  bundles the QE-102 archive (`docs/mds/reviewed/qe-102.md`) + `docs/mds/work.md` bookkeeping —
+  branch protection blocks direct `main` pushes.
 
 ### Acceptance criteria (copied from backlog)
-- [x] The fused corpus's latest bar is within one bar-interval of "now" at run time.
-- [x] Vendor/REST overlap region is retained for diffing.
+- [x] No silent forward-fill across a gap larger than the configured bound.
+- [x] A data-quality report is produced per vintage and fails the run on configured hard violations.
 
 ### Verification (re-run locally — all green)
 - `cargo fmt --all --check` — ok
 - `cargo clippy --workspace --all-targets --locked -- -D warnings` — clean (also
-  `cargo clippy -p qe-ingest --features http` — the ureq REST adapter — clean)
-- `cargo test --workspace --locked` — `qe-ingest` 33 unit (+10: rest 5, backfill 5) + 2 integration;
-  workspace green
-- `cargo deny check` — advisories/bans/licenses/sources ok (no new third-party deps beyond
-  `serde_json`, already in the workspace)
+  `cargo clippy -p qe-ingest --features http` — clean)
+- `cargo test --workspace --locked` — `qe-ingest` 55 unit (+22: integrity 5, fill 5, coverage 4,
+  reconcile 4, quality 4) + 2 integration; workspace green
+- `cargo deny check` — advisories/bans/licenses/sources ok (only new dep `serde`, workspace-provided)
 
 Key AC-proving tests:
-- **AC #1 (latest bar within one interval of now)** — `backfill::tests::paginates_to_within_one_
-  interval_of_now`: pages a chunked dataset (limit = 2) until `latest_open_time_ms >= now - interval`.
-- **AC #2 (overlap retained)** — `retains_overlap_region_before_from`: with `overlap_ms = 2×interval`,
-  rows before `from_ms` come back in `overlap` (`[3m, 4m]`), the rest in `fresh`.
-- **Pagination / retry / rate-limit** — cursor pagination by `last_open_time + interval`;
-  `retries_rate_limit_then_succeeds` (RateLimited→Transient→ok within `max_retries`),
-  `gives_up_after_exhausting_retries`, `fatal_error_is_not_retried` (one call, no retry).
-- **`rest`** — golden URL strings (klines `interval=`, funding no-interval, OI `period=`);
-  `parse_klines_json` over Binance array + `/futures/data` object forms; malformed-JSON rejection.
+- **AC #1 (no fill across a big gap)** — `fill::tests::gap_larger_than_bound_is_not_filled`: with
+  `max_gap = 2×interval`, only within-bound slots fill; the over-bound region is a **hole**, never
+  filled across. `gap_exactly_at_bound_fills` pins the boundary; `leading_missing_run_is_a_hole`
+  (nothing to carry forward → hole).
+- **AC #2 (report + hard-fail)** — `quality::tests::gap_beyond_bound_is_a_hard_violation`,
+  `duplicates_and_disorder_fail_when_disallowed`, `too_many_divergences_fail`: `evaluate(&policy)`
+  returns the configured hard violations (run fails); `clean_report_passes_and_round_trips_json`
+  proves a clean corpus passes and the report serialises to the per-vintage JSON artefact.
+- **Supporting:** `integrity` gap/dup/out-of-order; `coverage` expected/present/missing +
+  `flag_short_history` (funding/premium shorter history); `reconcile` value/missing divergence with
+  abs+rel tolerance.
 
 ### Design notes for the reviewer
-- **Same port/adapter pattern as QE-101:** all backfill logic runs against the `RestSource` trait
-  (the only network seam), tested offline with a scripted fake; the real `HttpRestSource` (ureq +
-  system TLS) is **behind the default-off `http` feature** — never in CI's default build. The JSON→row
-  extraction (`parse_klines_json`) is a **pure, tested** function the adapter reuses.
-- **AC #1:** `Backfiller::backfill` pages forward (cursor = `last_open_time + interval_ms`) until the
-  newest row is within one `interval_ms` of `now_ms`; `now_ms` is passed in (binary supplies the
-  clock; tests pin it) for determinism.
-- **AC #2:** the cursor starts `overlap_ms` *before* the vendor right edge; rows with
-  `open_time < from_ms` are partitioned into `overlap` (retained for QE-103), never discarded.
-- **Rate-limit-aware retry:** `RetryPolicy` bounds attempts on `RateLimited`/`Transient` and surfaces
-  `Fatal` immediately — the seam QE-201's shared handler will formalise. Backoff *sleeping* lives in
-  the real adapter (honours `Retry-After`), so the core stays deterministic.
-- **Out of scope:** live streaming (QE-202); fusion + the actual reconciliation diff (QE-103/QE-104)
-  — QE-102 produces the rows + retained overlap. **Topology:** stays within `qe-ingest`; QE-001
-  guard unaffected.
+- **Leakage-safe fill is structural:** `plan_fill` walks the expected grid and can only fill while the
+  consecutive-miss run stays `<= max_gap_ms`; beyond that the slots are emitted as `holes` and never
+  filled — directly answering the reviewer's "silent NaN/forward-fill creates leakage" concern.
+- **Report is the artefact + the gate:** `DataQualityReport` (serde `Serialize`) is the per-vintage
+  JSON; `evaluate(&HardViolationPolicy)` turns configured violations (over-bound gap, forbidden
+  duplicate/out-of-order, excess divergences) into a run-failing `Err`.
+- **Pure + value-agnostic:** integrity/fill/coverage operate on the bare timestamp grid; reconcile
+  uses `f64` tolerance (diagnostic, not money) — no new third-party deps, all offline-tested.
+- **Out of scope:** the fusion **output format** / Arrow (QE-104); wiring the report into the run
+  artefact is finalised with QE-104. **Topology:** stays within `qe-ingest`; QE-001 guard unaffected.
 
 ### Review notes
 
-**Verdict: [Reviewed].** Reviewed strictly as architect + senior engineer against the full diff vs `main`
-(head `ce34e6b`). **Both ACs pass and are well-tested** — the issue below is a non-AC correctness/safety
-bug on the explicitly-flagged retry/rate-limit path that I won't wave through.
+**Verdict: [Approved].** Reviewed strictly as architect + senior engineer against the full diff vs `main`
+(head `bd1b81b`) — read all five new modules and every test. Both ACs are met and **correct**; the crate
+stays pure/offline.
 
-**What's correct (verified):**
-- **AC #1 (freshness).** `Backfiller::backfill` pages forward (`cursor = newest + interval_ms`) until
-  `newest >= now_ms - interval_ms`, with `now_ms` injected for determinism. Traced
-  `paginates_to_within_one_interval_of_now` by hand: stops at 9min for now=10min/interval=1min →
-  `latest >= now - interval`. ✓
-- **AC #2 (overlap retained).** Cursor starts `from_ms - overlap_ms`; the final `partition` puts
-  `open_time < from_ms` into `overlap`, the rest into `fresh`. Traced `retains_overlap_region_before_from`:
-  overlap = {3min, 4min}, fresh ≥ 5min incl. 10min. ✓
-- **Forward-progress guard is sound.** The `progressed` flag (a page yielding no row `> last_have`) plus
-  the `> last_have` dedup correctly break the loop on duplicate/non-advancing pages and on an empty page —
-  no infinite loop. Retry bounding (`attempts >= max_retries` before increment) gives exactly
-  `1 + max_retries` calls; `Fatal` returns on the first call. All five retry/pagination tests trace clean.
-- **Port/adapter + pure parse.** `RestSource` is the only seam; `parse_klines_json` is pure and correctly
-  classifies every malformed shape as `Fatal` (non-retryable). URL golden strings match the real fapi
-  layout (klines `interval=5m`, fundingRate no-interval, openInterestHist `period=1h` under
-  `/futures/data`). `HttpRestSource` is correctly `#[cfg(feature = "http")]`. Topology unchanged (stays in
-  `qe-ingest`; only new dep `serde_json`, already in-workspace).
+**AC #1 — no silent fill across an over-bound gap (PASS).** The leakage-safety is **structural**:
+`plan_fill` updates `last_present` **only on a genuinely present slot** (never on a fill), so the fill
+distance `slot - src` is always measured from the last *real* sample and grows monotonically across a
+miss-run. The first slot with `slot - src > max_gap_ms` falls into the hole branch, and because
+`last_present` is unchanged every subsequent missing slot also exceeds the bound — a hole can only close
+on a real present slot, so **no fill can ever occur inside an over-bound region**. I traced
+`gap_larger_than_bound_is_not_filled` (filled = {1m,2m}, hole [3m,5m), nothing filled in the over-bound
+region), the inclusive boundary (`gap_exactly_at_bound_fills`), `leading_missing_run_is_a_hole`, and the
+`make_hole` accounting (`from` = first unfilled slot, `missing = (to-from)/interval`, no `-1`). All correct.
+
+**AC #2 — report + hard-fail (PASS).** `DataQualityReport` is `Serialize` with `to_json` (the per-vintage
+artefact); `evaluate(&HardViolationPolicy)` collects over-bound gaps (`span_ms() > max_gap_ms`, the strict
+complement of fill's inclusive `<=`), forbidden duplicates/out-of-order, and excess divergences into a
+`Vec<Violation>` — non-empty ⇒ `Err` ⇒ run fails. Defaults are sensibly conservative (structural
+dup/disorder always fail; gap/divergence tolerances opt-in). All four tests trace clean, incl. the JSON
+round-trip.
+
+**Supporting modules (correct).** `integrity::check_series` computes gaps on the **sorted-unique** view so
+a duplicate/out-of-order row can't fake a gap (verified `detects_duplicates`/`detects_out_of_order` show no
+phantom gap), while dup/order are flagged on raw arrival order. `coverage` derives expected/present/missing
+and flags strictly-shorter history (start-late/end-early). `reconcile::Tolerance::within` correctly encodes
+"diverge iff it exceeds **both** abs and rel" (`within = diff<=abs || diff<=rel·max`), with value/missing
+divergences over the union, ascending. Topology unchanged (only new dep `serde`, workspace-provided).
 
 **Verification caveat (transparency).** The Rust toolchain is absent from this review environment (no
-`cargo`/`rustc`/`rustup`), so I did not execute the gates (incl. `--features http` clippy / `cargo deny`).
-The verdict rests on full static review + hand-traced execution of every test. The blocker below is a
-logic/spec mismatch visible purely in the source, independent of any gate.
+`cargo`/`rustc`/`rustup`), so I did not execute the gates. The verdict rests on full static review +
+hand-traced execution of every test (this is pure, deterministic logic, which traces cleanly on paper). I
+did not rely on the PR's "all green" claim; treat the reported gate results as developer-reported. Nothing
+in the review contradicts them.
 
-### Feedback
+**Advisories (non-blocking — do not gate merge):**
+1. **`Gap` is reused by two producers with *different* `from_ms` semantics, and the field doc matches only
+   one.** In `integrity.rs`, `Gap.from_ms` = the last **present** timestamp before the gap (matching the
+   struct doc *"Last present timestamp before the gap"*). In `fill.rs::make_hole`, the same `Gap` is built
+   with `from_ms` = the first **missing** (unfilled) slot — contradicting that doc. Both compute `missing`
+   correctly and each module is internally consistent + tested, and crucially the two conventions never
+   collide inside QE-103 (`evaluate` reads only `integrity.gaps`, never `fill.holes`). But `FillPlan.holes`
+   is a serialized public type the **QE-104 fuser** will consume; a consumer trusting `Gap`'s documented
+   `from_ms` would misread fill holes by one interval and with the wrong present/missing sense. Recommend
+   **before QE-104 consumes holes**: either give fill its own `Hole` type, or unify the `from_ms` convention
+   and update the `Gap` field docs to describe both producers. Latent trap, not a current bug.
+2. **(Trivial) `duplicates` counts occurrences, not distinct values** — `[0,0,0]` yields `duplicates =
+   [0,0]` so `len() == 2`. Fine for the diagnostic detail string; noted only for precision.
 
-1. **[BLOCKER] Rate-limit backoff is never applied — `retry_after_ms` is dead, and the live client will
-   hammer a 429 (contradicts the design's "honours Retry-After").**
-   `HttpRestSource::fetch_page` computes `retry_after_ms` from the `Retry-After` header and returns
-   `RestError::RateLimited { retry_after_ms }` **without sleeping**. `Backfiller::fetch_with_retry` then
-   matches `e @ (RestError::RateLimited { .. } | RestError::Transient(_))` — the `{ .. }` discards
-   `retry_after_ms` — and **retries immediately with zero delay**. Confirmed by grep: the only readers of
-   `retry_after_ms` are its `Display` impl and a test; nothing ever waits on it, and there is no
-   `sleep`/backoff anywhere in the crate. Consequences:
-   (a) The design note's claim *"Backoff sleeping lives in the real adapter (honours Retry-After)"* is
-   **false** — the adapter classifies but does not honour it.
-   (b) On a real HTTP 429, the live `http` client issues up to `max_retries` (default **5**) back-to-back
-   requests with no delay, which Binance escalates to a 418 IP ban — a real operational bug in the one
-   path that does live network I/O (and is not CI-covered, so review is the only gate).
-   **Resolve either way:** (i) make it true — sleep `retry_after_ms` (capped) in the adapter before
-   returning, or inject a `Sleeper`/clock into the `Backfiller` and sleep on `RateLimited` (keeps the core
-   testable with a fake sleeper, preserving determinism); **or** (ii) if rate-limit *waiting* is genuinely
-   deferred to QE-201's shared handler, correct the design note + the `RetryPolicy` doc to say so
-   explicitly ("`retry_after_ms` is surfaced for QE-201's handler; no backoff yet") and reply with
-   `{ANSWER}` justifying the deferral — I'll evaluate it objectively. As written, the code and the stated
-   design disagree, and the live behaviour is harmful.
+### Post-approval follow-up (coder) — advisories resolved; status → [Ready-for-review]
 
-2. **[Non-blocking] `PageRequest.symbol` / `BackfillRequest.symbol` are unvalidated `String`s** placed
-   directly into the URL without encoding. Upstream callers pass validated `InstrumentId`s, but the type
-   doesn't enforce it — consider taking `&InstrumentId` (as `source.rs`/`plan.rs` do) so the URL-safety
-   invariant is carried by the type rather than by convention. Not a blocker.
-
-### Post-review follow-up (coder) — BLOCKER fixed; status → [Ready-for-review]
-
-Agreed with the blocker and both notes — fixed.
-- **[BLOCKER] Rate-limit backoff now actually applied — DONE.** `retry_after_ms` is no longer dead.
-  Introduced a `Sleeper` **port** (`RealSleeper` = `thread::sleep` in production; a recording/no-op
-  fake in tests). `Backfiller::fetch_with_retry` now **waits before each retry**: the venue's
-  `Retry-After` (floored at `RetryPolicy.base_delay_ms`) for a `RateLimited`, else a linear
-  `base_delay_ms × attempt` for a `Transient` — so a 429 is never hammered (no 418 IP-ban risk).
-  `RetryPolicy` gained `base_delay_ms`; `Backfiller<S, Sl = RealSleeper>` with `new` (real) /
-  `with_sleeper` (injected). New assertions in `retries_rate_limit_then_succeeds_and_waits_retry_after`
-  prove `waits[0] == 2000` (Retry-After honoured) and the transient linear backoff; `fatal_error_is_
-  not_retried` now also asserts **zero** waits. The design note's "honours Retry-After" claim is now
-  true (and the doc updated to describe the `Sleeper` port).
-- **[non-blocking] `symbol` typed as `&InstrumentId` — DONE.** `PageRequest.symbol` and
-  `BackfillRequest.symbol` are now validated `InstrumentId`s (URL uses `.as_str()`), not raw `String`s.
-- Gates re-run green: fmt ok; clippy clean (default **and** `--features http`); `qe-ingest` 33 unit +
+Resolved both non-blocking advisories (strictly additive; no AC behaviour changed).
+- **#1 (shared `Gap` semantics trap before QE-104) — DONE.** `FillPlan.holes` is now a **distinct
+  `Hole` type** (not the reused `integrity::Gap`). `Hole.from_ms` is documented as the first
+  *unfilled* slot (inclusive) with `missing = (to-from)/interval`, vs `Gap.from_ms` = last present
+  sample — so the QE-104 fuser consuming `holes` can't confuse the two conventions. Exported as
+  `qe_ingest::Hole`.
+- **#2 (duplicates counts occurrences) — DONE (doc).** `SeriesIntegrity.duplicates` now documents
+  that it lists each duplicate *occurrence* (a thrice-seen timestamp appears twice).
+- Gates re-run green: fmt ok; clippy clean (default **and** `--features http`); `qe-ingest` 55 unit +
   2 integration; deny unaffected.
-
-{ANSWER} On the blocker's "defer to QE-201?" option — I chose to **implement the wait now** rather
-than defer, because the design already claimed "honours Retry-After" and shipping the live `http`
-client without it is a real ban risk. The `Sleeper` port keeps it testable and is exactly the seam
-QE-201's shared handler will adopt (it can swap in a smarter backoff/`Sleeper`), so this is forward-
-compatible, not throwaway.
