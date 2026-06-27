@@ -144,9 +144,24 @@ impl FusedCorpus {
 ///
 /// The fill decision is delegated to QE-103 [`plan_fill`], so the leakage-safety guarantee is
 /// shared with the integrity layer rather than re-derived here.
+///
+/// **Precondition:** in-window samples are expected to fall **on the grid phase** (`open_time ==
+/// start + k·interval`). A sample inside `[start, end)` but off-phase matches no slot and is
+/// **silently dropped** — callers must pre-align to the base resolution first (kline series already
+/// are, by construction, so [`fuse`] satisfies this). Violations are caught by a `debug_assert` in
+/// debug builds. Out-of-window samples are intentionally ignored (windowing).
 #[must_use]
 pub fn align_onto_grid(present: &[(i64, Decimal)], grid: &Grid, max_gap_ms: i64) -> Vec<Cell> {
     let present_map: BTreeMap<i64, Decimal> = present.iter().copied().collect();
+    debug_assert!(
+        grid.interval_ms <= 0
+            || present_map.keys().all(|&t| {
+                t < grid.start.millis()
+                    || t >= grid.end.millis()
+                    || (t - grid.start.millis()).rem_euclid(grid.interval_ms) == 0
+            }),
+        "align_onto_grid: an in-window present sample is not aligned to the grid phase"
+    );
     let timestamps: Vec<i64> = present_map.keys().copied().collect();
     let plan = plan_fill(
         &timestamps,
@@ -350,6 +365,17 @@ mod tests {
         assert_eq!(cells[3], Cell::Hole); // over-bound
         assert_eq!(cells[4], Cell::Hole); // over-bound
         assert_eq!(cells[5].value(), Some(dec(20))); // present
+    }
+
+    #[test]
+    fn out_of_window_sample_is_ignored_not_placed() {
+        // A sample before the window start is out-of-window: dropped, no panic, no slot filled.
+        let grid = Grid::from_window(window(2 * MIN, 4 * MIN), Resolution::M1);
+        let present = vec![(0, dec(7)), (2 * MIN, dec(9))]; // 0 is before start
+        let cells = align_onto_grid(&present, &grid, MIN);
+        assert_eq!(cells.len(), 2); // slots 2m, 3m
+        assert_eq!(cells[0].value(), Some(dec(9))); // present at 2m
+        assert_eq!(cells[1].value(), Some(dec(9))); // filled from 2m within bound
     }
 
     #[test]

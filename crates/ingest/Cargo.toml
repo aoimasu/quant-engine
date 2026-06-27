@@ -21,7 +21,7 @@ http = ["dep:ureq"]
 arrow = ["dep:arrow-array", "dep:arrow-schema", "dep:arrow-ipc"]
 
 [dependencies]
-# Raw-file caching only (no LMDB); fusion into qe-storage is QE-104.
+# Raw-file caching + offline fusion only (no LMDB); persistence into qe-storage is QE-105.
 qe-config.workspace = true
 qe-domain.workspace = true
 # Exact decimal for fused derived fields (VWAP, adjustments, spread) — never float money (QE-104).

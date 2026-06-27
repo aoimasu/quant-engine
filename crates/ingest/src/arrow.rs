@@ -34,6 +34,11 @@ pub fn corpus_schema() -> Schema {
 
 /// Build a fixed-schema [`RecordBatch`] from the fused corpus (holes → null `Float64`).
 ///
+/// Note: a value whose exact `Decimal` cannot be represented as `f64` (`to_f64` → `None`, e.g. an
+/// extreme magnitude) also maps to null, indistinguishable from a hole in the Arrow column. This is
+/// an interchange-only concern — the exact value is preserved in [`FusedCorpus`], the source of
+/// truth; for real perp/spot prices `to_f64` does not fail.
+///
 /// # Errors
 /// [`ArrowError`] if the column arrays cannot be assembled into a batch (shape mismatch).
 pub fn corpus_to_record_batch(corpus: &FusedCorpus) -> Result<RecordBatch, ArrowError> {
