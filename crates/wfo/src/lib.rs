@@ -12,8 +12,14 @@
 //! - [`operator`] (QE-112) — adaptive operator selection: the sliding-window credit bandit that
 //!   allocates search budget across the variation operators from in-training novelty/improvement only
 //!   (never OOS), shifting toward exploration on a sparse archive and exploitation on a dense one.
+//! - [`fitness`] (QE-113) — geometric (time-average log-growth) fitness on net-of-cost returns with
+//!   absorbing near-ruin, plus noise-robust multi-window evaluation and SE-aware elite replacement.
+//! - [`cv`] (QE-113) — purged + embargoed cross-validation: leakage-free train/test splits whose
+//!   information windows are provably disjoint including the indicator lookback.
 
 pub mod archive;
+pub mod cv;
+pub mod fitness;
 pub mod friction;
 pub mod genome;
 pub mod operator;
@@ -22,6 +28,8 @@ pub use archive::{
     cell_reassignment_rate, descriptor_for, family_of, grid_cells, Cell, HoldingBand,
     IndicatorFamily, TimescaleBand, CELLS_PER_DIRECTION, STABILITY_THRESHOLD, SUBPOP_SIZE,
 };
+pub use cv::{Fold, PurgedKFold};
+pub use fitness::{geom_return, log_growth, should_replace, NoiseRobustFitness, DEFAULT_K_SIGMA};
 pub use friction::{
     cost_sweep, simulate, Event, FeeSchedule, Fill, FrictionConfig, FundingStamp, Liquidity,
     PnlBreakdown, Position, SlippageModel,
