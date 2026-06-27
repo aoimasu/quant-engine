@@ -21,6 +21,8 @@
 //!   early lucky candidates do not.
 //! - [`walkforward`] (QE-117) — the anchored/rolling walk-forward window manager: purge+embargo-gapped
 //!   train→validate windows (leakage-free including lookback) that carry the archive across transitions.
+//! - [`mapelites`] (QE-118) — the QD MAP-Elites archive: per-direction Deep-Grid sub-populations over the
+//!   QE-111 niche grid, niche parent sampling, and embarrassingly-parallel deterministic evaluation.
 
 pub mod archive;
 pub mod cv;
@@ -28,6 +30,7 @@ pub mod fitness;
 pub mod friction;
 pub mod genome;
 pub mod lifecycle;
+pub mod mapelites;
 pub mod operator;
 pub mod walkforward;
 
@@ -48,6 +51,10 @@ pub use genome::{
 pub use lifecycle::{
     Phase, QualityGate, QualityThreshold, ThresholdPolicy, DEFAULT_MIN_EXPLOITATION_WINDOWS,
     DEFAULT_QUANTILE,
+};
+pub use mapelites::{
+    evaluate_and_insert, evaluate_batch, DirectionArchive, Elite, InsertOutcome, Insertion,
+    MapElitesArchive, SubPopulation,
 };
 pub use operator::{
     ApplicationOutcome, Operator, OperatorSelector, DEFAULT_EPSILON, DEFAULT_WINDOW,
