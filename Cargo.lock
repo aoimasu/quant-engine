@@ -1593,6 +1593,7 @@ dependencies = [
  "qe-domain",
  "qe-signal",
  "qe-storage",
+ "rust_decimal",
 ]
 
 [[package]]
