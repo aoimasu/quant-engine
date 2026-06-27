@@ -1590,9 +1590,11 @@ dependencies = [
 name = "qe-wfo"
 version = "0.1.0"
 dependencies = [
+ "qe-determinism",
  "qe-domain",
  "qe-signal",
  "qe-storage",
+ "rand_core 0.9.5",
  "rust_decimal",
  "serde",
  "serde_json",

@@ -32,6 +32,7 @@ approved block is archived to `docs/mds/reviewed/<ticket>.md` and removed from h
 - QE-108 — Feature vector assembly → synthetic store — PR #21 — Approved & merged.
 - QE-109 — Execution-friction & funding model — PR #22 — Approved & merged.
 - QE-110 — Strategy genome representation (SPIKE) — PR #24 — Approved & merged.
+- QE-111 — QD/MAP-Elites archive & behaviour descriptors (SPIKE) — PR #25 — Approved & merged.
 
 ---
 

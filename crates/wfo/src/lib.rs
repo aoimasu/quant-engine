@@ -9,10 +9,14 @@
 //! - [`archive`] (QE-111) — the QD/MAP-Elites behaviour descriptors: genotype-derived family /
 //!   timescale / holding axes, the per-direction grid resolution + Deep-Grid sub-population size, and
 //!   the descriptor-stability metric that keeps a genome's niche stable across walk-forward windows.
+//! - [`operator`] (QE-112) — adaptive operator selection: the sliding-window credit bandit that
+//!   allocates search budget across the variation operators from in-training novelty/improvement only
+//!   (never OOS), shifting toward exploration on a sparse archive and exploitation on a dense one.
 
 pub mod archive;
 pub mod friction;
 pub mod genome;
+pub mod operator;
 
 pub use archive::{
     cell_reassignment_rate, descriptor_for, family_of, grid_cells, Cell, HoldingBand,
@@ -25,6 +29,10 @@ pub use friction::{
 pub use genome::{
     Clause, Decision, ExitParams, Genome, PositionState, RiskParams, RuleSet, CLAUSES_PER_SET,
     MAX_SIZE_BPS, REP_VERSION,
+};
+pub use operator::{
+    ApplicationOutcome, Operator, OperatorSelector, DEFAULT_EPSILON, DEFAULT_WINDOW,
+    NOVELTY_REWARD, OPERATORS,
 };
 
 /// Returns this crate's package name. Placeholder until later tickets add real APIs.
