@@ -230,6 +230,24 @@ mod tests {
             "the correlation penalty must rank the decorrelated pair higher: \
              decorrelated={decorrelated} correlated={correlated}"
         );
+
+        // Isolate the correlation term itself: on the *same* highly-correlated pair, turning the
+        // correlation weight on strictly lowers the score vs turning it off — so the penalty (not the
+        // tail term) is what punishes correlation.
+        let with_corr = ObjectiveConfig {
+            corr_weight: 1.0,
+            ..ObjectiveConfig::with_defaults()
+        };
+        let without_corr = ObjectiveConfig {
+            corr_weight: 0.0,
+            ..ObjectiveConfig::with_defaults()
+        };
+        let corr_pair = [a.clone(), a.clone()];
+        assert!(
+            objective(&corr_pair, &[0, 1], &with_corr)
+                < objective(&corr_pair, &[0, 1], &without_corr),
+            "the correlation penalty (corr_weight) specifically lowers a correlated combo's score"
+        );
     }
 
     #[test]
@@ -306,6 +324,19 @@ mod tests {
         assert!(
             aware_robust > aware_fragile,
             "regime-aware scoring must penalise the fragile strategy: robust={aware_robust} fragile={aware_fragile}"
+        );
+
+        // Isolate the regime constraint's *added* value over QE-126: turning the regime weight on
+        // strictly lowers the fragile strategy's score vs off — the regime shortfall, not the base
+        // fold-CV tail term, is what this ticket contributes.
+        let no_regime = RegimeAwareConfig {
+            regime_weight: 0.0,
+            ..c
+        };
+        assert!(
+            regime_aware_cv_score(&pool, &[1], &labels, &c)
+                < regime_aware_cv_score(&pool, &[1], &labels, &no_regime),
+            "the regime penalty (regime_weight) specifically lowers the fragile strategy's score"
         );
 
         // And the regime-aware search excludes the fragile strategy.
