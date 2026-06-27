@@ -53,6 +53,10 @@ fn kernel(
     q: Quantiser,
     value: fn(&Bars) -> Option<Decimal>,
 ) -> Box<dyn Indicator> {
+    // Every bar-based value fn needs at least a 2-bar window (ATR/std/signed-volume divide by
+    // `cap - 1`; deltas need a predecessor). The catalogue only constructs valid sizes; this guards
+    // a future mis-registration in debug builds.
+    debug_assert!(lookback >= 2, "{id}: bar indicator lookback must be >= 2");
     Box::new(BarsKernel {
         id: id.to_owned(),
         q,

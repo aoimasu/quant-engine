@@ -59,8 +59,18 @@ impl Sample {
 pub struct IndicatorSpec {
     /// Stable identifier, e.g. `"rsi_14"`.
     pub id: String,
-    /// Max lookback in samples — the exact number of most-recent samples the latest output depends
+    /// Max lookback — the exact number of most-recent **observed inputs** the latest output depends
     /// on (feeds purge/embargo).
+    ///
+    /// **Units caveat (leakage-relevant).** For price/volume indicators this is in *bars*, so the
+    /// time-axis dependency is exactly `lookback × bar_interval`. For the **flow factors** it counts
+    /// the last `lookback` *present* scalars (funding/OI/premium), because a step whose scalar is
+    /// absent is skipped (see [`flow`]). If those scalars arrive **sparser than the bar grid** (e.g.
+    /// funding posts every 8h against 5m bars), the true *time-axis* dependency spans many more bars
+    /// than `lookback`. The downstream contract is therefore: **QE-108 must feed dense, bar-aligned
+    /// scalars** (forward-filled to the grid) so flow `lookback` is in bar units like the rest, **or**
+    /// **QE-128 must size the embargo for the coarsest flow-factor cadence**. With dense input
+    /// (as the AC tests use) `lookback` is exact for every indicator.
     pub lookback: usize,
     /// Number of discrete states the quantised output takes.
     pub num_states: u16,

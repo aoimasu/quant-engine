@@ -35,7 +35,7 @@ approved block is archived to `docs/mds/reviewed/<ticket>.md` and removed from h
 
 - **Branch:** `qe-107/indicator-catalogue`
 - **PR:** https://github.com/aoimasu/quant-engine/pull/20
-- **Latest commit:** `5de015d`
+- **Latest commit:** _(post-approval advisory follow-up — see below)_
 - **Evidence/design:** `docs/architecture/qe-107-indicator-catalogue-design.md`
 - **Changed surface:** `crates/signal` — **new** `src/indicator/{mod,quant,roll,price,flow}.rs`,
   `lib.rs` wiring, `Cargo.toml` (rust_decimal +`maths` feature, +`thiserror`), `Cargo.lock`. No new
@@ -85,3 +85,81 @@ Key AC-proving tests (generic over the whole 22-indicator catalogue):
 - **Storage-free hot-path crate.** `qe-signal` stays `qe-domain`-only; `rust_decimal`'s pure `maths`
   feature adds `Decimal::sqrt` (std-dev/Bollinger) with no new crates, so `cargo deny` is unaffected.
 - **Out of scope:** feature assembly/normalisation (QE-108); genome (QE-110).
+
+### Review notes
+
+**Verdict: [Approved].** Reviewed strictly as architect + senior engineer against the full diff vs `main`
+(head `5de015d`) — read all five `indicator/*` modules and **hand-verified every indicator's lookback vs
+data dependency**, which is the leakage-critical claim. Both ACs are met; the FIR discipline is exactly
+right for purge/embargo.
+
+**AC #1 — batch == streaming (PASS, structural).** The private `Kernel` blanket-impls `Indicator` with a
+single `update` path (`observe → warm-check → raw → quantise`), and `compute_batch` *is* the streaming
+`update` map. So batch and streaming cannot diverge; `ac1_batch_equals_streaming_for_every_indicator`
+runs the whole catalogue and (via the reset-then-stream) also validates `reset()`.
+
+**AC #2 — lookback == data dependency (PASS, hand-verified).** Structural FIR: every kernel holds its
+fields in `Roll(cap)` ring buffers, `lookback() == cap`, `warm() == is_full`, and every value fn reads
+**only** those cap-bounded windows — so the latest output depends on exactly the last `cap` samples.
+I checked all 22 declarations against the maths: `rsi_14→15`, `atr_pct_14→15`, `std_returns_20→21`,
+`mfi_14→15`, `signed_volume_ratio_14→15` correctly add the +1 for the consecutive-close delta;
+`macd_hist_12_26_9→34` reads exactly `c[0..33]` across its 9 windowed-EMA MACD values (slow 26 + signal
+9 − 1). The id keeps the conventional name while `spec.lookback` reports the *true* dependency — correct
+for purge/embargo. The two generic tests prove both directions (warm-at-exactly-lookback ⇒ ≥; perturbing
+the sample at `len-1-lookback` leaves the latest state byte-identical ⇒ ≤), and the perturbation test
+would catch any off-by-one over-read.
+
+**FIR variant choice — endorsed.** Cutler RSI (Σgain/Σloss), simple-mean ATR, and window-seeded EMA are
+deliberately finite-window so lookback is *exact*. This is the correct call: textbook Wilder/IIR
+smoothing has unbounded memory, so its true lookback is infinite and purge/embargo (QE-128) cannot bound
+leakage. Trading the textbook formula for an exact-lookback FIR variant is precisely the leakage-safety
+discipline this engine needs (and these feed a quantised genome, not a chart).
+
+**Quantisation (PASS).** `Quantiser::{Linear,Bands}` are pure point-wise maps of (value, fixed params) —
+no rolling quantile / dataset fit, so no future-data peek and identical batch vs streaming. Bin/clamp
+edges and the `Bands` "edges strictly below" rule are correct (RSI 100 → top bucket). `num_states`
+configurable via `CatalogueConfig` (≥2). 22 unique indicators.
+
+**Topology/deps (PASS).** `qe-signal` stays `qe-domain`-only; `rust_decimal` only gains the **pure**
+`maths` feature (`Decimal::sqrt`) — no new crate, so `cargo deny` and the QE-001 guard are unaffected.
+
+**Verification caveat (transparency).** The Rust toolchain is absent from this review environment, so I
+did not execute the gates. The verdict rests on full static review + hand-computation of the indicator
+maths and lookback arithmetic, and manifest-level dep confirmation. I did not rely on the PR's "all
+green" claim; treat the gate results as developer-reported. Nothing in the review contradicts them.
+
+**Advisories (non-blocking — do not gate merge):**
+1. **Flow-factor lookback is in units of *present scalars*, not bars — a leakage-relevant nuance for
+   QE-108/QE-128.** `ScalarKernel::observe` skips absent-scalar steps, so `spec.lookback` (e.g.
+   `funding_avg_8` = 8) counts the last 8 **present** funding samples. Under dense scalar input — as the
+   AC #2 tests use (`series(120)` has all scalars present) — present-scalar-lookback == bar-lookback and
+   the AC holds exactly. But under **sparse** input (real Binance funding posts every 8h while base bars
+   are 5m), 8 present samples span ~768 bars in time, so the latest output's dependency on the **time
+   axis** far exceeds `spec.lookback` bars. Since purge/embargo operates on time, sizing the embargo from
+   `spec.lookback` would *under-purge* flow factors under sparse input → potential train/test leakage.
+   Not a QE-107 defect (Sample population is QE-108's job; the catalogue's "last N present scalars"
+   contract is internally correct and documented, and the tests legitimately pass), but flag it so
+   **QE-108 feeds dense/aligned scalars** (so sample-lookback == bar-lookback) **or QE-128 sizes the
+   embargo for the coarsest flow-factor cadence**. This is exactly the subtle leakage vector the FIR
+   discipline exists to prevent, surfacing where "lookback in samples" ≠ "lookback in time".
+2. **(Trivial) Some value fns have implicit minimum-cap requirements not enforced at construction** —
+   e.g. `atr_pct` divides by `cap-1` (would panic at cap 1), `std_returns`/`signed_volume_ratio` assume
+   cap ≥ 2. The catalogue wires correct caps so it's unreachable, but a `debug_assert!(cap >= 2)` (or a
+   documented min) would harden a future kernel addition. Non-blocking.
+
+### Post-approval follow-up (coder) — advisories addressed; status → [Ready-for-review]
+
+Both non-blocking advisories addressed (additive: docs + two `debug_assert`s; no behaviour/AC change).
+- **#1 (flow-factor `lookback` counts present scalars, not bars — leakage nuance) — DONE (doc).**
+  Documented prominently on `IndicatorSpec::lookback` and the `flow` module header: for flow factors
+  `lookback` is in *present scalars*; under sparse scalar cadence the time-axis dependency exceeds it.
+  Recorded the **downstream contract**: QE-108 feeds dense, bar-aligned (forward-filled) scalars so
+  flow `lookback` is in bar units, **or** QE-128 sizes the embargo for the coarsest flow cadence.
+  With dense input (as the AC tests use) `lookback` is exact for every indicator. Not a QE-107 defect
+  — captured so QE-108/QE-128 cannot miss it.
+- **#2 (implicit min-cap requirements unenforced) — DONE.** Added `debug_assert!(lookback >= 2)` in
+  the bar-indicator builder (`kernel`) and `debug_assert!(lookback >= 1)` in the flow builder
+  (`scalar`), guarding a future mis-registration in debug builds. The catalogue's registered sizes
+  already satisfy these.
+- Gates re-run green: fmt ok; clippy clean; `qe-signal` 24 tests; workspace unaffected; deny
+  unchanged.

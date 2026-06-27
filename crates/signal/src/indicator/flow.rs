@@ -1,6 +1,13 @@
 //! Funding / open-interest / premium flow factors (QE-107). Same finite-window contract as the
 //! price indicators, but reading the aligned scalar context instead of the bar; a step whose scalar
 //! is absent is skipped, so the window holds the last `lookback` *present* scalars.
+//!
+//! **Leakage caveat (see [`crate::indicator::IndicatorSpec::lookback`]).** Because absent steps are
+//! skipped, `lookback` here counts *present scalars*, not bars. If the venue posts these scalars
+//! sparser than the bar grid (funding ~every 8h vs 5m bars), the true time-axis dependency spans
+//! more bars than `lookback`. Downstream contract: QE-108 feeds dense, bar-aligned (forward-filled)
+//! scalars so flow `lookback` is in bar units, or QE-128 sizes the embargo for the coarsest flow
+//! cadence. The AC tests use dense input, so `lookback` is exact there.
 
 use rust_decimal::Decimal;
 
@@ -51,6 +58,9 @@ fn scalar(
     select: fn(&Sample) -> Option<Decimal>,
     value: fn(&Roll) -> Option<Decimal>,
 ) -> Box<dyn Indicator> {
+    // `oi_roc` divides by the oldest value, so it needs a 2-deep window; `latest`/`mean` are valid
+    // at 1. Guard against a future mis-registration in debug builds.
+    debug_assert!(lookback >= 1, "{id}: flow indicator lookback must be >= 1");
     Box::new(ScalarKernel {
         id: id.to_owned(),
         q,
