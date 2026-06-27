@@ -33,6 +33,8 @@
 //!   selector that counters degenerate crowding, plus the coverage / occupancy-entropy diversity metrics.
 //! - [`strategy_repo`] (QE-123) — phased recording: persists only exploitation-phase survivors above the
 //!   quality threshold (QE-114) into a lineage-tagged, JSONL-serialisable strategy repository.
+//! - [`robustness`] (QE-124) — elite robustness gates: re-evaluates an elite and a ±ε jitter cloud to
+//!   flag overfit (fitness-collapse), under-traded, or descriptor-unstable elites before they are trusted.
 
 pub mod archive;
 pub mod backtest;
@@ -44,6 +46,7 @@ pub mod lifecycle;
 pub mod mapelites;
 pub mod operator;
 pub mod regularise;
+pub mod robustness;
 pub mod strategy_repo;
 pub mod thompson;
 pub mod variation;
@@ -81,6 +84,11 @@ pub use operator::{
 pub use regularise::{
     coverage, local_crowding, neighbours, occupancy_entropy, BehaviouralRegulariser,
     DEFAULT_NOVELTY_PRESSURE,
+};
+pub use robustness::{
+    assess_robustness, jitter, RejectReason, RobustnessConfig, RobustnessReport,
+    DEFAULT_EPS_HOLDING, DEFAULT_EPS_SIZE_BPS, DEFAULT_EPS_STATE, DEFAULT_MAX_COLLAPSE_FRACTION,
+    DEFAULT_MAX_DESCRIPTOR_REASSIGNMENT, DEFAULT_RETAIN_FRACTION, DEFAULT_ROBUSTNESS_SAMPLES,
 };
 pub use strategy_repo::{StrategyRecord, StrategyRepository};
 pub use thompson::{
