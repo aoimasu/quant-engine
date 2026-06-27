@@ -14,3 +14,5 @@ workspace = true
 qe-domain.workspace = true
 qe-signal.workspace = true
 qe-storage.workspace = true
+# Exact decimal for cost / funding / P&L arithmetic — never float money (QE-109).
+rust_decimal.workspace = true
