@@ -57,6 +57,7 @@ qe-ensemble = { path = "crates/ensemble" }
 qe-venue = { path = "crates/venue" }
 qe-runtime = { path = "crates/runtime" }
 qe-vintage = { path = "crates/vintage" }
+qe-validation = { path = "crates/validation" }
 
 [workspace.lints.rust]
 unsafe_code = "deny"
