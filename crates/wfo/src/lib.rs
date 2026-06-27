@@ -19,6 +19,8 @@
 //! - [`lifecycle`] (QE-114) — the phased-lifecycle quality gate: exploration→exploitation graduation by
 //!   evaluation depth plus a robust validation-distribution threshold, so only survivors persist and
 //!   early lucky candidates do not.
+//! - [`walkforward`] (QE-117) — the anchored/rolling walk-forward window manager: purge+embargo-gapped
+//!   train→validate windows (leakage-free including lookback) that carry the archive across transitions.
 
 pub mod archive;
 pub mod cv;
@@ -27,6 +29,7 @@ pub mod friction;
 pub mod genome;
 pub mod lifecycle;
 pub mod operator;
+pub mod walkforward;
 
 pub use archive::{
     cell_reassignment_rate, descriptor_for, family_of, grid_cells, Cell, HoldingBand,
@@ -50,6 +53,7 @@ pub use operator::{
     ApplicationOutcome, Operator, OperatorSelector, DEFAULT_EPSILON, DEFAULT_WINDOW,
     NOVELTY_REWARD, OPERATORS,
 };
+pub use walkforward::{WalkForward, Window, WindowMode};
 
 /// Returns this crate's package name. Placeholder until later tickets add real APIs.
 #[must_use]
