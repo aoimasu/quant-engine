@@ -299,3 +299,36 @@ fn reads_are_concurrent() {
         assert_eq!(h.join().unwrap(), 50);
     }
 }
+
+// ---- QE-105 vintage lineage ledger ----------------------------------------------------------
+
+#[test]
+fn lineage_ledger_records_idempotently_and_lists() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = open(dir.path());
+
+    // Unknown until recorded.
+    assert!(!store.has_lineage("vintage-a").unwrap());
+
+    // First record is new (true); a repeat is a no-op (false) — idempotency keyed by lineage.
+    assert!(store.record_lineage("vintage-a").unwrap());
+    assert!(!store.record_lineage("vintage-a").unwrap());
+    assert!(store.has_lineage("vintage-a").unwrap());
+
+    // A second distinct vintage is independent.
+    assert!(store.record_lineage("vintage-b").unwrap());
+
+    let mut ids = store.lineages().unwrap();
+    ids.sort();
+    assert_eq!(ids, vec!["vintage-a".to_owned(), "vintage-b".to_owned()]);
+}
+
+#[test]
+fn lineage_ledger_is_independent_of_schema_version_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = open(dir.path());
+    // Recording lineage must not disturb the schema-version record (shared `meta` db).
+    store.record_lineage("v1").unwrap();
+    assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
+    assert_eq!(store.lineages().unwrap(), vec!["v1".to_owned()]);
+}
