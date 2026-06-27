@@ -17,7 +17,8 @@ qe-storage.workspace = true
 # RngCore bound for the discrete-DE binomial crossover (QE-115). NOTE: deliberately no `qe-wfo`
 # dependency — the search ⟂ portfolio firewall (QE-001/QE-132) keeps ensemble independent of WFO.
 rand_core.workspace = true
+# Seeded DetRng driving the discrete-DE search loop (QE-126; QE-006 determinism). Also the QE-115
+# discrete-DE crossover determinism tests.
+qe-determinism.workspace = true
 
 [dev-dependencies]
-# Seeded DetRng for the QE-115 discrete-DE crossover determinism tests.
-qe-determinism.workspace = true
