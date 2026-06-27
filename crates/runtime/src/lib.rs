@@ -4,9 +4,13 @@
 //! risk/kill-switch contract: the runtime's order port is, by its type, an order gate that holds an
 //! out-of-band kill handle. QE-205 adds the live kline source ([`live_kline`]): REST-prime + wss-stitch
 //! feeding the shared QE-106 reconstructor, so live coarser bars match batch reconstruction exactly.
+//! QE-206 adds the live factor join ([`factor_join`]): an as-of join of live scalar context onto base bars
+//! driving the shared QE-107/108 catalogue, so live factor rows match offline feature vectors exactly.
 
+pub mod factor_join;
 pub mod live_kline;
 
+pub use factor_join::LiveFactorJoin;
 pub use live_kline::LiveKlineSource;
 pub use qe_risk::{KillHandle, KillSwitch};
 
