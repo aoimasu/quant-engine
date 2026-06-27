@@ -15,11 +15,17 @@ default = []
 # The concrete HTTP fetcher (ureq + native-tls). Default-off so the core crate — and CI's default
 # build/test — stays offline and dependency-light; the binary enables it for live downloads.
 http = ["dep:ureq"]
+# Arrow record-batch + IPC serialisation of the fused corpus (QE-104). Default-off so the pure
+# fusion core — and CI's default build/test/deny — stays dependency-light; the binary enables it
+# to emit the Arrow artefact. The fusion logic itself is always built and tested.
+arrow = ["dep:arrow-array", "dep:arrow-schema", "dep:arrow-ipc"]
 
 [dependencies]
-# Raw-file caching only (no LMDB); fusion into qe-storage is QE-104.
+# Raw-file caching + offline fusion only (no LMDB); persistence into qe-storage is QE-105.
 qe-config.workspace = true
 qe-domain.workspace = true
+# Exact decimal for fused derived fields (VWAP, adjustments, spread) — never float money (QE-104).
+rust_decimal.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -29,6 +35,12 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 # Optional blocking HTTP client for the real fetcher. native-tls (system TLS) avoids ring's
 # non-allowlisted OpenSSL licence; only compiled under the `http` feature.
 ureq = { version = "2", default-features = false, features = ["native-tls"], optional = true }
+# Optional Arrow serialisation (QE-104). Minimal sub-crates only (array + schema + IPC), no
+# default features, so the dependency tree stays small and licence-clean (all Apache-2.0). Only
+# compiled under the `arrow` feature.
+arrow-array = { version = "53", default-features = false, optional = true }
+arrow-schema = { version = "53", default-features = false, optional = true }
+arrow-ipc = { version = "53", default-features = false, optional = true }
 
 [dev-dependencies]
 tempfile.workspace = true
