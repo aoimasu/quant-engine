@@ -1564,11 +1564,13 @@ dependencies = [
 name = "qe-runtime"
 version = "0.1.0"
 dependencies = [
+ "qe-determinism",
  "qe-domain",
  "qe-risk",
  "qe-signal",
  "qe-storage",
  "qe-venue",
+ "qe-vintage",
  "rust_decimal",
 ]
 
@@ -1578,6 +1580,8 @@ version = "0.1.0"
 dependencies = [
  "qe-domain",
  "rust_decimal",
+ "serde",
+ "serde_json",
  "thiserror",
 ]
 
@@ -1629,7 +1633,7 @@ version = "0.1.0"
 dependencies = [
  "qe-determinism",
  "qe-risk",
- "qe-wfo",
+ "qe-signal",
  "rust_decimal",
  "serde",
  "serde_json",

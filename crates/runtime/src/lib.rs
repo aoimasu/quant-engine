@@ -6,10 +6,14 @@
 //! feeding the shared QE-106 reconstructor, so live coarser bars match batch reconstruction exactly.
 //! QE-206 adds the live factor join ([`factor_join`]): an as-of join of live scalar context onto base bars
 //! driving the shared QE-107/108 catalogue, so live factor rows match offline feature vectors exactly.
+//! QE-207 adds the evaluator session ([`evaluator`]): one stateful object that runs a sealed vintage's
+//! chromosomes through replay then live with no state copy, so decisions are continuous across the boundary.
 
+pub mod evaluator;
 pub mod factor_join;
 pub mod live_kline;
 
+pub use evaluator::{ChromosomeDecision, EvalOutput, EvaluatorSession, SessionMode};
 pub use factor_join::LiveFactorJoin;
 pub use live_kline::LiveKlineSource;
 pub use qe_risk::{KillHandle, KillSwitch};
