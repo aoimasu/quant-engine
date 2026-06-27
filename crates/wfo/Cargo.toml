@@ -18,7 +18,11 @@ qe-storage.workspace = true
 rust_decimal.workspace = true
 # Genome serialisation (QE-110): the canonical vintage-lineage form is JSON.
 serde.workspace = true
+# RngCore bound for deterministic adaptive operator selection (QE-112).
+rand_core.workspace = true
 
 [dev-dependencies]
 # Genome JSON round-trip in the QE-110 fixture test.
 serde_json.workspace = true
+# Seeded DetRng for the QE-112 operator-selection simulation tests.
+qe-determinism.workspace = true
