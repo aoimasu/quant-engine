@@ -31,6 +31,8 @@
 //!   is the in-training novelty/improvement only (no OOS leakage).
 //! - [`regularise`] (QE-122) — behavioural regularisation: a novelty-pressure / niche-penalty parent-cell
 //!   selector that counters degenerate crowding, plus the coverage / occupancy-entropy diversity metrics.
+//! - [`strategy_repo`] (QE-123) — phased recording: persists only exploitation-phase survivors above the
+//!   quality threshold (QE-114) into a lineage-tagged, JSONL-serialisable strategy repository.
 
 pub mod archive;
 pub mod backtest;
@@ -42,6 +44,7 @@ pub mod lifecycle;
 pub mod mapelites;
 pub mod operator;
 pub mod regularise;
+pub mod strategy_repo;
 pub mod thompson;
 pub mod variation;
 pub mod walkforward;
@@ -79,6 +82,7 @@ pub use regularise::{
     coverage, local_crowding, neighbours, occupancy_entropy, BehaviouralRegulariser,
     DEFAULT_NOVELTY_PRESSURE,
 };
+pub use strategy_repo::{StrategyRecord, StrategyRepository};
 pub use thompson::{
     NichePrior, ThompsonParentSelector, DEFAULT_OBS_VAR, DEFAULT_PRIOR_MEAN, DEFAULT_PRIOR_VAR,
 };
