@@ -28,138 +28,132 @@ approved block is archived to `docs/mds/reviewed/<ticket>.md` and removed from h
 - QE-104 — Fusion, normalisation & Arrow serialisation — PR #17 — Approved & merged.
 - QE-105 — Persist fused market data to LMDB — PR #18 — Approved & merged.
 - QE-106 — Multi-resolution bar reconstruction (batch) — PR #19 — Approved & merged.
+- QE-107 — Indicator catalogue (quantised, deterministic, parity-ready) — PR #20 — Approved & merged.
 
 ---
 
-## QE-107 — Indicator catalogue (quantised, deterministic, parity-ready) — PR #20 — [Ready-for-review]
+## QE-108 — Feature vector assembly → synthetic store — PR #21 — [Ready-for-review]
 
-- **Branch:** `qe-107/indicator-catalogue`
-- **PR:** https://github.com/aoimasu/quant-engine/pull/20
+- **Branch:** `qe-108/feature-vector-assembly`
+- **PR:** https://github.com/aoimasu/quant-engine/pull/21
 - **Latest commit:** _(post-approval advisory follow-up — see below)_
-- **Evidence/design:** `docs/architecture/qe-107-indicator-catalogue-design.md`
-- **Changed surface:** `crates/signal` — **new** `src/indicator/{mod,quant,roll,price,flow}.rs`,
-  `lib.rs` wiring, `Cargo.toml` (rust_decimal +`maths` feature, +`thiserror`), `Cargo.lock`. No new
-  third-party crates (only the pure `maths` feature). Also bundles the QE-106 archive
-  (`docs/mds/reviewed/qe-106.md`) + `docs/mds/work.md` bookkeeping — branch protection blocks direct
-  `main` pushes.
+- **Evidence/design:** `docs/architecture/qe-108-feature-vector-assembly-design.md`
+- **Changed surface:** `crates/signal` (**new** `src/feature.rs`, `lib.rs` wiring, `QState::from_index`
+  in `indicator/quant.rs`), `crates/ingest` (**new** `src/features.rs` + `tests/features.rs`, `lib.rs`
+  wiring). No new third-party deps. Also bundles the QE-107 archive (`docs/mds/reviewed/qe-107.md`) +
+  `docs/mds/work.md` bookkeeping — branch protection blocks direct `main` pushes.
 
 ### Acceptance criteria (copied from backlog)
-- [x] Each indicator's batch output equals its streaming output bar-for-bar.
-- [x] Declared lookback matches actual data dependency (verified).
+- [x] Feature vectors are reproducible and parity-safe (batch == streaming).
 
 ### Verification (run locally — all green)
 - `cargo fmt --all --check` — ok
 - `cargo clippy --workspace --all-targets --locked -- -D warnings` — clean (also
   `cargo clippy -p qe-ingest --features arrow` — clean)
-- `cargo test --workspace --locked` — **255 passed, 1 ignored** (qe-signal 24, incl. the generic AC
-  tests over the whole catalogue)
+- `cargo test --workspace --locked` — **263 passed, 1 ignored** (qe-signal feature 5, ingest
+  features integration 3)
 - `cargo test -p qe-cli --test dependency_topology` — passes (`qe-signal` stays `qe-domain`-only)
-- `cargo deny check` — advisories/bans/licenses/sources ok (no new crates; only the pure `maths`
-  feature on the existing `rust_decimal`)
+- `cargo deny check` — advisories/bans/licenses/sources ok (no new third-party deps)
 
-Key AC-proving tests (generic over the whole 22-indicator catalogue):
-- **AC #1 (batch == streaming)** — `ac1_batch_equals_streaming_for_every_indicator`: for every
-  indicator, `compute_batch` over a slice equals feeding the same samples one-at-a-time. Structural:
-  there is one `update` path; batch is literally the streaming loop.
-- **AC #2 (lookback == data dependency)** — proven from both sides:
-  - `ac2_warmup_emits_none_until_exactly_lookback_then_some` — each indicator emits `None` until it
-    has seen exactly `lookback` samples, then `Some` (consumes ≥ lookback).
-  - `ac2_latest_output_independent_of_out_of_window_samples` — perturbing a sample at index
-    `len-1-lookback` (just outside the latest window) leaves the latest state byte-identical (depends
-    on ≤ lookback). Together ⇒ dependency == lookback.
-- **Supporting:** `catalogue_has_at_least_twenty_indicators_with_unique_ids` (22, unique),
-  `every_indicator_respects_configured_state_count`, hand-computed SMA/RSI/Stoch/ROC, quantiser bin
-  edges, `Roll` stats, flow-factor scalar-skip + presence.
+Key AC-proving tests:
+- **AC (reproducible + batch == streaming)** — `feature::tests::ac_batch_equals_streaming`:
+  `assemble_batch` equals the streaming `FeatureAssembler::push` loop **and** is byte-identical across
+  two runs. Structural: one `push` path drives the whole catalogue; `assemble_batch` is that loop.
+- **Cache bridge** (`crates/ingest/tests/features.rs`):
+  `assemble_cache_and_read_back_complete_vectors` (cache count == #complete vectors; last vector
+  round-trips byte-for-byte via `get_indicator_state`), `cached_feature_is_stale_under_a_different_lineage`,
+  `caching_is_reproducible_across_runs`.
+- **Supporting:** schema↔catalogue match, byte codec round-trip (incl. `None` slots + width mismatch),
+  `vectors_become_complete_after_max_lookback`.
 
 ### Design notes for the reviewer
-- **AC #1 is structural.** One `Indicator::update`; `compute_batch` = the streaming loop. Batch and
-  streaming cannot diverge — same as the QE-106 reconstruction pattern.
-- **AC #2 by FIR construction.** Every indicator's latest output reads **exactly the last `lookback`
-  samples** via a ring buffer (`Roll`) — nothing older. So declared lookback == data dependency,
-  which is the leakage-relevant property purge/embargo (QE-128/WFO) needs. The catalogue ships
-  finite-window variants (Cutler RSI, simple-mean ATR, windowed EMA) **on purpose** so this holds
-  strictly; IIR smoothing could be added later behind a declared embargo-aware lookback.
-- **Quantisation is point-wise.** `Quantiser::{Linear,Bands}` map a value → state with no rolling
-  quantile / dataset-wide fit, so the discrete state never peeks at future data and is identical
-  batch vs streaming. `num_states` is configurable via `CatalogueConfig`.
-- **Storage-free hot-path crate.** `qe-signal` stays `qe-domain`-only; `rust_decimal`'s pure `maths`
-  feature adds `Decimal::sqrt` (std-dev/Bollinger) with no new crates, so `cargo deny` is unaffected.
-- **Out of scope:** feature assembly/normalisation (QE-108); genome (QE-110).
+- **Structural parity.** `FeatureAssembler::push` collects every catalogue indicator's `update` state
+  (in schema order) + the bar time; `assemble_batch` is the push loop — batch == streaming inherited
+  from QE-107.
+- **Self-describing vectors.** `FeatureSchema` (ordered ids + lookbacks + `CATALOGUE_VERSION`) is the
+  decode contract; `FeatureVector` has a compact deterministic byte codec (`i64` time + `u16` states,
+  `0xFFFF` = `None`) — no serde, so `qe-signal` stays lean.
+- **Closes the QE-107 flow caveat.** The assembler builds one `Sample` per bar with the scalar context
+  carried alongside, so flow-factor lookback is in bar units (callers forward-fill sparse scalars onto
+  the grid before assembly).
+- **Caching.** Only **complete** vectors (every indicator warm) are cached — the rows WFO/DE consume —
+  as one blob per bar under reserved `indicator_id "feature_vector"` (cannot collide; key also carries
+  `max_lookback`), lineage-tagged for staleness. Topology: `qe-signal` stays `qe-domain`-only.
+- **Out of scope:** strategy evaluation (QE-120).
 
 ### Review notes
 
 **Verdict: [Approved].** Reviewed strictly as architect + senior engineer against the full diff vs `main`
-(head `5de015d`) — read all five `indicator/*` modules and **hand-verified every indicator's lookback vs
-data dependency**, which is the leakage-critical claim. Both ACs are met; the FIR discipline is exactly
-right for purge/embargo.
+(head `dd2c314`) — read `feature.rs`, the `features.rs` bridge, both test files, and the `quant.rs`/lib
+wiring. The AC is met and the code is correct; the advisories below are forward-looking robustness, not
+defects.
 
-**AC #1 — batch == streaming (PASS, structural).** The private `Kernel` blanket-impls `Indicator` with a
-single `update` path (`observe → warm-check → raw → quantise`), and `compute_batch` *is* the streaming
-`update` map. So batch and streaming cannot diverge; `ac1_batch_equals_streaming_for_every_indicator`
-runs the whole catalogue and (via the reset-then-stream) also validates `reset()`.
+**AC — reproducible + batch == streaming (PASS, structural).** `FeatureAssembler::push` maps each
+catalogue indicator's one `update(sample)` into the states vec (schema order), and `assemble_batch` *is*
+the push loop, so batch == streaming is inherited from QE-107. `ac_batch_equals_streaming` checks batch ==
+a fresh streaming run **and** == a second `assemble_batch` (reproducible, since `catalogue()` builds a
+deterministic Vec). `vectors_become_complete_after_max_lookback` confirms completeness timing.
 
-**AC #2 — lookback == data dependency (PASS, hand-verified).** Structural FIR: every kernel holds its
-fields in `Roll(cap)` ring buffers, `lookback() == cap`, `warm() == is_full`, and every value fn reads
-**only** those cap-bounded windows — so the latest output depends on exactly the last `cap` samples.
-I checked all 22 declarations against the maths: `rsi_14→15`, `atr_pct_14→15`, `std_returns_20→21`,
-`mfi_14→15`, `signed_volume_ratio_14→15` correctly add the +1 for the consecutive-close delta;
-`macd_hist_12_26_9→34` reads exactly `c[0..33]` across its 9 windowed-EMA MACD values (slow 26 + signal
-9 − 1). The id keeps the conventional name while `spec.lookback` reports the *true* dependency — correct
-for purge/embargo. The two generic tests prove both directions (warm-at-exactly-lookback ⇒ ≥; perturbing
-the sample at `len-1-lookback` leaves the latest state byte-identical ⇒ ≤), and the perturbation test
-would catch any off-by-one over-read.
+**Byte codec (PASS).** `to_bytes` = `i64` time (BE) + one `u16` (BE) per slot, `0xFFFF` = `None`;
+`from_bytes(bytes, width)` validates `len == 8 + width·2` and round-trips (incl. `None` slots + width
+mismatch). **On the `NONE_SENTINEL` question I'm comfortable — no guard needed:** `num_states` is a `u16`
+(≤ 65535), so the maximum real quantiser index is `states-1 ≤ 65534`, which can never equal `0xFFFF`
+(that would require `states = 65536`, impossible for the type). The sentinel is safe **by construction**.
 
-**FIR variant choice — endorsed.** Cutler RSI (Σgain/Σloss), simple-mean ATR, and window-seeded EMA are
-deliberately finite-window so lookback is *exact*. This is the correct call: textbook Wilder/IIR
-smoothing has unbounded memory, so its true lookback is infinite and purge/embargo (QE-128) cannot bound
-leakage. Trading the textbook formula for an exact-lookback FIR variant is precisely the leakage-safety
-discipline this engine needs (and these feed a quantised genome, not a chart).
+**Cache bridge + flow-caveat closure (PASS).** Only **complete** vectors are cached (the rows WFO/DE
+consume), one opaque blob per bar under the reserved `FEATURE_VECTOR_ID = "feature_vector"` — which no
+catalogue indicator uses, and QE-011's length-prefixed `IndicatorKey` makes collision impossible — keyed
+also by `max_lookback`, lineage-tagged via `put_indicator_state`; `read_cached_feature` rebuilds the key
+and decodes with `schema.len()` width. Round-trip, lineage-staleness, and reproducibility are proven by
+the three integration tests. The QE-107 flow caveat is addressed at the right seam: the assembler builds
+one `Sample` per bar with scalar context carried alongside (so flow lookback is in bar units), and
+combined with QE-104's within-bound forward-fill the normal pipeline feeds dense scalars.
 
-**Quantisation (PASS).** `Quantiser::{Linear,Bands}` are pure point-wise maps of (value, fixed params) —
-no rolling quantile / dataset fit, so no future-data peek and identical batch vs streaming. Bin/clamp
-edges and the `Bands` "edges strictly below" rule are correct (RSI 100 → top bucket). `num_states`
-configurable via `CatalogueConfig` (≥2). 22 unique indicators.
-
-**Topology/deps (PASS).** `qe-signal` stays `qe-domain`-only; `rust_decimal` only gains the **pure**
-`maths` feature (`Decimal::sqrt`) — no new crate, so `cargo deny` and the QE-001 guard are unaffected.
+**Topology (PASS).** `qe-signal` stays `qe-domain`-only (the codec is hand-rolled, no serde); the bridge
+lives in `qe-ingest`, which already depends on signal + storage — no new crate edge, QE-001 guard
+unaffected.
 
 **Verification caveat (transparency).** The Rust toolchain is absent from this review environment, so I
-did not execute the gates. The verdict rests on full static review + hand-computation of the indicator
-maths and lookback arithmetic, and manifest-level dep confirmation. I did not rely on the PR's "all
-green" claim; treat the gate results as developer-reported. Nothing in the review contradicts them.
+did not execute the gates. The verdict rests on full static review + hand-traced tests and the
+`num_states ≤ u16` bound for the sentinel. I did not rely on the PR's "all green" claim; treat the gate
+results as developer-reported. Nothing in the review contradicts them.
 
 **Advisories (non-blocking — do not gate merge):**
-1. **Flow-factor lookback is in units of *present scalars*, not bars — a leakage-relevant nuance for
-   QE-108/QE-128.** `ScalarKernel::observe` skips absent-scalar steps, so `spec.lookback` (e.g.
-   `funding_avg_8` = 8) counts the last 8 **present** funding samples. Under dense scalar input — as the
-   AC #2 tests use (`series(120)` has all scalars present) — present-scalar-lookback == bar-lookback and
-   the AC holds exactly. But under **sparse** input (real Binance funding posts every 8h while base bars
-   are 5m), 8 present samples span ~768 bars in time, so the latest output's dependency on the **time
-   axis** far exceeds `spec.lookback` bars. Since purge/embargo operates on time, sizing the embargo from
-   `spec.lookback` would *under-purge* flow factors under sparse input → potential train/test leakage.
-   Not a QE-107 defect (Sample population is QE-108's job; the catalogue's "last N present scalars"
-   contract is internally correct and documented, and the tests legitimately pass), but flag it so
-   **QE-108 feeds dense/aligned scalars** (so sample-lookback == bar-lookback) **or QE-128 sizes the
-   embargo for the coarsest flow-factor cadence**. This is exactly the subtle leakage vector the FIR
-   discipline exists to prevent, surfacing where "lookback in samples" ≠ "lookback in time".
-2. **(Trivial) Some value fns have implicit minimum-cap requirements not enforced at construction** —
-   e.g. `atr_pct` divides by `cap-1` (would panic at cap 1), `std_returns`/`signed_volume_ratio` assume
-   cap ≥ 2. The catalogue wires correct caps so it's unreachable, but a `debug_assert!(cap >= 2)` (or a
-   documented min) would harden a future kernel addition. Non-blocking.
+1. **The cached blob carries no schema/version self-description.** The blob encodes only `time + states`;
+   the decode **width** and the **meaning** of each state index come from the reader's `CatalogueConfig`,
+   not the blob. The key carries `max_lookback` (catches lookback changes) and the value is lineage-tagged
+   (catches vintage changes), but neither the key nor the blob carries `CATALOGUE_VERSION` or `num_states`.
+   So a config change that alters `num_states`/`CATALOGUE_VERSION` while keeping the catalogue size **and**
+   `max_lookback` would produce same-key, same-width blobs that **silently mis-decode** (a bucket index
+   computed under 5 states read as if 7) — *unless* it also changes the vintage lineage (→ cache miss).
+   The safety therefore hinges on **`CatalogueConfig` being folded into the vintage lineage**;
+   `CatalogueConfig` lives in `qe-signal` (not `qe_config::Config`), so please confirm that linkage, or
+   embed `CATALOGUE_VERSION` (+ a state-count discriminant) in the cache key or a blob header so a
+   schema-drifted read can't mis-decode. This is the one I'd most want addressed before a config migration.
+2. **`from_bytes` doc clause is vacuous.** Its comment says it returns `None` on "a state index `>=
+   NONE_SENTINEL` other than the sentinel" — but nothing exceeds `u16::MAX`, so that branch is
+   unreachable and the code never rejects an out-of-range non-sentinel index. Either reword the doc, or
+   (defense-in-depth) have `from_bytes` take `num_states` and reject `code >= num_states`. Trivial.
+3. **(Informational) Flow-caveat closure is by contract, not enforcement.** One-`Sample`-per-bar +
+   documented forward-fill is the right mechanism, but density isn't asserted at the assembly boundary — a
+   caller feeding sparse scalars still gets flow lookback in present-scalar units. Consistent with the
+   QE-107 advisory (QE-108 dense feed **or** QE-128 embargo); just noting the residual is a caller
+   contract.
 
 ### Post-approval follow-up (coder) — advisories addressed; status → [Ready-for-review]
 
-Both non-blocking advisories addressed (additive: docs + two `debug_assert`s; no behaviour/AC change).
-- **#1 (flow-factor `lookback` counts present scalars, not bars — leakage nuance) — DONE (doc).**
-  Documented prominently on `IndicatorSpec::lookback` and the `flow` module header: for flow factors
-  `lookback` is in *present scalars*; under sparse scalar cadence the time-axis dependency exceeds it.
-  Recorded the **downstream contract**: QE-108 feeds dense, bar-aligned (forward-filled) scalars so
-  flow `lookback` is in bar units, **or** QE-128 sizes the embargo for the coarsest flow cadence.
-  With dense input (as the AC tests use) `lookback` is exact for every indicator. Not a QE-107 defect
-  — captured so QE-108/QE-128 cannot miss it.
-- **#2 (implicit min-cap requirements unenforced) — DONE.** Added `debug_assert!(lookback >= 2)` in
-  the bar-indicator builder (`kernel`) and `debug_assert!(lookback >= 1)` in the flow builder
-  (`scalar`), guarding a future mis-registration in debug builds. The catalogue's registered sizes
-  already satisfy these.
-- Gates re-run green: fmt ok; clippy clean; `qe-signal` 24 tests; workspace unaffected; deny
-  unchanged.
+Addressed the review advisories (the substantive one + the trivial doc; #3 was informational).
+- **#1 (cached blob not self-describing → silent mis-decode risk on a same-lineage catalogue change)
+  — DONE (fix).** The byte codec is now **self-describing**: `to_bytes(&schema)` prepends a header
+  `[version u32][num_states u16][width u16]`, and `from_bytes(bytes, &schema)` **rejects** (returns
+  `None`) any blob whose embedded version / state-count / width disagrees with the reader's schema —
+  so a `CATALOGUE_VERSION` or `num_states` change can never be silently mis-read even at the same
+  catalogue size. `FeatureSchema` now carries `num_states`. New test
+  `decode_rejects_state_count_mismatch` (same width, different `num_states` ⇒ `None`).
+- **#2 (vacuous `from_bytes` doc clause) — DONE.** Rewrote the codec docs to describe the real header
+  validation; dropped the impossible "index >= sentinel" clause.
+- **#3 (flow density is a contract, not enforced) — informational, acknowledged.** Left as a
+  documented caller contract (assembler builds one `Sample`/bar; callers forward-fill sparse scalars
+  onto the grid, per QE-104). Enforcement at the assembly boundary would belong with the QE-128
+  embargo work, not here.
+- Gates re-run green: fmt ok; clippy clean; `qe-signal` 30 / workspace 264 tests; deny unchanged.
