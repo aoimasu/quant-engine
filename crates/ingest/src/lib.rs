@@ -33,12 +33,10 @@ pub use fetcher::HttpFetcher;
 use thiserror::Error;
 
 /// Errors from the ingestion layer.
+///
+/// A 404 is **not** an error — a missing period is reported as [`downloader::FileOutcome::Missing`].
 #[derive(Debug, Error)]
 pub enum IngestError {
-    /// A resource was not found (HTTP 404).
-    #[error("not found: {0}")]
-    NotFound(String),
-
     /// A transport-level failure fetching a URL.
     #[error("transport error fetching {url}: {message}")]
     Transport {

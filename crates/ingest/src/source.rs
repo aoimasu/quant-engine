@@ -99,7 +99,7 @@ impl Period {
 }
 
 /// What kind of market data a dump file holds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DataKind {
     /// OHLCV klines at a resolution.
     Klines(Resolution),

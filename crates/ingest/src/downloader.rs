@@ -15,6 +15,9 @@ pub enum FileOutcome {
     Fetched,
     /// First transfer was corrupt; re-fetched and verified.
     Refetched,
+    /// The period has no published dump (HTTP 404) — not an error. Binance does not publish every
+    /// period for every instrument (e.g. the not-yet-closed current month).
+    Missing,
 }
 
 /// Aggregate result of syncing a target list.
@@ -26,6 +29,8 @@ pub struct SyncReport {
     pub fetched: usize,
     /// Files that needed a re-fetch after a corrupt first transfer.
     pub refetched: usize,
+    /// Periods with no published dump (404) — absent, not failed.
+    pub missing: usize,
     /// Files that could not be obtained (relative_path, reason).
     pub failed: Vec<(String, String)>,
 }
@@ -36,6 +41,7 @@ impl SyncReport {
             FileOutcome::Skipped => self.skipped += 1,
             FileOutcome::Fetched => self.fetched += 1,
             FileOutcome::Refetched => self.refetched += 1,
+            FileOutcome::Missing => self.missing += 1,
         }
     }
 }
@@ -73,15 +79,20 @@ impl<F: Fetcher> Downloader<F> {
             return Ok(FileOutcome::Skipped);
         }
 
-        // Fetch the expected digest once (it is tiny and authoritative).
-        let checksum_bytes = self.fetch(&file.checksum_url(&self.base_url))?;
+        // Fetch the expected digest once (it is tiny and authoritative). A 404 here means the period
+        // is simply not published → `Missing`, not a failure.
+        let Some(checksum_bytes) = self.fetch_opt(&file.checksum_url(&self.base_url))? else {
+            return Ok(FileOutcome::Missing);
+        };
         let checksum_text = String::from_utf8_lossy(&checksum_bytes);
         let expected = parse_checksum_file(&checksum_text)
             .ok_or_else(|| IngestError::ChecksumUnparseable(file.checksum_relative_path()))?;
 
         // Try, then retry once on a corrupt transfer.
         for attempt in 0..2 {
-            let bytes = self.fetch(&file.url(&self.base_url))?;
+            let Some(bytes) = self.fetch_opt(&file.url(&self.base_url))? else {
+                return Ok(FileOutcome::Missing);
+            };
             if sha256_hex(&bytes) == expected {
                 self.cache.store(file, &bytes, &expected)?;
                 return Ok(if attempt == 0 {
@@ -109,11 +120,16 @@ impl<F: Fetcher> Downloader<F> {
         report
     }
 
-    fn fetch(&self, url: &str) -> Result<Vec<u8>, IngestError> {
-        self.fetcher.get(url).map_err(|e| match e {
-            FetchError::NotFound(u) => IngestError::NotFound(u),
-            FetchError::Transport { url, message } => IngestError::Transport { url, message },
-        })
+    /// Fetch `url`, mapping a 404 to `Ok(None)` (absent, not an error) and any other transport
+    /// failure to [`IngestError::Transport`].
+    fn fetch_opt(&self, url: &str) -> Result<Option<Vec<u8>>, IngestError> {
+        match self.fetcher.get(url) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(FetchError::NotFound(_)) => Ok(None),
+            Err(FetchError::Transport { url, message }) => {
+                Err(IngestError::Transport { url, message })
+            }
+        }
     }
 }
 
@@ -235,6 +251,21 @@ mod tests {
         assert_eq!(dl.fetcher.hits(&f.url(BASE)), 2, "one corrupt + one good");
         // The recovered file is now cached and verified.
         assert!(dl.cache.is_verified(&f).unwrap());
+    }
+
+    #[test]
+    fn missing_period_is_not_a_failure() {
+        // A 404 (no dump published for this period) → Missing, not an error, and nothing cached.
+        let tmp = tempfile::tempdir().unwrap();
+        let f = file();
+        let fetcher = ScriptedFetcher::new(); // serves nothing → every url 404s
+        let dl = Downloader::new(fetcher, RawCache::new(tmp.path()), BASE);
+
+        assert_eq!(dl.sync_file(&f).unwrap(), FileOutcome::Missing);
+        let report = dl.sync_all(std::slice::from_ref(&f));
+        assert_eq!(report.missing, 1);
+        assert!(report.failed.is_empty());
+        assert!(!dl.cache.is_verified(&f).unwrap());
     }
 
     #[test]

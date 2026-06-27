@@ -5,7 +5,7 @@
 //! differ is flagged so fusion (QE-104) never silently mis-maps a column.
 
 use std::collections::HashMap;
-use std::io::{Cursor, Read};
+use std::io::{BufRead, BufReader, Cursor};
 
 use crate::source::DataKind;
 use crate::IngestError;
@@ -61,24 +61,28 @@ pub fn csv_header(zip_bytes: &[u8]) -> Result<Vec<String>, IngestError> {
     if archive.is_empty() {
         return Err(IngestError::Archive("empty archive".to_owned()));
     }
-    let mut entry = archive
+    let entry = archive
         .by_index(0)
         .map_err(|e| IngestError::Archive(e.to_string()))?;
-    let mut contents = String::new();
-    entry
-        .read_to_string(&mut contents)
+    // Read only the first line — the header — not the whole (large) decompressed CSV.
+    let mut first = String::new();
+    BufReader::new(entry)
+        .read_line(&mut first)
         .map_err(|e| IngestError::Archive(e.to_string()))?;
-    let first = contents
-        .lines()
-        .next()
-        .ok_or_else(|| IngestError::Archive("empty CSV".to_owned()))?;
-    Ok(first.split(',').map(|c| c.trim().to_owned()).collect())
+    if first.is_empty() {
+        return Err(IngestError::Archive("empty CSV".to_owned()));
+    }
+    Ok(first
+        .trim_end()
+        .split(',')
+        .map(|c| c.trim().to_owned())
+        .collect())
 }
 
 /// Records the first header seen per [`DataKind`] and flags later differing months.
 #[derive(Debug, Default)]
 pub struct SchemaRegistry {
-    baselines: HashMap<String, Vec<String>>,
+    baselines: HashMap<DataKind, Vec<String>>,
 }
 
 impl SchemaRegistry {
@@ -91,11 +95,10 @@ impl SchemaRegistry {
     /// Check `header` for `kind`: the first header seen becomes the baseline ([`DriftStatus::InSync`]);
     /// later headers are compared against it.
     pub fn check(&mut self, kind: DataKind, header: &[String]) -> DriftStatus {
-        let key = format!("{kind:?}");
-        match self.baselines.get(&key) {
+        match self.baselines.get(&kind) {
             Some(baseline) => detect_drift(baseline, header),
             None => {
-                self.baselines.insert(key, header.to_vec());
+                self.baselines.insert(kind, header.to_vec());
                 DriftStatus::InSync
             }
         }
