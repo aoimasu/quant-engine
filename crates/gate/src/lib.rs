@@ -122,14 +122,14 @@ impl G1Decision {
     }
 }
 
-/// Evaluate the four pre-registered G1 criteria (QE-134/D2) for a vintage on its **holdout** and record
-/// the decision. `in_sample_sharpe` is the train-window net-of-cost Sharpe; `holdout_returns` are the
+/// Evaluate the pre-registered G1 criteria (QE-134/D2) for a vintage on its **holdout** and record the
+/// decision. `in_sample_sharpe` is the train-window net-of-cost Sharpe; `holdout_returns` are the
 /// net-of-cost returns on the untouched holdout; `robustness` carries the DSR + SPA p-value (QE-131).
 ///
-/// The vintage is promoted iff **all** of: the holdout edge persists, the DSR exceeds the threshold, the
-/// SPA p-value beats the null at the stated level, and the holdout Sharpe is within tolerance of
-/// in-sample. A failure of any one criterion blocks promotion, and every criterion's value-vs-threshold
-/// evidence is recorded.
+/// The vintage is promoted iff **all** of: the holdout has enough samples to be meaningful, the holdout
+/// edge persists, the DSR exceeds the threshold, the SPA p-value beats the null at the stated level, and
+/// the holdout Sharpe is within tolerance of in-sample. A failure of any one criterion blocks promotion,
+/// and every criterion's value-vs-threshold evidence is recorded.
 #[must_use]
 pub fn evaluate_g1(
     in_sample_sharpe: f64,
