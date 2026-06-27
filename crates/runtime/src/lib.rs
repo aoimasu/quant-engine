@@ -8,11 +8,19 @@
 //! driving the shared QE-107/108 catalogue, so live factor rows match offline feature vectors exactly.
 //! QE-207 adds the evaluator session ([`evaluator`]): one stateful object that runs a sealed vintage's
 //! chromosomes through replay then live with no state copy, so decisions are continuous across the boundary.
+//! QE-209 adds the bootstrap pipeline ([`bootstrap`]): a cold start replays the lookback window
+//! (paginated+retried+cached REST → multi-resolution replay → factor merge) through that same evaluator in
+//! replay mode, reconstructing per-strategy state deterministically to where a continuous planner would hold it.
 
+pub mod bootstrap;
 pub mod evaluator;
 pub mod factor_join;
 pub mod live_kline;
 
+pub use bootstrap::{
+    paginate_klines, paginate_series, BootstrapError, BootstrapPipeline, HistoricalSource,
+    HistoricalWindow, Reconstructed,
+};
 pub use evaluator::{ChromosomeDecision, EvalOutput, EvaluatorSession, SessionMode};
 pub use factor_join::LiveFactorJoin;
 pub use live_kline::LiveKlineSource;
