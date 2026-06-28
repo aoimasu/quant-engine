@@ -1,0 +1,626 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>quant-engine — Current State &amp; Maintainer's Guide</title>
+<style>
+  :root{
+    --bg:#0e1116; --panel:#161b22; --panel2:#1c232d; --ink:#e6edf3; --muted:#9aa7b4;
+    --line:#2a323d; --accent:#4ea1ff; --green:#3fb950; --amber:#d29922; --red:#f85149;
+    --purple:#bc8cff; --mono:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font:16px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;}
+  .wrap{display:grid;grid-template-columns:260px 1fr;max-width:1280px;margin:0 auto;}
+  nav{position:sticky;top:0;align-self:start;height:100vh;overflow:auto;padding:24px 18px;
+    border-right:1px solid var(--line);background:var(--panel);}
+  nav h2{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin:18px 0 8px}
+  nav a{display:block;color:var(--ink);text-decoration:none;padding:4px 8px;border-radius:6px;font-size:14px}
+  nav a:hover{background:var(--panel2);color:var(--accent)}
+  main{padding:40px 48px;min-width:0}
+  h1{font-size:30px;margin:0 0 6px}
+  h2.section{font-size:23px;margin:48px 0 14px;padding-bottom:8px;border-bottom:1px solid var(--line)}
+  h3{font-size:18px;margin:28px 0 10px;color:#cdd9e5}
+  h4{font-size:15px;margin:18px 0 6px;color:var(--purple)}
+  p,li{color:#d3dbe3}
+  code{font-family:var(--mono);font-size:.88em;background:var(--panel2);padding:1px 6px;border-radius:5px;color:#e6edf3}
+  pre{background:#0a0d12;border:1px solid var(--line);border-radius:10px;padding:16px 18px;overflow:auto}
+  pre code{background:none;padding:0;font-size:13px;line-height:1.6}
+  a{color:var(--accent)}
+  .lead{font-size:18px;color:var(--muted);margin:0 0 8px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px 22px;margin:16px 0}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  .callout{border-left:4px solid var(--accent);background:var(--panel2);border-radius:0 10px 10px 0;padding:12px 18px;margin:16px 0}
+  .callout.warn{border-color:var(--amber)}
+  .callout.danger{border-color:var(--red)}
+  .callout.ok{border-color:var(--green)}
+  .pill{display:inline-block;font-size:11px;font-weight:600;padding:2px 9px;border-radius:999px;letter-spacing:.02em;vertical-align:middle}
+  .done{background:rgba(63,185,80,.15);color:var(--green);border:1px solid rgba(63,185,80,.35)}
+  .wip{background:rgba(210,153,34,.15);color:var(--amber);border:1px solid rgba(210,153,34,.35)}
+  .todo{background:rgba(139,148,158,.15);color:var(--muted);border:1px solid rgba(139,148,158,.3)}
+  .gate{background:rgba(188,140,255,.15);color:var(--purple);border:1px solid rgba(188,140,255,.4)}
+  table{border-collapse:collapse;width:100%;margin:14px 0;font-size:14px}
+  th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--muted);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.05em}
+  tr:hover td{background:var(--panel)}
+  .mono{font-family:var(--mono)}
+  .tag{font-family:var(--mono);font-size:12px;color:var(--accent)}
+  .muted{color:var(--muted)}
+  .ascii{font-family:var(--mono);font-size:12.5px;line-height:1.45;white-space:pre;color:#b9c6d3}
+  .figure{background:#0a0d12;border:1px solid var(--line);border-radius:12px;padding:16px;margin:18px 0}
+  .figure svg{width:100%;height:auto;display:block}
+  .figcap{color:var(--muted);font-size:13px;margin:10px 4px 0;text-align:center}
+  svg text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+  .legend span{margin-right:14px;font-size:13px}
+  hr{border:none;border-top:1px solid var(--line);margin:28px 0}
+  .foot{color:var(--muted);font-size:13px;margin-top:48px;border-top:1px solid var(--line);padding-top:16px}
+  @media(max-width:900px){.wrap{grid-template-columns:1fr}nav{position:static;height:auto;border-right:none;border-bottom:1px solid var(--line)}main{padding:28px 20px}.grid2{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="wrap">
+<nav>
+  <strong style="font-size:15px">quant-engine</strong>
+  <div class="muted" style="font-size:12px;margin-bottom:6px">current state &amp; guide</div>
+  <h2>Contents</h2>
+  <a href="#tldr">1 · TL;DR</a>
+  <a href="#now">2 · What it does today</a>
+  <a href="#run">3 · How to run it</a>
+  <a href="#arch">4 · Architecture</a>
+  <a href="#dataflow">5 · Data flow</a>
+  <a href="#guards">6 · The two firewalls</a>
+  <a href="#milestones">7 · Milestones &amp; roadmap</a>
+  <a href="#future">8 · What's left to do</a>
+  <h2>Status key</h2>
+  <div style="padding:0 8px">
+    <div><span class="pill done">done</span> built &amp; tested</div>
+    <div style="margin-top:6px"><span class="pill wip">partial</span> some tickets done</div>
+    <div style="margin-top:6px"><span class="pill todo">todo</span> not started</div>
+    <div style="margin-top:6px"><span class="pill gate">gate</span> go/no-go checkpoint</div>
+  </div>
+</nav>
+
+<main>
+  <h1>quant-engine — Current State &amp; Maintainer's Guide</h1>
+  <p class="lead">A deterministic, information-firewalled crypto-perp quant trading platform in Rust.</p>
+  <p class="muted">Entry point for developers maintaining the repo and for users evaluating it for investment.
+  Everything below was verified against the codebase, not assumed. Generated 2026-06-27 · branch <code>update-doc</code>.</p>
+
+  <!-- ============================================================= -->
+  <h2 class="section" id="tldr">1 · TL;DR</h2>
+  <div class="card">
+    <p><strong>What this is.</strong> A 20-crate Cargo workspace that builds a full pipeline for discovering,
+    validating, and (eventually) live-trading systematic strategies on USDⓈ-M perpetual futures
+    (dev universe: <code>BTCUSDT</code>, <code>ETHUSDT</code>). The design is organised around two hard rules
+    enforced in CI: <em>everything is deterministic &amp; reproducible from a recorded vintage hash</em>, and
+    <em>the strategy search can never see live or portfolio outcomes</em> (the "information firewall").</p>
+    <p><strong>Where it stands.</strong> <span class="pill done">53 / ~75 tickets complete.</span>
+    Phase 0 (foundations) and Phase 1 (training → backtest validation, through the <strong>G1 gate</strong>)
+    are fully implemented and tested. Phase 2 (runtime → paper/sim) is ~6 tickets in — the live data plumbing,
+    the shared evaluator, and the deterministic cold-start bootstrap all exist.</p>
+    <p><strong>The one thing to understand.</strong> The sophisticated machinery lives as
+    <em>libraries with deep test coverage</em>. The single shipped <em>binary</em> (<code>qe-cli</code>) currently
+    exposes only <code>version</code> and a <code>train</code> command that writes a provenance
+    <em>manifest</em> — it does not yet run the search/backtest or the live loop end-to-end. Connecting the
+    libraries into runnable pipelines is itself the next body of work (see §8).</p>
+  </div>
+
+  <!-- ============================================================= -->
+  <h2 class="section" id="now">2 · What it does today</h2>
+
+  <p>There is exactly one executable, <code>qe-cli</code>, with two commands:</p>
+  <table>
+    <tr><th>Command</th><th>What it actually does today</th></tr>
+    <tr>
+      <td class="mono">qe-cli version</td>
+      <td>Prints <code>quant-engine 0.1.0</code>.</td>
+    </tr>
+    <tr>
+      <td class="mono">qe-cli train<br>&nbsp;&nbsp;--config &lt;file&gt;</td>
+      <td>Loads a TOML config → resolves the <strong>point-in-time universe</strong> (respects listing/delisting
+      dates, no survivorship bias) → creates the storage directories → computes a deterministic content-hash
+      <strong>lineage</strong> → writes a <strong>vintage manifest</strong>
+      (<span class="mono">&lt;artifacts_dir&gt;/vintages/&lt;id&gt;/manifest.json</span>) recording the id, profile,
+      config/seed lineage, and universe roster.</td>
+    </tr>
+  </table>
+
+  <div class="callout warn">
+    <strong>Important — <code>train</code> is a provenance skeleton, not yet a trainer.</strong>
+    It does <em>not</em> ingest market data, run indicators, evolve strategies, or build an ensemble. The
+    manifest's <code>input_snapshot_id</code> is intentionally empty. The real training stack (ingest, the
+    indicator catalogue, the walk-forward search, the ensemble, the G1 validation gate) is <strong>built and
+    passing tests</strong> but is not yet wired behind this command.
+  </div>
+
+  <h3>Capabilities that exist as tested libraries (not yet behind a command)</h3>
+  <div class="grid2">
+    <div class="card">
+      <h4>Training side (Phase&nbsp;1 — complete)</h4>
+      <ul>
+        <li>Binance public-dumps downloader + REST month-to-date backfill, with data-integrity reconciliation</li>
+        <li>Fusion / normalisation → LMDB market store</li>
+        <li>Multi-resolution bar reconstruction (5m → 30m/4h), batch &amp; streaming-identical</li>
+        <li>~20+ quantised indicator catalogue → feature vectors → synthetic store</li>
+        <li>Execution-friction &amp; funding model (VIP0 fees, real funding series, slippage)</li>
+        <li>QD/MAP-Elites strategy search, Thompson parent selection, purged/embargoed CV, robustness gates</li>
+        <li>Discrete-DE ensemble with correlation/capacity/regime constraints → calibrated <strong>vintage artefact</strong></li>
+        <li>Stress / worst-case-loss, statistical robustness (DSR/SPA), and the <strong>G1 holdout gate</strong></li>
+      </ul>
+    </div>
+    <div class="card">
+      <h4>Runtime side (Phase&nbsp;2 — in progress)</h4>
+      <ul>
+        <li>Venue-aware REST client: weighted rate-limit back-off, retry budget, ephemeral closed-window cache</li>
+        <li>wss Market-tier streams + tier-partitioned connection registry (reconnect/resubscribe/gap report)</li>
+        <li>Live kline source: REST-prime + wss-stitch + per-tier reconstruction</li>
+        <li>Live factor join: as-of merge of funding/OI/premium onto bars, byte-identical to offline features</li>
+        <li><strong>Evaluator session</strong>: one object runs a sealed vintage through replay &amp; live, no state copy</li>
+        <li><strong>Bootstrap pipeline</strong>: deterministic cold-start state reconstruction from REST historicals</li>
+      </ul>
+    </div>
+  </div>
+  <p class="muted">These are exercised through <code>cargo test</code> (≈483 tests, 56 suites, all green). There is
+  <strong>no live order submission anywhere</strong> — order ports are interface-only, and the live HTTP/wss
+  transports sit behind a default-off <code>http</code> feature flag.</p>
+
+  <!-- ============================================================= -->
+  <h2 class="section" id="run">3 · How to run it</h2>
+
+  <h3>Prerequisites</h3>
+  <p>The Rust toolchain pinned by <code>rust-toolchain.toml</code> (<code>cargo</code> on <code>PATH</code>).
+  No database, no API key, no network needed for what runs today.</p>
+
+  <h3>Run the binary</h3>
+  <pre><code># print version (the bare invocation also prints version)
+cargo run -p qe-cli -- version
+
+# run train against the bundled example config
+cargo run -p qe-cli -- train --config config.example.toml
+#   → produced vintage &lt;64-hex-id&gt; → data/artifacts/vintages/&lt;id&gt;/manifest.json
+
+# inspect the output
+cat data/artifacts/vintages/*/manifest.json</code></pre>
+
+  <h3>What you provide</h3>
+  <p>Only a config file. <code>config.example.toml</code> works as-is. Every field is overridable by a
+  <code>QE_</code>-prefixed environment variable (nested with <code>__</code>):</p>
+  <pre><code>QE_DETERMINISM__SEED=7 cargo run -p qe-cli -- train --config config.example.toml</code></pre>
+  <p>Config shape (TOML): <code>profile</code>, <code>instruments</code> / <code>[[universe]]</code> (with
+  <code>listed</code>/<code>delisted</code> dates), <code>[bars]</code> (base + reconstructed resolutions),
+  <code>[storage]</code> directories (relative, volume-friendly), <code>[determinism].seed</code>.</p>
+
+  <h3>Inputs &amp; where to obtain them</h3>
+  <table>
+    <tr><th>Scenario</th><th>Inputs needed</th><th>Where</th></tr>
+    <tr>
+      <td><span class="pill done">today</span> <code>train</code></td>
+      <td>Just the config file. Runs fully offline.</td>
+      <td>Nothing external — no market data, no keys.</td>
+    </tr>
+    <tr>
+      <td><span class="pill todo">when wired</span> full training</td>
+      <td>Historical klines + funding + open-interest + mark/premium, point-in-time from each listing date.</td>
+      <td>Binance public data dumps + USDⓈ-M Futures REST (<span class="mono">/fapi/v1/klines</span>,
+      <span class="mono">/fapi/v1/fundingRate</span>, <span class="mono">/futures/data/openInterestHist</span>,
+      <span class="mono">/fapi/v1/premiumIndexKlines</span>) — public, no key for historical reads.</td>
+    </tr>
+    <tr>
+      <td><span class="pill todo">when wired</span> live / paper</td>
+      <td>The same REST historicals to bootstrap, then live wss streams; venue keys only for the (still-future) order path.</td>
+      <td>Binance Futures wss; the concrete JSON decoders for this are deferred to <span class="tag">QE-219</span>.</td>
+    </tr>
+  </table>
+  <div class="callout warn">
+    <strong>Stale docs to ignore.</strong> <code>README.md</code> references a <code>Dockerfile</code> and
+    <code>docker build</code> — <em>no Dockerfile exists in the repo yet</em>, so that section is aspirational.
+    The <code>cargo run … train</code> line is accurate but produces the manifest described above, not a backtest.
+  </div>
+
+  <!-- ============================================================= -->
+  <h2 class="section" id="arch">4 · Architecture</h2>
+  <p>The workspace is 20 crates. The organising idea is a <strong>shared spine</strong>
+  (<code>qe-domain</code> + <code>qe-signal</code>) that both the offline <em>training</em> world and the online
+  <em>runtime</em> world depend on — and <em>nothing else</em> crosses between them. That separation is not a
+  convention; it is checked by tests (see §6).</p>
+
+  <h3>Crate map by layer</h3>
+  <table>
+    <tr><th>Layer</th><th>Crates</th><th>Role</th></tr>
+    <tr><td><strong>Foundation</strong><br>(cross-cutting)</td>
+      <td class="mono">domain · error · config · determinism · clock · telemetry · risk</td>
+      <td>Types (bars, instruments, time), error taxonomy, layered TOML config, the reproducibility/lineage harness,
+      time-sync guard, structured logging, and the risk-limit / kill-switch contract.</td></tr>
+    <tr><td><strong>Storage</strong></td>
+      <td class="mono">storage</td>
+      <td>LMDB market-data &amp; synthetic-feature stores (no database on the runtime hot path).</td></tr>
+    <tr><td><strong>Shared spine</strong></td>
+      <td class="mono">domain · signal</td>
+      <td><code>signal</code> holds bar reconstruction, the indicator catalogue, feature assembly, regime
+      labelling, <em>and the strategy genome</em> — the one piece of strategy logic both sides must run identically.</td></tr>
+    <tr><td><strong>Training</strong></td>
+      <td class="mono">ingest · wfo · ensemble · vintage</td>
+      <td>Ingest/fusion; the walk-forward QD search (<code>wfo</code>); the discrete-DE portfolio builder
+      (<code>ensemble</code>); the sealed, content-hashed <strong>vintage artefact</strong> that is the
+      hand-off to runtime.</td></tr>
+    <tr><td><strong>Runtime</strong></td>
+      <td class="mono">venue · runtime</td>
+      <td><code>venue</code> = REST/wss connectivity; <code>runtime</code> = live kline source, factor join,
+      evaluator session, bootstrap pipeline (and the future risk/order loop).</td></tr>
+    <tr><td><strong>Validation &amp; reporting</strong></td>
+      <td class="mono">validation · gate · report</td>
+      <td>Statistical robustness suite, the phased quality <strong>gates</strong> (G1…), and validation reports.</td></tr>
+    <tr><td><strong>Guards &amp; root</strong></td>
+      <td class="mono">architecture · cli</td>
+      <td><code>architecture</code> hosts the information-firewall CI guard; <code>cli</code> is the composition
+      root (the only crate that may touch both training and runtime).</td></tr>
+  </table>
+
+  <h3>How the dependencies actually wire (verified)</h3>
+  <div class="figure">
+  <svg viewBox="0 0 1040 620" role="img" aria-label="Crate dependency architecture">
+    <defs>
+      <marker id="ar" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0 L7,3 L0,6 z" fill="#9aa7b4"/></marker>
+    </defs>
+    <!-- shared spine band -->
+    <rect x="378" y="92" width="284" height="300" rx="12" fill="#bc8cff" fill-opacity="0.06" stroke="#bc8cff" stroke-dasharray="5 4"/>
+    <text x="520" y="110" text-anchor="middle" font-size="12" font-weight="700" fill="#bc8cff">🔒 SHARED SPINE — the only bridge</text>
+    <!-- composition root -->
+    <rect x="360" y="18" width="320" height="46" rx="9" fill="#18222e" stroke="#4ea1ff"/>
+    <text x="520" y="40" text-anchor="middle" font-size="14" font-weight="700" fill="#e6edf3">qe-cli</text>
+    <text x="520" y="55" text-anchor="middle" font-size="10.5" fill="#9aa7b4">composition root · wires both worlds</text>
+    <!-- group labels -->
+    <text x="180" y="112" text-anchor="middle" font-size="12" font-weight="700" fill="#56b6c2">TRAINING</text>
+    <text x="860" y="112" text-anchor="middle" font-size="12" font-weight="700" fill="#4ea1ff">RUNTIME</text>
+    <!-- training boxes -->
+    <rect x="60" y="128" width="240" height="44" rx="8" fill="#14201d" stroke="#56b6c2"/>
+    <text x="180" y="148" text-anchor="middle" font-size="13" font-weight="600" fill="#e6edf3">qe-ingest</text>
+    <text x="180" y="163" text-anchor="middle" font-size="10" fill="#9aa7b4">fusion → features</text>
+    <rect x="60" y="188" width="240" height="44" rx="8" fill="#14201d" stroke="#56b6c2"/>
+    <text x="180" y="208" text-anchor="middle" font-size="13" font-weight="600" fill="#e6edf3">qe-wfo</text>
+    <text x="180" y="223" text-anchor="middle" font-size="10" fill="#9aa7b4">walk-forward QD search</text>
+    <rect x="60" y="248" width="240" height="44" rx="8" fill="#14201d" stroke="#56b6c2"/>
+    <text x="180" y="268" text-anchor="middle" font-size="13" font-weight="600" fill="#e6edf3">qe-ensemble</text>
+    <text x="180" y="283" text-anchor="middle" font-size="10" fill="#9aa7b4">discrete-DE portfolio</text>
+    <!-- spine boxes -->
+    <rect x="398" y="128" width="244" height="58" rx="8" fill="#1d1726" stroke="#bc8cff"/>
+    <text x="520" y="150" text-anchor="middle" font-size="13" font-weight="700" fill="#e6edf3">qe-signal</text>
+    <text x="520" y="166" text-anchor="middle" font-size="10" fill="#9aa7b4">bar reconstruction · indicator catalogue</text>
+    <text x="520" y="179" text-anchor="middle" font-size="10" fill="#9aa7b4">feature vectors · strategy genome</text>
+    <rect x="398" y="200" width="244" height="40" rx="8" fill="#1d1726" stroke="#bc8cff"/>
+    <text x="520" y="218" text-anchor="middle" font-size="13" font-weight="700" fill="#e6edf3">qe-domain</text>
+    <text x="520" y="232" text-anchor="middle" font-size="10" fill="#9aa7b4">core types (bars, instruments, time)</text>
+    <rect x="398" y="300" width="244" height="64" rx="8" fill="#211c12" stroke="#d29922"/>
+    <text x="520" y="321" text-anchor="middle" font-size="13" font-weight="700" fill="#f0d28a">qe-vintage</text>
+    <text x="520" y="337" text-anchor="middle" font-size="10" fill="#cdb98a">sealed artefact</text>
+    <text x="520" y="351" text-anchor="middle" font-size="10" fill="#cdb98a">chromosomes + weights + calibration</text>
+    <text x="520" y="384" text-anchor="middle" font-size="11" font-weight="600" fill="#bc8cff">qe-runtime never depends on qe-wfo / qe-ensemble</text>
+    <!-- runtime boxes -->
+    <rect x="740" y="128" width="240" height="44" rx="8" fill="#14202e" stroke="#4ea1ff"/>
+    <text x="860" y="148" text-anchor="middle" font-size="13" font-weight="600" fill="#e6edf3">qe-venue</text>
+    <text x="860" y="163" text-anchor="middle" font-size="10" fill="#9aa7b4">REST + wss connectivity</text>
+    <rect x="740" y="200" width="240" height="72" rx="8" fill="#14202e" stroke="#4ea1ff"/>
+    <text x="860" y="222" text-anchor="middle" font-size="13" font-weight="700" fill="#e6edf3">qe-runtime</text>
+    <text x="860" y="238" text-anchor="middle" font-size="10" fill="#9aa7b4">bootstrap · evaluator session</text>
+    <text x="860" y="251" text-anchor="middle" font-size="10" fill="#9aa7b4">live factor join</text>
+    <text x="860" y="264" text-anchor="middle" font-size="10" fill="#9aa7b4">(future: risk + order loop)</text>
+    <!-- foundation -->
+    <text x="520" y="426" text-anchor="middle" font-size="12" font-weight="600" fill="#9aa7b4">FOUNDATION — used by every layer</text>
+    <g font-size="10.5" font-weight="600" fill="#cdd9e5" text-anchor="middle">
+      <rect x="60"  y="442" width="120" height="40" rx="7" fill="#161b22" stroke="#3a4350"/><text x="120" y="466">config</text>
+      <rect x="194" y="442" width="120" height="40" rx="7" fill="#161b22" stroke="#3a4350"/><text x="254" y="466" font-size="9.5">determinism</text>
+      <rect x="328" y="442" width="120" height="40" rx="7" fill="#161b22" stroke="#3a4350"/><text x="388" y="466">error</text>
+      <rect x="462" y="442" width="120" height="40" rx="7" fill="#161b22" stroke="#3a4350"/><text x="522" y="466">clock</text>
+      <rect x="596" y="442" width="120" height="40" rx="7" fill="#161b22" stroke="#3a4350"/><text x="656" y="466">telemetry</text>
+      <rect x="730" y="442" width="120" height="40" rx="7" fill="#161b22" stroke="#3a4350"/><text x="790" y="466">risk</text>
+      <rect x="864" y="442" width="120" height="40" rx="7" fill="#161b22" stroke="#3a4350"/><text x="924" y="466">storage</text>
+    </g>
+    <!-- arrows -->
+    <g stroke="#9aa7b4" stroke-width="1.4" fill="none">
+      <line x1="445" y1="64" x2="195" y2="125" marker-end="url(#ar)"/>
+      <line x1="520" y1="64" x2="520" y2="125" marker-end="url(#ar)"/>
+      <line x1="595" y1="64" x2="850" y2="125" marker-end="url(#ar)"/>
+      <line x1="300" y1="150" x2="394" y2="152" marker-end="url(#ar)"/>
+      <line x1="300" y1="210" x2="394" y2="172" marker-end="url(#ar)"/>
+      <line x1="300" y1="270" x2="394" y2="326" marker-end="url(#ar)"/>
+      <line x1="740" y1="222" x2="646" y2="174" marker-end="url(#ar)"/>
+      <line x1="860" y1="172" x2="860" y2="200" marker-end="url(#ar)"/>
+      <line x1="740" y1="246" x2="646" y2="330" marker-end="url(#ar)" stroke-dasharray="4 3"/>
+    </g>
+    <text x="706" y="300" text-anchor="middle" font-size="9.5" fill="#9aa7b4">read-only</text>
+  </svg>
+  <div class="figcap">Crate dependency map. Training (left) feeds the shared spine; runtime (right) reads it and loads the sealed vintage read-only. <code>qe-cli</code> is the only crate that touches both sides.</div>
+  </div>
+  <ul>
+    <li><code>qe-signal → qe-domain</code> only. It is the narrowest crate and the spine of everything.</li>
+    <li><code>qe-runtime → {domain, risk, signal, storage, venue, vintage}</code> — <strong>never</strong>
+      <code>wfo</code> or <code>ensemble</code>.</li>
+    <li><code>qe-vintage → {signal, risk, determinism}</code>. Because the strategy genome lives in
+      <code>signal</code> (relocated in QE-207), a vintage can carry chromosomes to the runtime <em>without</em>
+      dragging in the training crates — that is what keeps the two sides decoupled.</li>
+    <li><code>qe-cli</code> depends on both worlds; it is the only place they meet, and it is the intended place.</li>
+  </ul>
+
+  <!-- ============================================================= -->
+  <h2 class="section" id="dataflow">5 · Data flow (end-to-end intent)</h2>
+  <p>The spec numbers the pipeline ①→⑦ on the training side and ③/④ on the runtime side. The
+  <strong>vintage</strong> is the artefact that bridges them.</p>
+  <div class="figure">
+  <svg viewBox="0 0 1040 390" role="img" aria-label="End-to-end data flow pipeline">
+    <defs>
+      <marker id="fl" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0 L7,3 L0,6 z" fill="#9aa7b4"/></marker>
+    </defs>
+    <!-- Row A: training -->
+    <text x="40" y="32" font-size="13" font-weight="700" fill="#3fb950">TRAINING PIPELINE&#160;&#160;①→⑦</text>
+    <text x="232" y="32" font-size="12" fill="#9aa7b4">built &amp; tested · offline · deterministic · firewalled</text>
+    <g font-size="12" text-anchor="middle">
+      <!-- 7 green stages -->
+      <g>
+        <rect x="40"  y="48" width="120" height="58" rx="8" fill="#14201d" stroke="#3fb950"/><text x="100" y="73" font-weight="600" fill="#e6edf3">① Sources</text><text x="100" y="90" font-size="10" fill="#9aa7b4">dumps + REST</text>
+        <rect x="178" y="48" width="120" height="58" rx="8" fill="#14201d" stroke="#3fb950"/><text x="238" y="73" font-weight="600" fill="#e6edf3">② Fusion</text><text x="238" y="90" font-size="10" fill="#9aa7b4">reconcile→Arrow</text>
+        <rect x="316" y="48" width="120" height="58" rx="8" fill="#14201d" stroke="#3fb950"/><text x="376" y="73" font-weight="600" fill="#e6edf3">③ Storage</text><text x="376" y="90" font-size="10" fill="#9aa7b4">LMDB market</text>
+        <rect x="454" y="48" width="120" height="58" rx="8" fill="#14201d" stroke="#3fb950"/><text x="514" y="73" font-weight="600" fill="#e6edf3">④ Signal</text><text x="514" y="90" font-size="10" fill="#9aa7b4">catalogue→features</text>
+        <rect x="592" y="48" width="120" height="58" rx="8" fill="#14201d" stroke="#3fb950"/><text x="652" y="73" font-weight="600" fill="#e6edf3">⑤ WFO</text><text x="652" y="90" font-size="10" fill="#9aa7b4">QD search + CV</text>
+        <rect x="730" y="48" width="120" height="58" rx="8" fill="#14201d" stroke="#3fb950"/><text x="790" y="73" font-weight="600" fill="#e6edf3">⑥ Ensemble</text><text x="790" y="90" font-size="10" fill="#9aa7b4">discrete-DE</text>
+        <rect x="868" y="48" width="120" height="58" rx="8" fill="#211c12" stroke="#d29922"/><text x="928" y="73" font-weight="600" fill="#f0d28a">⑦ Vintage</text><text x="928" y="90" font-size="10" fill="#cdb98a">sealed artefact</text>
+      </g>
+    </g>
+    <g stroke="#9aa7b4" stroke-width="1.4" fill="none">
+      <line x1="160" y1="77" x2="178" y2="77" marker-end="url(#fl)"/>
+      <line x1="298" y1="77" x2="316" y2="77" marker-end="url(#fl)"/>
+      <line x1="436" y1="77" x2="454" y2="77" marker-end="url(#fl)"/>
+      <line x1="574" y1="77" x2="592" y2="77" marker-end="url(#fl)"/>
+      <line x1="712" y1="77" x2="730" y2="77" marker-end="url(#fl)"/>
+      <line x1="850" y1="77" x2="868" y2="77" marker-end="url(#fl)"/>
+    </g>
+    <!-- G1 gate -->
+    <rect x="868" y="150" width="120" height="48" rx="8" fill="#1d1726" stroke="#bc8cff"/>
+    <text x="928" y="170" text-anchor="middle" font-size="12" font-weight="700" fill="#bc8cff">GATE G1</text>
+    <text x="928" y="186" text-anchor="middle" font-size="9.5" fill="#9aa7b4">net-of-cost holdout</text>
+    <line x1="928" y1="106" x2="928" y2="150" stroke="#9aa7b4" stroke-width="1.4" marker-end="url(#fl)"/>
+    <!-- connector G1 -> bootstrap -->
+    <path d="M928,198 L928,224 L115,224 L115,250" stroke="#9aa7b4" stroke-width="1.4" fill="none" marker-end="url(#fl)"/>
+    <!-- Row B: runtime -->
+    <text x="40" y="244" font-size="13" font-weight="700" fill="#4ea1ff">RUNTIME LOOP</text>
+    <text x="172" y="244" font-size="12" fill="#9aa7b4">in progress</text>
+    <g font-size="12" text-anchor="middle">
+      <rect x="40"  y="250" width="150" height="60" rx="8" fill="#14201d" stroke="#3fb950"/><text x="115" y="276" font-weight="600" fill="#e6edf3">Bootstrap</text><text x="115" y="294" font-size="10" fill="#9aa7b4">cold-start replay · QE-209</text>
+      <rect x="210" y="250" width="150" height="60" rx="8" fill="#211c12" stroke="#d29922"/><text x="285" y="276" font-weight="600" fill="#e6edf3">Cutover</text><text x="285" y="294" font-size="10" fill="#cdb98a">bootstrap→live · QE-211</text>
+      <rect x="380" y="250" width="150" height="60" rx="8" fill="#14201d" stroke="#3fb950"/><text x="455" y="272" font-weight="600" fill="#e6edf3">Live evaluation</text><text x="455" y="289" font-size="9.5" fill="#9aa7b4">factor join + genome</text><text x="455" y="301" font-size="9.5" fill="#9aa7b4">QE-206/207</text>
+      <rect x="550" y="250" width="150" height="60" rx="8" fill="#161b22" stroke="#3a4350"/><text x="625" y="276" font-weight="600" fill="#cdd9e5">Risk + order path</text><text x="625" y="294" font-size="10" fill="#9aa7b4">QE-212–218</text>
+      <rect x="720" y="250" width="150" height="60" rx="8" fill="#1d1726" stroke="#bc8cff"/><text x="795" y="276" font-weight="700" fill="#bc8cff">GATE G2</text><text x="795" y="294" font-size="9.5" fill="#9aa7b4">shadow / dry-run · QE-222</text>
+    </g>
+    <g stroke="#9aa7b4" stroke-width="1.4" fill="none">
+      <line x1="190" y1="280" x2="210" y2="280" marker-end="url(#fl)"/>
+      <line x1="360" y1="280" x2="380" y2="280" marker-end="url(#fl)"/>
+      <line x1="530" y1="280" x2="550" y2="280" marker-end="url(#fl)"/>
+      <line x1="700" y1="280" x2="720" y2="280" marker-end="url(#fl)"/>
+    </g>
+    <!-- legend -->
+    <g font-size="11" fill="#cdd9e5">
+      <rect x="40"  y="350" width="14" height="14" rx="3" fill="#14201d" stroke="#3fb950"/><text x="60" y="361">built &amp; tested</text>
+      <rect x="180" y="350" width="14" height="14" rx="3" fill="#211c12" stroke="#d29922"/><text x="200" y="361">partially wired</text>
+      <rect x="320" y="350" width="14" height="14" rx="3" fill="#161b22" stroke="#3a4350"/><text x="340" y="361">not started</text>
+      <rect x="450" y="350" width="14" height="14" rx="3" fill="#1d1726" stroke="#bc8cff"/><text x="470" y="361">go/no-go gate</text>
+    </g>
+  </svg>
+  <div class="figcap">The vintage artefact (⑦) bridges training and runtime: it passes the <strong>G1</strong> gate, then the runtime bootstraps from it and runs the live loop toward the <strong>G2</strong> dry-run gate. No orders are sent before G2.</div>
+  </div>
+
+  <!-- ============================================================= -->
+  <h2 class="section" id="guards">6 · The two firewalls (why this codebase is shaped the way it is)</h2>
+  <p>Two CI-enforced invariants drive nearly every architectural decision. A maintainer must understand both
+  before moving code between crates.</p>
+
+  <div class="figure">
+  <svg viewBox="0 0 1040 300" role="img" aria-label="The two architectural firewalls">
+    <defs>
+      <marker id="ok" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0 L7,3 L0,6 z" fill="#3fb950"/></marker>
+    </defs>
+    <!-- containers -->
+    <text x="185" y="50" text-anchor="middle" font-size="12" font-weight="700" fill="#56b6c2">TRAINING</text>
+    <rect x="60" y="60" width="250" height="124" rx="10" fill="#14201d" stroke="#56b6c2"/>
+    <rect x="84" y="80" width="202" height="38" rx="7" fill="#0a0d12" stroke="#56b6c2"/><text x="185" y="104" text-anchor="middle" font-size="12" font-weight="600" fill="#e6edf3">qe-wfo</text>
+    <rect x="84" y="128" width="202" height="38" rx="7" fill="#0a0d12" stroke="#56b6c2"/><text x="185" y="152" text-anchor="middle" font-size="12" font-weight="600" fill="#e6edf3">qe-ensemble</text>
+
+    <text x="520" y="50" text-anchor="middle" font-size="12" font-weight="700" fill="#bc8cff">SHARED SPINE — only legal bridge</text>
+    <rect x="395" y="60" width="250" height="124" rx="10" fill="#1d1726" stroke="#bc8cff"/>
+    <rect x="419" y="80" width="202" height="38" rx="7" fill="#0a0d12" stroke="#bc8cff"/><text x="520" y="104" text-anchor="middle" font-size="12" font-weight="600" fill="#e6edf3">qe-signal</text>
+    <rect x="419" y="128" width="202" height="38" rx="7" fill="#0a0d12" stroke="#bc8cff"/><text x="520" y="152" text-anchor="middle" font-size="12" font-weight="600" fill="#e6edf3">qe-domain</text>
+
+    <text x="855" y="50" text-anchor="middle" font-size="12" font-weight="700" fill="#4ea1ff">RUNTIME</text>
+    <rect x="730" y="60" width="250" height="124" rx="10" fill="#14202e" stroke="#4ea1ff"/>
+    <rect x="754" y="80" width="202" height="38" rx="7" fill="#0a0d12" stroke="#4ea1ff"/><text x="855" y="104" text-anchor="middle" font-size="12" font-weight="600" fill="#e6edf3">qe-runtime</text>
+    <rect x="754" y="128" width="202" height="38" rx="7" fill="#0a0d12" stroke="#4ea1ff"/><text x="855" y="152" text-anchor="middle" font-size="12" font-weight="600" fill="#e6edf3">qe-venue</text>
+
+    <!-- allowed deps into spine -->
+    <line x1="310" y1="100" x2="393" y2="100" stroke="#3fb950" stroke-width="1.8" marker-end="url(#ok)"/>
+    <text x="351" y="92" text-anchor="middle" font-size="10" fill="#3fb950">✓ allowed</text>
+    <line x1="730" y1="100" x2="647" y2="100" stroke="#3fb950" stroke-width="1.8" marker-end="url(#ok)"/>
+    <text x="689" y="92" text-anchor="middle" font-size="10" fill="#3fb950">✓ allowed</text>
+
+    <!-- blocked direct edge -->
+    <line x1="200" y1="220" x2="840" y2="220" stroke="#f85149" stroke-width="2" stroke-dasharray="7 5"/>
+    <text x="520" y="216" text-anchor="middle" font-size="18" font-weight="800" fill="#f85149">✕</text>
+    <text x="520" y="244" text-anchor="middle" font-size="11.5" font-weight="600" fill="#f0a5a0">no direct dependency — in either direction</text>
+    <!-- guard captions -->
+    <text x="520" y="270" text-anchor="middle" font-size="11" fill="#d3dbe3"><tspan font-weight="700" fill="#bc8cff">QE-001 decoupling</tspan> (bidirectional): qe-runtime ⊥ qe-wfo / qe-ensemble — neither reaches the other.</text>
+    <text x="520" y="288" text-anchor="middle" font-size="11" fill="#d3dbe3"><tspan font-weight="700" fill="#bc8cff">QE-132 firewall</tspan> (directional): the search cannot reach runtime / venue.</text>
+  </svg>
+  <div class="figcap">Both sides may depend <em>into</em> the shared spine (green); neither may depend on the other directly (red). That is why the genome lives in <code>qe-signal</code> and the vintage is plain data.</div>
+  </div>
+
+  <div class="grid2">
+    <div class="card">
+      <h4>① Information firewall <span class="tag">QE-132</span></h4>
+      <p><span class="muted">Test:</span> <code>crates/architecture/tests/firewall.rs</code> — <strong>directional</strong>.</p>
+      <p>The evolutionary search must not <em>reach into</em> portfolio or live concerns. It asserts what
+      <code>qe-wfo</code> and <code>qe-ensemble</code> are allowed to depend on (not the reverse): each is
+      forbidden from reaching <code>runtime</code>, <code>venue</code>, or each other. This stops the search from
+      ever "seeing" outcomes it must be blind to.</p>
+    </div>
+    <div class="card">
+      <h4>② Train/live decoupling <span class="tag">QE-001</span></h4>
+      <p><span class="muted">Test:</span> <code>crates/cli/tests/dependency_topology.rs</code> — <strong>bidirectional</strong>.</p>
+      <p><code>qe-runtime</code> must not transitively reach <code>qe-wfo</code>/<code>qe-ensemble</code>,
+      <em>and</em> they must not reach <code>qe-runtime</code>. "The only code shared between the training and
+      runtime sides crosses through <code>signal</code>/<code>domain</code>." This is why the genome lives in
+      <code>signal</code> and the vintage is plain data.</p>
+    </div>
+  </div>
+  <div class="callout">
+    <strong>Practical rule for contributors.</strong> If you need to share something between the training and
+    runtime sides, it goes in <code>qe-signal</code> or <code>qe-domain</code> — nowhere else. If you find
+    yourself wanting <code>qe-runtime</code> to depend on <code>qe-wfo</code>, stop: the decoupling test will
+    fail, and the right move is to push the shared type down into the spine (exactly what QE-207 did with the
+    genome).
+  </div>
+
+  <!-- ============================================================= -->
+  <h2 class="section" id="milestones">7 · Milestones &amp; roadmap</h2>
+  <p>Four phases, three go/no-go gates. The exit condition of each phase is its gate.</p>
+  <table>
+    <tr><th>Phase</th><th>Theme</th><th>Exit gate</th><th>Status</th></tr>
+    <tr><td><strong>P0</strong></td><td>Foundations</td><td>Workspace, config, storage, shared types, time/risk contracts compile &amp; are tested.</td><td><span class="pill done">complete · 13/13</span></td></tr>
+    <tr><td><strong>P1</strong></td><td>Training → backtest validation</td><td><span class="pill gate">G1</span> a vintage passes net-of-cost, purged/embargoed, statistically-deflated validation on an untouched holdout.</td><td><span class="pill done">complete · 34/34 incl. G1</span></td></tr>
+    <tr><td><strong>P2</strong></td><td>Runtime → paper/sim</td><td><span class="pill gate">G2</span> full loop runs in shadow/dry-run against live data, no order submission, reconciled vs simulator.</td><td><span class="pill wip">in progress · 6/22</span></td></tr>
+    <tr><td><strong>P3</strong></td><td>Live, attribution &amp; ops</td><td><span class="pill gate">G3</span> independent go/no-go sign-off; staged capital ramp under enforced caps.</td><td><span class="pill todo">not started · 0/11</span></td></tr>
+  </table>
+
+  <h3>Phase 0 — Foundations <span class="pill done">complete</span></h3>
+  <p class="muted">Workspace topology, layered config, logging, error model, CI, the determinism harness, shared
+  domain types, clock-skew guard, the risk/kill-switch contract, LMDB market + synthetic stores, point-in-time
+  universe, and deployment-agnostic local run.</p>
+  <p><span class="tag">QE-001 → QE-013</span> &nbsp;<span class="pill done">all done</span></p>
+
+  <h3>Phase 1 — Training → backtest validation <span class="pill done">complete</span></h3>
+  <table>
+    <tr><th>Area</th><th>Tickets</th><th></th></tr>
+    <tr><td>① External sources</td><td class="tag">QE-101 dumps downloader · QE-102 REST backfill</td><td><span class="pill done">done</span></td></tr>
+    <tr><td>② Import &amp; fusion</td><td class="tag">QE-103 data-integrity recon · QE-104 fusion/Arrow</td><td><span class="pill done">done</span></td></tr>
+    <tr><td>②→③ Storage</td><td class="tag">QE-105 persist to LMDB</td><td><span class="pill done">done</span></td></tr>
+    <tr><td>④ Signal generation</td><td class="tag">QE-106 bar reconstruction · QE-107 indicator catalogue · QE-108 feature vectors · QE-109 friction/funding</td><td><span class="pill done">done</span></td></tr>
+    <tr><td>⑤ WFO search</td><td class="tag">QE-110–116 spikes · QE-117 window mgr · QE-118 MAP-Elites · QE-119 operators · QE-120 backtester · QE-121 Thompson · QE-122 regularisation · QE-123 strategy repo · QE-124 robustness gates · QE-125 regimes</td><td><span class="pill done">done</span></td></tr>
+    <tr><td>⑥/⑦ Ensemble + artefact</td><td class="tag">QE-126 DE portfolio · QE-127 corr/regime constraint · QE-128 capacity gate · QE-129 vintage format · QE-130 stress/worst-case</td><td><span class="pill done">done</span></td></tr>
+    <tr><td>Validation</td><td class="tag">QE-131 robustness suite · QE-132 firewall guard · QE-133 reporting</td><td><span class="pill done">done</span></td></tr>
+    <tr><td>Gate</td><td class="tag">QE-134 — GATE G1: holdout embargo &amp; over-fit acceptance</td><td><span class="pill gate">G1 done</span></td></tr>
+    <tr><td>Deferred</td><td class="tag">QE-135 Parquet/DuckDB · QE-136 signal viewer</td><td><span class="pill todo">deferred</span></td></tr>
+  </table>
+
+  <h3>Phase 2 — Runtime → paper/sim <span class="pill wip">in progress</span></h3>
+  <table>
+    <tr><th>Ticket</th><th>What</th><th>Status</th></tr>
+    <tr><td class="tag">QE-201</td><td>Venue-aware REST client (rate-limit + ephemeral cache)</td><td><span class="pill done">done</span></td></tr>
+    <tr><td class="tag">QE-202</td><td>wss Market-tier streams + connection registry</td><td><span class="pill done">done</span></td></tr>
+    <tr><td class="tag">QE-203</td><td>wss Realtime-tier streams</td><td><span class="pill todo">todo</span></td></tr>
+    <tr><td class="tag">QE-204</td><td>User-data stream subscription</td><td><span class="pill todo">todo</span></td></tr>
+    <tr><td class="tag">QE-205</td><td>Streaming bar reconstruction + live kline source</td><td><span class="pill done">done</span></td></tr>
+    <tr><td class="tag">QE-206</td><td>Factor join + batch/streaming parity tests</td><td><span class="pill done">done</span></td></tr>
+    <tr><td class="tag">QE-207</td><td>Evaluator session (shared replay + live modes)</td><td><span class="pill done">done</span></td></tr>
+    <tr><td class="tag">QE-208</td><td>Mark EMA loop + tick observer</td><td><span class="pill todo">todo</span></td></tr>
+    <tr><td class="tag">QE-209</td><td>Bootstrap pipeline (deterministic cold start)</td><td><span class="pill done">done</span></td></tr>
+    <tr><td class="tag">QE-210</td><td>Reconstructed state (object handed to cutover)</td><td><span class="pill todo">next</span></td></tr>
+    <tr><td class="tag">QE-211</td><td>Bootstrap→live in-process cutover</td><td><span class="pill todo">next</span></td></tr>
+    <tr><td class="tag">QE-212</td><td>Circuit-breaker layer</td><td><span class="pill todo">todo</span></td></tr>
+    <tr><td class="tag">QE-213</td><td>Position netting</td><td><span class="pill todo">todo</span></td></tr>
+    <tr><td class="tag">QE-214</td><td>Hedge Planner (target-position)</td><td><span class="pill todo">todo</span></td></tr>
+    <tr><td class="tag">QE-215</td><td>Pre-trade risk check</td><td><span class="pill todo">todo</span></td></tr>
+    <tr><td class="tag">QE-216</td><td>Out-of-band kill-switch at venue adapter</td><td><span class="pill todo">todo</span></td></tr>
+    <tr><td class="tag">QE-217</td><td>Venue adapter / position keeper / order lifecycle + simulator</td><td><span class="pill todo">todo</span></td></tr>
+    <tr><td class="tag">QE-218</td><td>gRPC transport (Hedge Planner ↔ Edge gateway)</td><td><span class="pill todo">todo</span></td></tr>
+    <tr><td class="tag">QE-219</td><td>Vintage load (read-only) + rollover</td><td><span class="pill todo">todo</span></td></tr>
+    <tr><td class="tag">QE-220</td><td>Bootstrap/restart parity test</td><td><span class="pill todo">todo</span></td></tr>
+    <tr><td class="tag">QE-221</td><td>Real-time reconciliation divergence alarm</td><td><span class="pill todo">todo</span></td></tr>
+    <tr><td class="tag">QE-222</td><td>GATE G2: live shadow / dry-run</td><td><span class="pill gate">G2 gate</span></td></tr>
+  </table>
+
+  <h3>Phase 3 — Live, attribution &amp; ops <span class="pill todo">not started</span></h3>
+  <table>
+    <tr><th>Ticket</th><th>What</th></tr>
+    <tr><td class="tag">QE-301</td><td>Strategy Allocation Journal (best-effort, 3-day retry)</td></tr>
+    <tr><td class="tag">QE-302</td><td>Reconciliation (journal × venue trade history)</td></tr>
+    <tr><td class="tag">QE-303</td><td>Attribution outputs</td></tr>
+    <tr><td class="tag">QE-304</td><td>Cockpit (observability + authenticated manual controls)</td></tr>
+    <tr><td class="tag">QE-305</td><td>Monitoring / alerting SLAs + on-call</td></tr>
+    <tr><td class="tag">QE-306</td><td>Incident runbooks (pre-go-live)</td></tr>
+    <tr><td class="tag">QE-307</td><td>Single-venue concentration cap + outage/withdrawal-halt runbook</td></tr>
+    <tr><td class="tag">QE-308</td><td>GATE G3: Go/No-Go to live capital</td></tr>
+    <tr><td class="tag">QE-309</td><td>Staged capital ramp with enforced caps</td></tr>
+    <tr><td class="tag">QE-310</td><td>Live-deployment hardening + breaker re-calibration</td></tr>
+    <tr><td class="tag">QE-311</td><td>Railway deployment &amp; CD <span class="muted">(deferred)</span></td></tr>
+  </table>
+
+  <!-- ============================================================= -->
+  <h2 class="section" id="future">8 · What's left to do</h2>
+
+  <h3>Immediate — finish the cold-start → live cutover</h3>
+  <ol>
+    <li><strong><span class="tag">QE-210</span> Reconstructed state</strong> — wrap the warmed
+      <code>EvaluatorSession</code> the bootstrap returns into the object the cutover consumes.</li>
+    <li><strong><span class="tag">QE-211</span> Bootstrap→live cutover</strong> — flip the session to live
+      in-process with no state copy (the evaluator already supports this; needs the orchestration).</li>
+    <li><strong><span class="tag">QE-208</span> Mark EMA loop</strong> — the 1-second mark/funding tick observer
+      feeding the risk layer.</li>
+    <li><strong><span class="tag">QE-219</span> Vintage load + rollover</strong> — read a sealed vintage from
+      disk into the runtime and support hot rollover. <em>This is also the missing piece that lets a real
+      <code>HistoricalSource</code> be assembled</em> (the Binance JSON decoders the bootstrap deliberately
+      kept injectable).</li>
+  </ol>
+
+  <h3>The risk &amp; order path (no live trading exists until this lands)</h3>
+  <p><span class="tag">QE-212–218</span>: circuit-breaker layer, position netting, the Hedge Planner
+  (target-position model), pre-trade risk checks, the out-of-band kill switch at the venue adapter, and the
+  venue adapter / position keeper / order lifecycle <em>plus a simulator</em>. Today the order port is an
+  interface only; these tickets give it a body.</p>
+
+  <h3>Reach G2, then Phase 3</h3>
+  <ul>
+    <li><strong><span class="tag">QE-220/221</span></strong> bootstrap/restart parity test + real-time
+      reconciliation divergence alarm, then <strong><span class="tag">QE-222 (G2)</span></strong>: the whole loop
+      running in shadow/dry-run against live data, reconciled against the simulator, with no orders sent.</li>
+    <li><strong>Phase 3</strong>: allocation journal, reconciliation, attribution, the operator cockpit,
+      alerting SLAs, incident runbooks, concentration caps — culminating in
+      <strong><span class="tag">QE-308 (G3)</span></strong> independent go/no-go and a staged, capped capital ramp.</li>
+  </ul>
+
+  <h3>Cross-cutting gaps a maintainer should pick up</h3>
+  <ul>
+    <li><strong>Wire the libraries into runnable commands.</strong> The largest gap between perception and
+      reality: <code>qe-cli train</code> writes a manifest but does not yet run ingest → search → ensemble → G1.
+      A real <code>train</code> / <code>backtest</code> / <code>bootstrap</code> subcommand surface is needed to
+      make the (already tested) pipeline observable end-to-end.</li>
+    <li><strong>Add the missing <code>Dockerfile</code></strong> the README promises (deployment-agnostic
+      packaging, QE-013's intent), or correct the README.</li>
+    <li><strong>Deferred analytics:</strong> Parquet export + DuckDB (<span class="tag">QE-135</span>) and the
+      signal viewer (<span class="tag">QE-136</span>) for inspecting features/strategies.</li>
+    <li><strong>Bookkeeping fragility noted in review:</strong> the live PR-review scratchpad
+      (<code>docs/mds/work.md</code>) is uncommitted and can be lost on a post-merge reset; archive records to
+      <code>docs/mds/reviewed/&lt;ticket&gt;.md</code> promptly (already the convention going forward).</li>
+  </ul>
+
+  <h3>For someone evaluating this to invest</h3>
+  <div class="callout danger">
+    <p style="margin-top:0"><strong>This system cannot trade today and is not near it.</strong> There is no live
+    order path, no broker integration, and the training pipeline is not yet runnable end-to-end from the CLI.
+    Phase 2 must complete through the <strong>G2 dry-run gate</strong>, and Phase 3 through the independent
+    <strong>G3 go/no-go</strong> with a staged, capped capital ramp, before any real capital is involved.</p>
+    <p style="margin-bottom:0">What <em>is</em> strong and verifiable: a disciplined, deterministic,
+    information-firewalled design with deep test coverage, a friction-true backtest (fees + real funding +
+    slippage so no strategy is ranked on returns that won't exist live), and statistical over-fit gates
+    (deflated Sharpe, SPA) baked into the validation milestone. The engineering rigour is real; the product is
+    mid-build.</p>
+  </div>
+
+  <div class="foot">
+    Generated from the repository on 2026-06-27. Source of truth: <code>docs/backlog.md</code> (roadmap),
+    <code>docs/mds/reviewed/</code> (completed-ticket records), <code>crates/*/Cargo.toml</code> (dependency
+    graph), and <code>crates/cli/src/</code> (runnable surface). Test baseline: 483 tests across 56 suites,
+    green; firewall + decoupling guards green. Re-verify against the code before relying on any single claim.
+  </div>
+</main>
+</div>
+</body>
+</html>
