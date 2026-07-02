@@ -59,7 +59,13 @@ pub struct ShadowRun { shadow: ShadowGateway, reference: PlannerAdapterLink,
 
 - `new(mark, tolerance)` — a flat shadow gateway + a fresh submitting `PlannerAdapterLink` (the sim
   expectation) + a `ReconciliationGuard(tolerance, AlarmOnly, …)`.
-- `observe_mark(mark)` — feeds **both** the shadow and the reference keeper the same mark (venue truth).
+- `observe_mark(mark)` — the **aligned** case: feeds both the shadow and the reference keeper the same mark
+  (the live pipeline's mark equals venue truth). Shorthand for `observe_marks(mark, mark)`.
+- `observe_marks(shadow_mark, reference_mark)` — feeds the shadow edge (the **live pipeline under test**) and
+  the reference keeper (**venue truth**) marks **independently**. When they differ (a mark-EMA drift, a
+  stitched/duplicated bar, a stale tick), the shadow sizes its would-be orders differently from the simulator
+  and the next `observe` **diverges** — so the gate's **red state is reachable through its own API**, not only
+  via a hand-wired guard. This is the seam that makes `reconciled` a real gate signal.
 - `observe(&mut self, rev)` — drives the revision through **both** paths: the shadow logs a would-be order and
   advances its shadow position; the reference `submit_target(rev)` + `pump()` fills the sim and advances the
   keeper. Then it **reconciles** the shadow position against the sim position via the guard, tracking whether
@@ -68,10 +74,11 @@ pub struct ShadowRun { shadow: ShadowGateway, reference: PlannerAdapterLink,
   was within tolerance; `sim_position` proves the reference actually traded (so a vacuous "both flat" pass is
   ruled out).
 
-Because both paths derive the order from the same `plan_delta` over the same targets and mark, they agree
-exactly in the happy path (divergence `0`); the value of the gate is that **any** pipeline discrepancy
-(mark-EMA drift, netting error, a stitched/duplicated bar, a cutover gap) makes the shadow position diverge
-from the simulator and the guard reports it — which is exactly what the gate must catch before live capital.
+Because both paths derive the order from the same `plan_delta`, they agree exactly when fed the same inputs
+(happy path, divergence `0`); the gate's value is that when the shadow's **inputs** diverge from the
+reference's — via `observe_marks`, modelling a mark-EMA drift / stitch / stale tick — the shadow position
+diverges from the simulator and the run reports it. `reconciled` is a **run-level latch**: once any step
+diverges the run stays red (a transient fault is not forgotten), and `max_divergence` retains the peak.
 
 ## Test plan (deterministic, TDD)
 
@@ -85,10 +92,14 @@ from the simulator and the guard reports it — which is exactly what the gate m
    simulator's fill side/qty (the logged orders are exactly what would have been sent).
 3. `at_target_revision_logs_no_would_be_order` — a revision already at the shadow's position produces no
    would-be order and no sim order.
-4. `reconciliation_catches_a_pipeline_divergence` — feed the shadow a **stale mark** while the reference sees
-   the fresh one (a mark-EMA/stitch bug proxy) for the same target: the shadow and sim positions diverge and
-   the `ReconciliationGuard` flags it (`reconciled == false`, `max_divergence > tolerance`, `alarms ≥ 1`) —
-   proving the gate genuinely bites, not just that the happy path agrees.
+4. `gate_reports_a_mark_pipeline_divergence_through_shadow_run` (**the gate bites — review F1**) — drive
+   `ShadowRun` with `observe_marks(shadow 40 000, reference 50 000)` (a mark-EMA/stale-tick fault) then a
+   `+10 000` target: the shadow sizes `0.25`, the simulator `0.20`, and `report.reconciled == false`,
+   `max_divergence == 0.05 > tolerance`, with `orders_submitted == 0` even on the fail path. The red state is
+   reached **through the gate's own API**, not a hand-wired guard — so `reconciled` is a real gate signal.
+5. `a_divergence_latches_the_run_red` — after a diverged step, a later re-converging step leaves
+   `report.reconciled == false` and `max_divergence` at its peak: one bad step condemns the run (a transient
+   fault is not forgotten).
 
 ## Gates
 
@@ -101,9 +112,19 @@ from the simulator and the guard reports it — which is exactly what the gate m
 - **No real submission — structural.** `ShadowGateway` has no submit path at all (`orders_submitted()` is a
   literal `0`); the gate asserts it, so "no orders are submitted" is guaranteed by construction, not by a flag
   that could be forgotten.
-- **Happy-path agreement is exact, so the bite must be proven separately.** Both paths share `plan_delta`, so a
-  passing reconcile alone could be vacuous; test 4 injects a real divergence (stale mark) to prove the
-  reconciliation catches a pipeline bug, and test 1 asserts the reference actually traded.
+- **The gate's red state must be reachable through its own API (review F1).** Both paths share `plan_delta`,
+  so when fed identical inputs the reconcile is exact — a passing reconcile alone is vacuous. The fault is
+  injected **through `ShadowRun`** via `observe_marks` (the shadow's mark pipeline drifts from venue truth), so
+  `report.reconciled` can genuinely be `false` and is tested red end-to-end
+  (`gate_reports_a_mark_pipeline_divergence_through_shadow_run`) — not merely via a hand-wired guard.
+  `reconciled` is a run-level latch (`a_divergence_latches_the_run_red`), and test 1 asserts the reference
+  actually traded (a non-vacuous green).
+- **The reconciliation oracle shares `plan_delta` with the code under test (review F2) — a known blind spot.**
+  Both the shadow and the reference size via the same `plan_delta`, so a bug **inside** `plan_delta` (or the
+  notional→contracts sizing) corrupts both sides identically and still reconciles at delta `0`; this gate
+  cannot catch it. That is a deliberate scope boundary — the gate targets **input-pipeline** divergences
+  (mark-EMA / stitch / netting / cutover), and `plan_delta` has its own QE-217 tests — but it is documented
+  here as a limitation so it is not mistaken for full end-to-end coverage.
 - **`AlarmOnly` for the gate.** A dry-run *reports* divergences; it must not halt (there is nothing live to
   halt). The QE-221 auto-halt (`HaltAfter`) belongs to the live path, not the shadow gate. Documented.
 - **Determinism.** Single-threaded, pull-based; synthetic target/mark stream, no clocks/sockets/RNG. The real

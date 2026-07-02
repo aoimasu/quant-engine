@@ -143,10 +143,20 @@ impl ShadowRun {
         }
     }
 
-    /// Feed the latest mark to **both** the shadow edge and the reference keeper (venue truth).
+    /// Feed the latest mark to **both** the shadow edge and the reference keeper — the aligned case, where the
+    /// live pipeline's mark equals venue truth. Shorthand for `observe_marks(mark, mark)`.
     pub fn observe_mark(&mut self, mark: Price) {
-        self.shadow.observe_mark(mark);
-        self.reference.observe_mark(mark);
+        self.observe_marks(mark, mark);
+    }
+
+    /// Feed the shadow edge (`shadow_mark`, as the **live pipeline under test** computes it) and the reference
+    /// keeper (`reference_mark`, **venue truth**) marks **independently**. When the two differ — a mark-EMA
+    /// drift, a stitched/duplicated bar, a stale tick — the shadow sizes its would-be orders differently from
+    /// the simulator, and a subsequent [`observe`](Self::observe) diverges: exactly the pipeline fault this
+    /// gate exists to catch, reachable through the gate's own API. `observe_mark` is the aligned shorthand.
+    pub fn observe_marks(&mut self, shadow_mark: Price, reference_mark: Price) {
+        self.shadow.observe_mark(shadow_mark);
+        self.reference.observe_mark(reference_mark);
     }
 
     /// Drive one target revision through both paths and reconcile: the shadow logs a would-be order and
@@ -307,37 +317,63 @@ mod tests {
         assert_eq!(shadow.orders_submitted(), 0);
     }
 
-    /// The gate bites: a pipeline discrepancy (the shadow sees a stale mark, the reference the fresh one)
-    /// makes the shadow position diverge from the simulator, and the reconciliation flags it.
+    /// The gate's **red state is reachable through its own API** and reports a real pipeline divergence: when
+    /// the shadow's mark pipeline (live-data-derived) drifts from venue truth, the shadow sizes its would-be
+    /// order differently from the simulator and `ShadowRun` reports `reconciled == false`. This is the fault
+    /// the capital-blocking gate exists to catch — driven end-to-end through `ShadowRun`, not a hand-wired guard.
     #[test]
-    fn reconciliation_catches_a_pipeline_divergence() {
-        // Shadow prices the same +10 000 target at a stale mark (40 000 → 0.25), the reference at 50 000 → 0.2.
-        let mut shadow = ShadowGateway::new(price("40000"));
-        let mut keeper = VenueKeeper::new(instrument(), Notional::new(dec("1000000")));
-        keeper.observe_mark(price("50000"));
-        let mut link = PlannerAdapterLink::new(
-            keeper,
-            VenueKillGate::new(KillHandle::new(), VenueSimulator::new(instrument())),
+    fn gate_reports_a_mark_pipeline_divergence_through_shadow_run() {
+        let mut run = ShadowRun::new(instrument(), price("50000"), dec("0.0001"));
+        // The shadow's mark pipeline drifts to 40 000 (a mark-EMA / stale-tick bug) while venue truth is 50 000.
+        run.observe_marks(price("40000"), price("50000"));
+        run.observe(&rev(0, "10000", 1));
+
+        let report = run.report();
+        // shadow: 10000 / 40000 = 0.25; simulator: 10000 / 50000 = 0.20.
+        assert!(
+            !report.reconciled,
+            "the gate must report the mark-pipeline divergence"
         );
-        link.observe_mark(price("50000"));
-        let mut guard =
-            ReconciliationGuard::new(dec("0.0001"), AlarmAction::AlarmOnly, KillHandle::new());
+        assert_eq!(report.max_divergence, dec("0.05"), "0.25 vs 0.20");
+        assert!(
+            report.max_divergence > dec("0.0001"),
+            "the divergence exceeds tolerance"
+        );
+        assert_eq!(report.shadow_position, dec("0.25"));
+        assert_eq!(report.sim_position, dec("0.2"));
+        // Even on the fail path, the dry-run edge still submits nothing.
+        assert_eq!(report.orders_submitted, 0);
+    }
 
-        let target = rev(0, "10000", 1);
-        shadow.observe(&target);
-        link.submit_target(target).unwrap();
-        link.pump();
+    /// `reconciled` is a **run-level latch**: once any step diverges, the run is flagged red for the whole run
+    /// even if a later step re-converges. A transient fault must not be forgotten by the gate — a go/no-go
+    /// reviewer reads a single verdict for the period, so one bad step condemns the run.
+    #[test]
+    fn a_divergence_latches_the_run_red() {
+        let mut run = ShadowRun::new(instrument(), price("50000"), dec("0.0001"));
+        run.observe_marks(price("40000"), price("50000"));
+        run.observe(&rev(0, "10000", 1)); // diverge: shadow 0.25 vs sim 0.20
 
-        let shadow_q = shadow.shadow_position(); // 10000 / 40000 = 0.25
-        let sim_q = link.keeper().signed_qty(); // 10000 / 50000 = 0.20
-        assert_ne!(shadow_q, sim_q, "the stale mark makes the sizings differ");
+        // The mark realigns and the next rebalance re-converges both to 0.20 — a *reconciled* step …
+        run.observe_mark(price("50000"));
+        run.observe(&rev(1, "10000", 2));
 
-        match guard.check_qty(shadow_q, sim_q) {
-            ReconOutcome::Diverged(d) => {
-                assert_eq!(d.delta, dec("0.05"), "0.25 vs 0.20");
-            }
-            other => panic!("the gate must catch this divergence, got {other:?}"),
-        }
-        assert_eq!(guard.alarms(), 1, "the reconciliation raised an alarm");
+        // … yet the run stays red: the earlier divergence is latched, and max_divergence holds its peak.
+        let report = run.report();
+        assert!(
+            !report.reconciled,
+            "one diverged step latches the whole run red"
+        );
+        assert_eq!(
+            report.max_divergence,
+            dec("0.05"),
+            "the peak divergence is retained"
+        );
+        assert_eq!(
+            report.shadow_position,
+            dec("0.2"),
+            "positions did re-converge"
+        );
+        assert_eq!(report.sim_position, dec("0.2"));
     }
 }
