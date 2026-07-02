@@ -162,6 +162,15 @@ impl ReconstructedState {
         let mut traded = vec![false; positions.len()];
         for output in decisions {
             for cd in &output.decisions {
+                // Indices align with `positions` by construction (same session). A misaligned trace would
+                // silently under-count trades (mis-marking a strategy dormant), so surface it in tests; the
+                // `get_mut` below still bounds-checks in release.
+                debug_assert!(
+                    cd.index < positions.len(),
+                    "decision index {} out of range for {} strategies",
+                    cd.index,
+                    positions.len()
+                );
                 if matches!(cd.decision, Decision::Enter(_)) {
                     if let Some(flag) = traded.get_mut(cd.index) {
                         *flag = true;

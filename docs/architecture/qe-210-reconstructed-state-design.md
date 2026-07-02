@@ -71,10 +71,14 @@ pub struct StrategyState { pub index: usize, pub position: PositionState,
 pub struct ReconstructedState { pub strategies: Vec<StrategyState> }
 ```
 
-Builder `ReconstructedState::from_replay(reconstructed: &Reconstructed, equity_paths: &[Vec<Decimal>])`:
+Builder `ReconstructedState::from_replay(positions: &[PositionState], decisions: &[EvalOutput],
+equity_paths: &[Vec<Decimal>])` — takes the replay outputs as **decomposed borrows** (rather than a whole
+`&Reconstructed`) so it is decoupled from the QE-209 `Reconstructed`/`EvaluatorSession` and directly
+unit-testable; the caller (QE-211) destructures `Reconstructed` itself, e.g.
+`from_replay(recon.session.positions(), &recon.decisions, &equity_paths)`:
 - **positions** ← the session's final `positions()` (new read-only accessor on `EvaluatorSession`),
-- **dormancy** ← per chromosome, `dormant` iff no `EvalOutput` carries an `Enter` for that index (derived
-  from `reconstructed.decisions`),
+- **dormancy** ← per chromosome, `dormant` iff no `EvalOutput` in `decisions` carries an `Enter` for that
+  index,
 - **committed_peak_equity** ← `CommittedPeak::from_series(equity_paths[i]).peak()`.
 
 **Equity-path boundary (documented scope decision).** The per-strategy equity *series* is an **input** to
