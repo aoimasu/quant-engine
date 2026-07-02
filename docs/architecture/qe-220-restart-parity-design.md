@@ -56,9 +56,13 @@ guards), the independent true-max reference would diverge and the test would fai
 - **Two strategies:** index 0 a `cycling_genome` (entry clause spans `[0, num_states-1]` → fires → **trades**,
   ending non-flat), index 1 an **all-off** genome (never fires → **dormant**). So the dormancy field exercises
   *both* branches and positions differ from flat.
-- **Equity paths that rise then fall** (peak in the interior, e.g. `[100, 150, 120]`), so the committed peak is
-  an **early** value the final sample is below — a trailing-window max would get this wrong. The test asserts
-  the peak equals the true interior max, not the declining tail.
+- **Equity paths whose true peak is the *first* sample, followed by a long monotonic decline** (`peak` at
+  index 0, then `peak − 2·k` for `EQUITY_LEN = 20` samples — e.g. strategy 0 `150 → 112`). The length is
+  **deliberately longer than any plausible breaker drawdown window**: with the peak at index 0, a trailing
+  window of *any* size short of the full path excludes it and computes a smaller max — so a realistically
+  sized windowed regression of `from_replay` diverges from the plain-max reference and fails parity. (An
+  interior-peak short path such as `[100, 150, 120]` would only catch the degenerate `window == 1` case, not a
+  real window — this is the QE-220 review's F1 fix.)
 - Feed a deterministic bar series (the QE-209 fixture shape) to one `EvaluatorSession`, collect the
   `EvalOutput` trace + final positions, and use the same synthetic per-strategy equity paths for both
   derivations.
@@ -67,9 +71,11 @@ guards), the independent true-max reference would diverge and the test would fai
 
 1. **`assert_eq!(continuous, reconstructed)`** — the headline AC: bit-for-bit on every `StrategyState`
    (`index`, `position`, `dormancy`, `committed_peak_equity`).
-2. **Committed peak is the true all-time max** — `reconstructed.strategies[0].committed_peak_equity ==
-   Some(true_interior_max)` and strictly greater than the final equity sample (guards the trailing-window
-   regression directly).
+2. **Committed peak is the true all-time max (index 0), and the path defeats a windowed regression** —
+   `reconstructed.strategies[0].committed_peak_equity == Some(150)` (the first sample), strictly greater than
+   the final sample; plus an explicit loop asserting that a trailing window of *every* size `1..EQUITY_LEN`
+   has a max strictly below `150`, proving a windowed `from_replay` regression of any realistic size would
+   diverge from the plain-max reference.
 3. **Dormancy is non-trivial** — strategy 0 `active` (it traded), strategy 1 `dormant` (it never did); and
    strategy 0's final position is non-flat (it really entered), so the trace is genuine.
 4. **Equity-path/position count mismatch is rejected** — `from_replay` with a wrong `equity_paths.len()`

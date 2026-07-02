@@ -132,12 +132,27 @@ fn replay(n: i64) -> (Vec<EvalOutput>, Vec<PositionState>) {
     (outputs, session.positions().to_vec())
 }
 
-/// Rise-then-fall per-strategy equity paths: the true peak is an **interior** value the final sample is below,
-/// so a trailing-window max would get it wrong.
+/// The number of samples in each equity path. Deliberately **longer than any plausible breaker drawdown
+/// window** so the guard below actually bites: with the true peak at index 0 (below), a trailing window of
+/// *any* size short of the full path excludes the peak and would compute a smaller max than the true all-time
+/// maximum — diverging from the independent plain-max reference. A short interior-peak path (e.g. length 3,
+/// peak at index 1) would only catch the degenerate `window == 1` case, not a realistically sized window.
+const EQUITY_LEN: usize = 20;
+
+/// A peak-first, monotonically-declining equity path: `peak` at index 0, then `peak - drop*k`. The true
+/// all-time max is the index-0 value, which every trailing window short of the full length misses.
+fn declining_from(peak: i64, drop: i64) -> Vec<Decimal> {
+    (0..EQUITY_LEN)
+        .map(|k| dec(peak - drop * k as i64))
+        .collect()
+}
+
+/// Per-strategy equity paths whose true peak is the **first** sample, followed by a long decline — so a
+/// trailing-window max of any window shorter than the path diverges from the true all-time max.
 fn equity_paths() -> Vec<Vec<Decimal>> {
     vec![
-        vec![dec(100), dec(150), dec(120)], // strategy 0: peak 150, ends at 120
-        vec![dec(100), dec(130), dec(90)],  // strategy 1: peak 130, ends at 90
+        declining_from(150, 2), // strategy 0: peak 150 at index 0, declines to 150 - 2*19 = 112
+        declining_from(130, 2), // strategy 1: peak 130 at index 0, declines to 130 - 2*19 = 92
     ]
 }
 
@@ -194,25 +209,43 @@ fn reconstructed_state_matches_continuous_bit_for_bit() {
     );
 }
 
-/// The capital-risk guard: the committed peak is the true all-time max, not the declining tail — in **both**
-/// derivations.
+/// The capital-risk guard: the committed peak is the true all-time max (the index-0 value), not any trailing
+/// window of the declining tail — and the path is built so *any* window short of the full length would
+/// diverge, so the guard actually bites for a realistically sized breaker window (not just `window == 1`).
 #[test]
 fn committed_peak_is_true_all_time_max_not_trailing() {
     let (outputs, positions) = replay(40);
     let paths = equity_paths();
     let reconstructed = ReconstructedState::from_replay(&positions, &outputs, &paths).unwrap();
 
-    // Strategy 0's path peaks at 150 mid-series and ends at 120; the peak must be 150, above the final sample.
+    // Strategy 0's path peaks at 150 at index 0, then declines monotonically; the peak must be that 150.
     let s0 = &reconstructed.strategies[0];
     assert_eq!(s0.committed_peak_equity, Some(dec(150)));
+    assert_eq!(paths[0][0], dec(150), "the true peak is the first sample");
     assert!(
         s0.committed_peak_equity.unwrap() > *paths[0].last().unwrap(),
-        "an early peak must survive a later decline (a trailing window would lose it)"
+        "the index-0 peak must survive the whole decline (a trailing window would lose it)"
     );
     assert_eq!(
         reconstructed.strategies[1].committed_peak_equity,
         Some(dec(130))
     );
+
+    // Prove the path genuinely defeats a windowed regression: a trailing window of *any* size short of the
+    // full length excludes the index-0 peak, so its max is strictly below the true all-time max. This is what
+    // makes the parity check bite for a realistically sized breaker window, not only the degenerate window==1.
+    for window in 1..EQUITY_LEN {
+        let trailing_max = paths[0][EQUITY_LEN - window..]
+            .iter()
+            .copied()
+            .max()
+            .unwrap();
+        assert!(
+            trailing_max < dec(150),
+            "a trailing window of {window} would report {trailing_max}, below the true peak 150 — so a \
+             windowed regression of from_replay would diverge from the plain-max reference and fail parity"
+        );
+    }
 }
 
 /// Dormancy latches agree for a traded strategy (active, non-flat) and an untraded one (dormant).
