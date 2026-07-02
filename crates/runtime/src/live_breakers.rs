@@ -48,6 +48,8 @@ pub struct BreakerLayer {
     ensemble: CircuitBreaker,
     /// Latched per-strategy gating.
     strategy_gated: Vec<bool>,
+    /// Permanent per-strategy fail-safe (uncalibrated strategies) — re-applied after every `reset`.
+    pre_gated: Vec<bool>,
     /// Latched ensemble gating.
     ensemble_gated: bool,
 }
@@ -78,6 +80,7 @@ impl BreakerLayer {
             strategy,
             ensemble,
             strategy_gated: vec![false; n],
+            pre_gated: vec![false; n],
             ensemble_gated: false,
         }
     }
@@ -85,7 +88,8 @@ impl BreakerLayer {
     /// Build a layer from a per-vintage [`CalibrationProfile`], mapping strategy `i` to
     /// `profile.per_strategy[strategy_ids[i]]`. A strategy **missing** from the profile is **explicitly
     /// pre-gated** (fail-safe: an uncalibrated strategy is never traded) — the gate does not depend on the
-    /// breaker's tier thresholds, so a future threshold-logic change cannot silently un-protect it. Its
+    /// breaker's tier thresholds, so a future threshold-logic change cannot silently un-protect it, and it
+    /// is **re-applied by [`reset`](Self::reset)** so a session rollover cannot briefly un-protect it. Its
     /// breaker is also given a fires-immediately threshold as defence in depth. The ensemble breaker uses
     /// `profile.ensemble_fast_drop`.
     #[must_use]
@@ -106,8 +110,10 @@ impl BreakerLayer {
             }
         }
         let mut layer = Self::new(per_strategy, profile.ensemble_fast_drop, fast_window);
-        // Explicit fail-safe: gate uncalibrated strategies from the start, independent of any breaker trip.
+        // Explicit fail-safe: gate uncalibrated strategies from the start, independent of any breaker trip,
+        // and record them in `pre_gated` so `reset` re-applies the gate on every rollover.
         for i in uncalibrated {
+            layer.pre_gated[i] = true;
             layer.strategy_gated[i] = true;
         }
         layer
@@ -169,14 +175,15 @@ impl BreakerLayer {
             .collect()
     }
 
-    /// Clear all gating and re-arm every breaker (new vintage / session rollover).
+    /// Clear all *tripped* gating and re-arm every breaker (new vintage / session rollover). The permanent
+    /// uncalibrated fail-safe is **re-applied**, so a reset never un-protects an uncalibrated strategy.
     pub fn reset(&mut self) {
         for b in &mut self.strategy {
             b.reset();
         }
         self.ensemble.reset();
-        for g in &mut self.strategy_gated {
-            *g = false;
+        for (g, &pre) in self.strategy_gated.iter_mut().zip(&self.pre_gated) {
+            *g = pre;
         }
         self.ensemble_gated = false;
     }
@@ -343,5 +350,31 @@ mod tests {
         assert!(!layer.is_gated(0) && !layer.ensemble_gated());
         // Re-armed: a flat first tick does not fire.
         assert!(layer.observe_strategy(0, dec(100)).is_none());
+    }
+
+    /// `reset` re-applies the uncalibrated fail-safe: an uncalibrated strategy stays gated across a reset,
+    /// while a tripped-but-calibrated strategy is un-gated.
+    #[test]
+    fn reset_reapplies_uncalibrated_fail_safe() {
+        let mut profile = CalibrationProfile::new(frac("0.10"));
+        profile.per_strategy.insert("s0".to_owned(), thresholds());
+        // "s1" is uncalibrated → permanently pre-gated.
+        let ids = vec!["s0".to_owned(), "s1".to_owned()];
+        let mut layer = BreakerLayer::from_calibration(&profile, &ids, DEFAULT_FAST_WINDOW);
+
+        // Trip the calibrated strategy too.
+        layer.observe_strategy(0, dec(100));
+        layer.observe_strategy(0, dec(50));
+        assert!(layer.is_gated(0) && layer.is_gated(1));
+
+        layer.reset();
+        assert!(
+            !layer.is_gated(0),
+            "a calibrated strategy's trip clears on reset"
+        );
+        assert!(
+            layer.is_gated(1),
+            "an uncalibrated strategy stays gated across a reset (fail-safe re-applied)"
+        );
     }
 }
