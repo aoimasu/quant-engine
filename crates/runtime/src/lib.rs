@@ -32,10 +32,15 @@
 //! QE-215 adds the pre-trade governor ([`pretrade`]): it enforces the QE-009 [`RiskLimits`](qe_risk::RiskLimits)
 //! on a [`TargetPosition`] before it is sent — clamping (max notional/leverage), rejecting (gross/net,
 //! liquidation-distance floor, margin ceiling), or halting by outcome severity.
+//! QE-217 adds the edge gateway ([`edge`]): [`plan_delta`] translates an absolute target into a venue-native
+//! order delta vs the kept position, [`VenueKeeper`] absorbs the QE-204 user-data feed as authoritative
+//! position/account state (`impl`s the [`PositionKeeper`](hedger::PositionKeeper) seam), and [`VenueSimulator`]
+//! runs the full loop in-memory with no real orders.
 
 pub mod boot_state;
 pub mod bootstrap;
 pub mod cutover;
+pub mod edge;
 pub mod evaluator;
 pub mod factor_join;
 pub mod hedger;
@@ -53,6 +58,7 @@ pub use bootstrap::{
     HistoricalWindow, Reconstructed,
 };
 pub use cutover::{Cutover, CutoverError, CutoverStep};
+pub use edge::{plan_delta, Order, OrderIntent, OrderState, SimFill, VenueKeeper, VenueSimulator};
 pub use evaluator::{ChromosomeDecision, EvalOutput, EvaluatorSession, SessionMode};
 pub use factor_join::LiveFactorJoin;
 pub use hedger::{CapitalView, HedgePlanner, PositionKeeper, TargetPosition};
