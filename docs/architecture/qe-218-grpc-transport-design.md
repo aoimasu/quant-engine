@@ -97,14 +97,22 @@ append: A, append_failures: u64, dropped_superseded: u64,
   applies it to the edge, records it as `last_applied`, offers the reports to the append sink, and returns
   the reports. Applying a revision:
   1. `plan_delta(rev.target.notional, keeper.signed_qty(), keeper.mark())` → an optional delta order.
-  2. If `Some(intent)`: `gate.submit(intent, keeper.mark(), rev.event_time_ms)`:
-     - `Ok(fill)` → `keeper.apply(&fill.event)`; push `AdapterReport::Fill`; health `Ok`.
-     - `Err(KillHalt)` → **no fill** (submission halted); health `Down(reason)` (QE-216 kill on the wire).
+  2. If `Some(intent)`: `gate.submit(intent, keeper.mark(), rev.event_time_ms)` — `Ok(fill)` →
+     `keeper.apply(&fill.event)` + push `AdapterReport::Fill`; `Err(KillHalt)` → **no fill** (submission
+     halted). A zero delta submits nothing.
   3. Always push an authoritative `Position` report (`simulator().position_report(t)`) and a `Heartbeat`
-     (`ack_seq = Some(rev.seq)`, the resulting health).
+     (`ack_seq = Some(rev.seq)`, `health`).
+  - **Health is derived from the kill state directly** — `Down(kill_reason())` iff `gate.kill().is_tripped()`,
+    else `Ok` — **not** from whether a delta happened to be submitted this tick. A tripped kill therefore
+    reports `Down` even for an at-target (zero-delta) revision, so the out-of-band halt stays visible to the
+    planner in steady state (it re-sends the same absolute target it already reached). `kill_reason()` reuses
+    the QE-009 `OrderGate` fallback so the heartbeat reason matches `KillHalt.reason`.
 - **`disconnect()` / `reconnect() -> Vec<AdapterReport>`** — see D5.
-- Accessors: `keeper()`, `simulator()`, `kill()`, `latest_target()`, `append_failures()`,
-  `dropped_superseded()`, `is_connected()`.
+- Accessors: `keeper()`, `kill()`, `latest_target()`, `orders_submitted()`, `append_failures()`,
+  `dropped_superseded()`, `is_connected()`. **Mutation is narrow:** `observe_mark(Price)` /
+  `observe_balance(equity, avail)` forward mark/balance (venue truth) to the keeper — there is **no**
+  `keeper_mut()`, so no caller can move the kept **position** without a venue fill/report and desync the
+  keeper from the simulator (the invariant D5 relies on).
 
 ### D4 — backpressure = coalesce-to-latest (correct *because* targets are absolute)
 
@@ -117,8 +125,12 @@ coalescing observable. (A delta stream could not do this; absoluteness is what b
 ### D5 — reconnection = re-snapshot + re-send latest (idempotent, no double-fill)
 
 - While `connected == false`, `submit_target` returns `Err(Disconnected)` and `pump` is inert.
-- `reconnect()` sets `connected`, and returns an **authoritative `Position` snapshot** (venue truth from the
-  simulator) — re-establishing position truth exactly as QE-204/217 do on a user-data reconnect.
+- `reconnect()` sets `connected`, takes an **authoritative `Position` snapshot** (venue truth from the
+  simulator), **reconciles it into the keeper** (`keeper.apply(Position(report))` — QE-217 D3: a position
+  report authoritatively sets the kept position), and returns it. Reconciling is what makes the snapshot the
+  planner receives and the position `plan_delta` re-plans against **one single truth**, not two
+  coincidentally-equal values — so if the sim and keeper ever diverged, the reconnect corrects the keeper to
+  venue truth before resume (exactly the QE-204/217 user-data reconnect semantics).
 - The planner then **re-sends its latest absolute target** (`latest_target()`), which the caller feeds back
   through `submit_target`. On the next `pump`, `plan_delta` compares that target against the **already-updated
   kept position** → the delta is `0` → **no duplicate order**. Absoluteness + keeper-as-truth make resume
@@ -141,8 +153,11 @@ coalescing observable. (A delta stream could not do this; absoluteness is what b
 5. `kill_tripped_dispatch_halts_submission_on_the_wire` — trip `link.kill()`; submit a target; `pump`
    → **no `Fill`**, `Heartbeat` health `Down`, `orders_submitted` unchanged (QE-216 honoured through the
    transport).
-6. `heartbeat_acks_applied_revision_and_reports_health` — a pump acks the applied `seq` and reports `Ok`
-   health on a clean fill; a `pump` with nothing pending returns empty (no spurious traffic).
+6. `at_target_revision_reports_down_while_killed` (**F1 regression**) — reach a target, trip the kill, re-send
+   the **same** at-target revision (zero delta → no submit): the heartbeat is still `Down`, not `Ok`, so the
+   out-of-band halt stays visible in steady state.
+7. `idle_pump_is_silent_and_at_target_revision_acks_without_a_fill` — a `pump` with nothing pending returns
+   empty; an at-target revision (kill live) acks with `Ok` health and no fill.
 
 ## Gates
 
@@ -159,7 +174,13 @@ coalescing observable. (A delta stream could not do this; absoluteness is what b
   `TargetPosition`; the design note flags that a delta stream could not coalesce this way. `dropped_superseded`
   is observable, never silent.
 - **Reconnection idempotence rests on keeper-as-truth.** Re-sending the latest absolute target is safe only
-  because `plan_delta` reads the authoritative kept position (never inferred). Covered by test 4.
+  because `plan_delta` reads the authoritative kept position (never inferred). `reconnect` **reconciles** the
+  keeper to the venue snapshot it returns (single truth, not coincidental agreement), and mutation of the
+  keeper is narrowed to `observe_mark`/`observe_balance` (no `keeper_mut`), so nothing can move the kept
+  position off the venue truth. Covered by test 4.
+- **Venue health tracks submission state, not delta activity.** Heartbeat health is derived from the kill
+  directly, so a tripped kill reads `Down` even when there is no delta to submit — the halt cannot hide behind
+  a steady-state at-target loop. Covered by test 6.
 - **Append decoupling is structural, not timing-based.** We prove non-gating by construction (the return value
   is produced before and independent of `append`), not by a race — so it holds under any real async journal.
 - **Firewall.** No new crate edge; `qe-runtime` already depends on `qe-venue`/`qe-risk`/`qe-domain`. QE-132

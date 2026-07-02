@@ -15,12 +15,13 @@
 //!   latest absolute target after a reconnect is exactly idempotent — `plan_delta` against the authoritative
 //!   kept position yields a zero delta, so the position is never doubled.
 
-use qe_venue::userdata::PositionReport;
+use qe_domain::{Notional, Price};
+use qe_venue::userdata::{PositionReport, UserDataEvent};
 
 use crate::edge::{plan_delta, SimFill, VenueKeeper};
 use crate::hedger::TargetPosition;
 use crate::kill_gate::VenueKillGate;
-use qe_risk::KillHandle;
+use qe_risk::{KillHandle, KillSwitch, OrderGate};
 
 /// A monotonic, **absolute** target revision the planner emits over the transport. A later [`seq`](Self::seq)
 /// supersedes an earlier one; the mark is not carried (it is venue truth held by the [`VenueKeeper`]).
@@ -149,10 +150,17 @@ impl<A: AppendSink> PlannerAdapterLink<A> {
         &self.keeper
     }
 
-    /// The keeper, mutable — the market/account streams (QE-204/208) feed mark + balances through here; the
-    /// transport only reads it for `plan_delta`.
-    pub fn keeper_mut(&mut self) -> &mut VenueKeeper {
-        &mut self.keeper
+    /// Feed the latest mark price (venue truth) — the QE-208 mark loop drives this. Narrow by design: the
+    /// transport must not expose a path that moves the kept **position** without a corresponding venue
+    /// fill/report, which would desync the keeper from the simulator (the position `plan_delta` and the
+    /// reconnect snapshot both rely on).
+    pub fn observe_mark(&mut self, mark: Price) {
+        self.keeper.observe_mark(mark);
+    }
+
+    /// Feed the latest account balances (venue truth / sim ledger) — the QE-204 account stream drives this.
+    pub fn observe_balance(&mut self, equity: Notional, available_margin: Notional) {
+        self.keeper.observe_balance(equity, available_margin);
     }
 
     /// The held kill handle (clone it to trip the out-of-band halt, QE-216).
@@ -235,15 +243,18 @@ impl<A: AppendSink> PlannerAdapterLink<A> {
     }
 
     /// Reconnect: re-establish position truth and return an authoritative [`AdapterReport::Position`]
-    /// snapshot. The planner then re-sends [`latest_target`](Self::latest_target); because the target is
-    /// absolute and `plan_delta` reads the authoritative kept position, that re-send is idempotent — a
-    /// reconnect never doubles the position (D5).
+    /// snapshot. The venue snapshot is **reconciled into the keeper** (QE-217 D3: a `Position` report
+    /// authoritatively sets the kept position), so the snapshot the planner receives and the position
+    /// `plan_delta` re-plans against are one and the same truth — not two coincidentally-equal values. The
+    /// planner then re-sends [`latest_target`](Self::latest_target); because the target is absolute and the
+    /// keeper now reflects the snapshot, that re-send is exactly idempotent — a reconnect never doubles the
+    /// position (D5).
     pub fn reconnect(&mut self) -> Vec<AdapterReport> {
         self.connected = true;
         let event_time_ms = self.last_applied.map_or(0, |r| r.event_time_ms);
-        vec![AdapterReport::Position(
-            self.gate.simulator().position_report(event_time_ms),
-        )]
+        let report = self.gate.simulator().position_report(event_time_ms);
+        self.keeper.apply(&UserDataEvent::Position(report.clone()));
+        vec![AdapterReport::Position(report)]
     }
 
     /// Apply one revision to the edge: translate to a delta vs the kept position, submit through the kill
@@ -252,22 +263,26 @@ impl<A: AppendSink> PlannerAdapterLink<A> {
         let mark = self.keeper.mark();
         let current = self.keeper.signed_qty();
         let mut reports = Vec::new();
-        let mut health = VenueHealth::Ok;
 
         if let Some(intent) = plan_delta(rev.target.notional, current, mark) {
-            match self.gate.submit(intent, mark, rev.event_time_ms) {
-                Ok(fill) => {
-                    self.keeper.apply(&fill.event);
-                    reports.push(AdapterReport::Fill(fill));
-                }
-                // QE-216 kill tripped: submission is halted on the wire — no fill, health Down.
-                Err(halt) => health = VenueHealth::Down(halt.reason),
+            // A tripped kill returns `Err(KillHalt)` here (submission halted); the fill is simply absent.
+            if let Ok(fill) = self.gate.submit(intent, mark, rev.event_time_ms) {
+                self.keeper.apply(&fill.event);
+                reports.push(AdapterReport::Fill(fill));
             }
         }
 
         reports.push(AdapterReport::Position(
             self.gate.simulator().position_report(rev.event_time_ms),
         ));
+        // Health reflects venue **submission state**, derived from the kill directly — not the side effect of
+        // whether a delta happened to be submitted this tick. So an at-target revision while the kill is
+        // tripped still reports `Down`, keeping the out-of-band halt visible to the planner in steady state.
+        let health = if self.gate.kill().is_tripped() {
+            VenueHealth::Down(self.gate.kill_reason())
+        } else {
+            VenueHealth::Ok
+        };
         reports.push(AdapterReport::Heartbeat {
             ack_seq: Some(rev.seq),
             health,
@@ -478,6 +493,30 @@ mod tests {
         assert_eq!(ack, Some(0));
         assert_eq!(health, VenueHealth::Down("watchdog: staleness".to_owned()));
         assert_eq!(link.keeper().signed_qty(), dec("0"), "position stays flat");
+    }
+
+    /// F1 regression: the kill must stay visible over the wire in **steady state**. Once at target, a kill
+    /// tripped between ticks and a re-sent at-target revision (zero delta → no submit) must still report
+    /// `Down` — health reflects submission state, not whether a delta happened this tick.
+    #[test]
+    fn at_target_revision_reports_down_while_killed() {
+        let mut link = link_at("50000", "100000");
+        link.submit_target(rev(0, "10000", 1)).unwrap();
+        link.pump();
+        assert_eq!(link.keeper().signed_qty(), dec("0.2"));
+
+        // Kill trips between ticks; the planner re-sends the same absolute target it already reached.
+        link.kill().trip("watchdog: staleness");
+        link.submit_target(rev(1, "10000", 2)).unwrap();
+        let reports = link.pump();
+
+        assert!(find_fill(&reports).is_none(), "zero delta → no submit");
+        assert_eq!(link.orders_submitted(), 1, "no new order");
+        assert_eq!(
+            heartbeat(&reports),
+            (Some(1), VenueHealth::Down("watchdog: staleness".to_owned())),
+            "a tripped kill is reported Down even with no delta to submit"
+        );
     }
 
     /// A pump with nothing pending produces no traffic; an at-target revision acks with `Ok` health and no
