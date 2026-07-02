@@ -23,7 +23,9 @@ pub enum CutoverError {
     /// The replay produced no bar, so there is no boundary to continue from.
     #[error("cannot cut over: the replay evaluated no bars")]
     EmptyReplay,
-    /// The next live bar skipped past the expected contiguous open time — a missed bar.
+    /// The next live bar did not open at the expected contiguous time — a **skipped** bar (`open` beyond the
+    /// next interval) or a **misaligned** one (`open` strictly between the boundary and the next interval).
+    /// Both are rejected rather than silently evaluated; `expected_open_ms` is the contiguous open time.
     #[error("cutover gap: expected next bar open at {expected_open_ms}ms, got {got_open_ms}ms")]
     Gap {
         /// The open time (ms) the next contiguous bar should have had.
@@ -45,6 +47,8 @@ pub enum CutoverStep {
 /// Drives the in-process bootstrap→live handoff over a warmed [`EvaluatorSession`].
 pub struct Cutover {
     session: EvaluatorSession,
+    /// The base resolution of the evaluated bars (the contiguity step's unit).
+    base: Resolution,
     /// Open time (ms) of the last evaluated base bar; the next contiguous bar opens at `+ interval_ms`.
     last_open_ms: i64,
     /// The base bar interval in ms (contiguity step).
@@ -79,6 +83,7 @@ impl Cutover {
     pub fn new(session: EvaluatorSession, last_open_ms: i64, base: Resolution) -> Self {
         Self {
             session,
+            base,
             last_open_ms,
             interval_ms: i64::from(base.minutes()) * 60_000,
             live: false,
@@ -92,6 +97,14 @@ impl Cutover {
     /// # Errors
     /// [`CutoverError::Gap`] if the bar's open time is beyond the next contiguous bar.
     pub fn feed_live_bar(&mut self, bar: &Bar) -> Result<CutoverStep, CutoverError> {
+        // The contiguity step is sized from `base`; a bar of a different resolution would be mis-measured.
+        // Caller feeds base bars by construction, so this is a wiring-bug guard, not a runtime branch.
+        debug_assert!(
+            bar.resolution() == self.base,
+            "live bar resolution {:?} != cutover base {:?}",
+            bar.resolution(),
+            self.base
+        );
         let open = bar.open_time().millis();
         if open <= self.last_open_ms {
             // Already covered by the replay — drop without re-evaluating (no duplicate, state untouched).
