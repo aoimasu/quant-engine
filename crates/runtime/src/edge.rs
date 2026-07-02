@@ -65,6 +65,15 @@ impl Order {
         }
     }
 
+    /// Whether the order has reached a terminal state (no further transitions).
+    #[must_use]
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self.state,
+            OrderState::Filled | OrderState::Rejected | OrderState::Cancelled
+        )
+    }
+
     /// Mark the order submitted (`New → Submitted`).
     pub fn submit(&mut self) {
         if self.state == OrderState::New {
@@ -72,8 +81,11 @@ impl Order {
         }
     }
 
-    /// Absorb a fill of `q`, advancing to `PartiallyFilled` or `Filled`.
+    /// Absorb a fill of `q`, advancing to `PartiallyFilled` or `Filled`. A no-op on a terminal order.
     pub fn on_fill(&mut self, q: Qty) {
+        if self.is_terminal() {
+            return;
+        }
         self.filled =
             Qty::new(self.filled.get() + q.get()).expect("cumulative fill is non-negative");
         self.state = if self.filled.get() >= self.qty.get() {
@@ -83,14 +95,18 @@ impl Order {
         };
     }
 
-    /// Mark the order rejected by the venue.
+    /// Mark the order rejected by the venue. A no-op on a terminal order.
     pub fn reject(&mut self) {
-        self.state = OrderState::Rejected;
+        if !self.is_terminal() {
+            self.state = OrderState::Rejected;
+        }
     }
 
-    /// Mark the order cancelled.
+    /// Mark the order cancelled. A no-op on a terminal order.
     pub fn cancel(&mut self) {
-        self.state = OrderState::Cancelled;
+        if !self.is_terminal() {
+            self.state = OrderState::Cancelled;
+        }
     }
 }
 
@@ -565,8 +581,28 @@ mod tests {
         order.on_fill(qty("0.6"));
         assert_eq!(order.state, OrderState::Filled);
 
+        // A terminal (Filled) order ignores further transitions.
+        assert!(order.is_terminal());
+        order.on_fill(qty("0.5"));
+        assert_eq!(order.state, OrderState::Filled);
+        assert_eq!(
+            order.filled,
+            qty("1.0"),
+            "a filled order does not over-fill"
+        );
+        order.reject();
+        assert_eq!(
+            order.state,
+            OrderState::Filled,
+            "a filled order cannot be rejected"
+        );
+
         let mut rejected = Order::new(2, Side::Sell, qty("1.0"));
         rejected.reject();
+        assert_eq!(rejected.state, OrderState::Rejected);
+        // A rejected order is terminal: cancel/fill are no-ops.
+        rejected.cancel();
+        rejected.on_fill(qty("1.0"));
         assert_eq!(rejected.state, OrderState::Rejected);
 
         let mut cancelled = Order::new(3, Side::Sell, qty("1.0"));
