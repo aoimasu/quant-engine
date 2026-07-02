@@ -36,6 +36,10 @@
 //! order delta vs the kept position, [`VenueKeeper`] absorbs the QE-204 user-data feed as authoritative
 //! position/account state (`impl`s the [`PositionKeeper`](hedger::PositionKeeper) seam), and [`VenueSimulator`]
 //! runs the full loop in-memory with no real orders.
+//! QE-216 adds the out-of-band kill-switch at the venue adapter ([`kill_gate`]): [`VenueKillGate`] wraps the
+//! simulator with the QE-009 [`KillHandle`], so a trip from anywhere (watchdog / manual, cockpit-independent)
+//! **halts submission** and **flattens** the kept position deterministically — satisfying the QE-009
+//! [`OrderGate`](qe_risk::OrderGate) conformance.
 
 pub mod boot_state;
 pub mod bootstrap;
@@ -44,6 +48,7 @@ pub mod edge;
 pub mod evaluator;
 pub mod factor_join;
 pub mod hedger;
+pub mod kill_gate;
 pub mod live_breakers;
 pub mod live_kline;
 pub mod live_mark;
@@ -62,6 +67,7 @@ pub use edge::{plan_delta, Order, OrderIntent, OrderState, SimFill, VenueKeeper,
 pub use evaluator::{ChromosomeDecision, EvalOutput, EvaluatorSession, SessionMode};
 pub use factor_join::LiveFactorJoin;
 pub use hedger::{CapitalView, HedgePlanner, PositionKeeper, TargetPosition};
+pub use kill_gate::{KillHalt, KillOutcome, VenueKillGate};
 pub use live_breakers::BreakerLayer;
 pub use live_kline::LiveKlineSource;
 pub use live_mark::{MarkEmaLoop, MarkTick, MarkTickObserver};
