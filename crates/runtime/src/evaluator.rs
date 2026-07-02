@@ -138,6 +138,13 @@ impl EvaluatorSession {
     pub fn chromosome_count(&self) -> usize {
         self.vintage.content.chromosomes.len()
     }
+
+    /// Read-only: the current per-chromosome positions (aligned to the vintage's chromosomes). The
+    /// reconstructed-state builder (QE-210) reads these as the bootstrap's per-strategy positions.
+    #[must_use]
+    pub fn positions(&self) -> &[PositionState] {
+        &self.positions
+    }
 }
 
 #[cfg(test)]
