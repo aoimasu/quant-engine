@@ -23,6 +23,9 @@
 //! QE-212 adds the circuit-breaker layer ([`live_breakers`]): per-strategy + ensemble QE-116 breakers
 //! calibrated from the vintage profile, latching gated scopes and clamping gated strategies to
 //! [`Decision`](qe_signal::Decision)`::Exit` (flat) before netting — firing identically to the QE-116 replay.
+//! QE-213 adds position netting ([`live_netter`]): the post-breaker per-strategy targets
+//! (`weight × size_bps/10_000`, signed by direction) sum into one aggregate [`NetTarget`] per instrument —
+//! gated strategies are flat post-breaker, so they contribute zero.
 
 pub mod boot_state;
 pub mod bootstrap;
@@ -32,6 +35,7 @@ pub mod factor_join;
 pub mod live_breakers;
 pub mod live_kline;
 pub mod live_mark;
+pub mod live_netter;
 
 pub use boot_state::{
     BootStateError, CommittedPeak, DormancyLatch, ReconstructedState, StrategyState,
@@ -46,6 +50,7 @@ pub use factor_join::LiveFactorJoin;
 pub use live_breakers::BreakerLayer;
 pub use live_kline::LiveKlineSource;
 pub use live_mark::{MarkEmaLoop, MarkTick, MarkTickObserver};
+pub use live_netter::{NetLeg, NetTarget, PositionNetter};
 pub use qe_risk::{KillHandle, KillSwitch};
 
 /// The runtime's live order-submission port.
