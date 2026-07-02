@@ -24,3 +24,7 @@ thiserror.workspace = true
 # Optional blocking HTTP client for the real transport. native-tls (system TLS) avoids ring's
 # non-allowlisted OpenSSL licence; only compiled under the `http` feature (mirrors qe-ingest).
 ureq = { version = "2", default-features = false, features = ["native-tls"], optional = true }
+
+[dev-dependencies]
+# Construct Price/Qty fixtures (Decimal-based) in the user-data stream tests (QE-204).
+rust_decimal.workspace = true
