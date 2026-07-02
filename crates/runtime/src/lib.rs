@@ -55,6 +55,7 @@ pub mod live_mark;
 pub mod live_netter;
 pub mod pretrade;
 pub mod transport;
+pub mod vintage_rollover;
 
 pub use boot_state::{
     BootStateError, CommittedPeak, DormancyLatch, ReconstructedState, StrategyState,
@@ -79,6 +80,7 @@ pub use transport::{
     AdapterReport, AppendError, AppendSink, NullAppendSink, PlannerAdapterLink, TargetRevision,
     TransportError, VenueHealth,
 };
+pub use vintage_rollover::{ActiveVintage, RolloverRecord};
 
 /// The runtime's live order-submission port.
 ///
