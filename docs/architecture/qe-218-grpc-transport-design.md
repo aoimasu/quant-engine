@@ -172,7 +172,10 @@ coalescing observable. (A delta stream could not do this; absoluteness is what b
   the runtime binary (deferred, like QE-202's real websocket), not in the tested surface.
 - **Backpressure drops superseded targets — deliberate and lossless.** Justified *only* by the absoluteness of
   `TargetPosition`; the design note flags that a delta stream could not coalesce this way. `dropped_superseded`
-  is observable, never silent.
+  is observable, never silent. **Audit-trail caveat:** only *pumped* revisions reach the QE-301 append sink,
+  so the coalesced/dropped ones are not journalled — position convergence is lossless, but a full
+  planner-decision audit trail would need the dropped revisions recorded separately (out of scope for this AC;
+  flagged for QE-301).
 - **Reconnection idempotence rests on keeper-as-truth.** Re-sending the latest absolute target is safe only
   because `plan_delta` reads the authoritative kept position (never inferred). `reconnect` **reconciles** the
   keeper to the venue snapshot it returns (single truth, not coincidental agreement), and mutation of the
