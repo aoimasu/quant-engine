@@ -54,6 +54,7 @@ pub mod live_kline;
 pub mod live_mark;
 pub mod live_netter;
 pub mod pretrade;
+pub mod transport;
 
 pub use boot_state::{
     BootStateError, CommittedPeak, DormancyLatch, ReconstructedState, StrategyState,
@@ -74,6 +75,10 @@ pub use live_mark::{MarkEmaLoop, MarkTick, MarkTickObserver};
 pub use live_netter::{NetLeg, NetTarget, PositionNetter};
 pub use pretrade::{PreTradeDecision, PreTradeGovernor, PreTradeVerdict};
 pub use qe_risk::{KillHandle, KillSwitch};
+pub use transport::{
+    AdapterReport, AppendError, AppendSink, NullAppendSink, PlannerAdapterLink, TargetRevision,
+    TransportError, VenueHealth,
+};
 
 /// The runtime's live order-submission port.
 ///
