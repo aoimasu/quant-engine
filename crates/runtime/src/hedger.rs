@@ -35,6 +35,12 @@ pub trait PositionKeeper {
     fn capital(&self) -> CapitalView;
     /// The current signed venue position (notional). Not used for planning.
     fn venue_position(&self) -> Notional;
+    /// Just the equity (allowed capital the target scales against). Defaults to `capital().equity`; a real
+    /// keeper whose `capital()` is expensive can override this to avoid computing the margin the planner
+    /// discards.
+    fn equity(&self) -> Notional {
+        self.capital().equity
+    }
 }
 
 /// An absolute target position for the instrument: a signed [`Notional`] (sign = direction, `0` = flat).
@@ -48,7 +54,7 @@ impl TargetPosition {
     /// The target's direction: `Long` if positive, `Short` if negative, `None` if flat.
     #[must_use]
     pub fn direction(&self) -> Option<Direction> {
-        match self.notional.get().cmp(&rust_decimal::Decimal::ZERO) {
+        match self.notional.cmp(&Notional::ZERO) {
             std::cmp::Ordering::Greater => Some(Direction::Long),
             std::cmp::Ordering::Less => Some(Direction::Short),
             std::cmp::Ordering::Equal => None,
@@ -80,7 +86,7 @@ impl<K: PositionKeeper> HedgePlanner<K> {
     /// delta from the current position is computed downstream (QE-217).
     #[must_use]
     pub fn plan(&self, net: NetTarget) -> TargetPosition {
-        let equity = self.keeper.capital().equity.get();
+        let equity = self.keeper.equity().get();
         TargetPosition {
             notional: Notional::new(net.net * equity),
         }
