@@ -14,13 +14,20 @@
 //! QE-208 adds the mark EMA loop ([`live_mark`]): markPrice@1s samples are smoothed through QE-116's
 //! [`MarkEma`](qe_risk::MarkEma) (τ½=60s) into a tick stream carrying both raw and smoothed marks, fed to a
 //! [`MarkTickObserver`] — the seam the breaker layer (QE-212) consumes.
+//! QE-210 adds the reconstructed state ([`boot_state`]): the cold-start anchor derived from the replay —
+//! per-strategy positions, dormancy latches, and **true committed peak equity** (all-time, never windowed),
+//! the last load-bearing for the drawdown breaker's anchor at live start.
 
+pub mod boot_state;
 pub mod bootstrap;
 pub mod evaluator;
 pub mod factor_join;
 pub mod live_kline;
 pub mod live_mark;
 
+pub use boot_state::{
+    BootStateError, CommittedPeak, DormancyLatch, ReconstructedState, StrategyState,
+};
 pub use bootstrap::{
     paginate_klines, paginate_series, BootstrapError, BootstrapPipeline, HistoricalSource,
     HistoricalWindow, Reconstructed,
