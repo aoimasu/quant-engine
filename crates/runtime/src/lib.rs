@@ -17,9 +17,13 @@
 //! QE-210 adds the reconstructed state ([`boot_state`]): the cold-start anchor derived from the replay —
 //! per-strategy positions, dormancy latches, and **true committed peak equity** (all-time, never windowed),
 //! the last load-bearing for the drawdown breaker's anchor at live start.
+//! QE-211 adds the in-process cutover ([`cutover`]): the warmed session is switched from replay to live
+//! **in place** (no state copy) while enforcing bar continuity at the seam — overlap bars are dropped (no
+//! duplicate), a skipped bar is surfaced as a gap, and post-cutover decisions match a continuous reference.
 
 pub mod boot_state;
 pub mod bootstrap;
+pub mod cutover;
 pub mod evaluator;
 pub mod factor_join;
 pub mod live_kline;
@@ -32,6 +36,7 @@ pub use bootstrap::{
     paginate_klines, paginate_series, BootstrapError, BootstrapPipeline, HistoricalSource,
     HistoricalWindow, Reconstructed,
 };
+pub use cutover::{Cutover, CutoverError, CutoverStep};
 pub use evaluator::{ChromosomeDecision, EvalOutput, EvaluatorSession, SessionMode};
 pub use factor_join::LiveFactorJoin;
 pub use live_kline::LiveKlineSource;
