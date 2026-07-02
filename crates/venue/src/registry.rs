@@ -96,13 +96,17 @@ impl<C: WsConnector> ConnectionRegistry<C> {
             WsPoll::Message(msg) => {
                 let entry = self.tiers.get_mut(&tier).expect("tier present");
                 let stream = msg.subscription.stream_name();
-                let cadence = msg.subscription.channel.cadence_ms();
-                let gap = entry.last_event_ms.get(&stream).and_then(|&last| {
-                    // A contiguous next message is exactly one cadence later; only a larger jump is a hole.
-                    (msg.event_time_ms - last > cadence).then(|| Gap {
-                        stream: stream.clone(),
-                        from_ms: last,
-                        to_ms: msg.event_time_ms,
+                // Cadence-based gap detection applies only to fixed-cadence channels. Event-driven channels
+                // (`cadence_ms() == None`, e.g. bookTicker/aggTrade) have no time-defined hole — an outage
+                // there still surfaces via `PumpOutcome.reconnected`, just not as a `Gap`.
+                let gap = msg.subscription.channel.cadence_ms().and_then(|cadence| {
+                    entry.last_event_ms.get(&stream).and_then(|&last| {
+                        // A contiguous next message is exactly one cadence later; only a larger jump is a hole.
+                        (msg.event_time_ms - last > cadence).then(|| Gap {
+                            stream: stream.clone(),
+                            from_ms: last,
+                            to_ms: msg.event_time_ms,
+                        })
                     })
                 });
                 entry.last_event_ms.insert(stream, msg.event_time_ms);
@@ -364,5 +368,104 @@ mod tests {
         let mut reg = ConnectionRegistry::new(FakeConnector::new());
         let out = reg.pump(StreamTier::Realtime).unwrap();
         assert!(out.message.is_none() && out.gap.is_none() && !out.reconnected);
+    }
+
+    // --- QE-203: Realtime-tier streams ---
+
+    /// AC: Edge-side (Realtime) and Planner-side (Market) streams share no upstream data path. On one
+    /// registry the two tiers resolve to distinct partitions with independent connections, and neither
+    /// tier's recorded subscriptions bleed into the other.
+    #[test]
+    fn edge_and_planner_streams_are_disjoint() {
+        let connector = FakeConnector::new();
+        let connects = Rc::clone(&connector.connects);
+        let mut reg = ConnectionRegistry::new(connector);
+
+        // Planner (Hedge-Planner) path — Market tier.
+        let kline = Subscription::kline(inst(), Resolution::M5);
+        let mark = Subscription::mark_price(inst());
+        // Edge (gateway) path — Realtime tier.
+        let book = Subscription::book_ticker(inst());
+        let depth = Subscription::depth20(inst());
+        let trade = Subscription::agg_trade(inst());
+
+        // Every channel routes to its own tier by construction — no shared upstream tier.
+        for s in [&kline, &mark] {
+            assert_eq!(s.tier(), StreamTier::Market);
+        }
+        for s in [&book, &depth, &trade] {
+            assert_eq!(s.tier(), StreamTier::Realtime);
+        }
+
+        reg.subscribe(StreamTier::Market, &[kline.clone(), mark.clone()])
+            .unwrap();
+        reg.subscribe(
+            StreamTier::Realtime,
+            &[book.clone(), depth.clone(), trade.clone()],
+        )
+        .unwrap();
+
+        // Two independent partitions, one connection each (no shared socket / upstream).
+        assert_eq!(
+            reg.active_tiers(),
+            vec![StreamTier::Market, StreamTier::Realtime]
+        );
+        assert_eq!(connects.borrow().get(&StreamTier::Market), Some(&1));
+        assert_eq!(connects.borrow().get(&StreamTier::Realtime), Some(&1));
+
+        // Subscriptions do not bleed across the partition, either direction.
+        let market = reg.subscriptions(StreamTier::Market);
+        let realtime = reg.subscriptions(StreamTier::Realtime);
+        assert!(market.contains(&kline) && market.contains(&mark));
+        assert!(!market.contains(&book) && !market.contains(&depth) && !market.contains(&trade));
+        assert!(realtime.contains(&book) && realtime.contains(&depth) && realtime.contains(&trade));
+        assert!(!realtime.contains(&kline) && !realtime.contains(&mark));
+    }
+
+    #[test]
+    fn depth20_reconnect_reports_gap_but_event_driven_does_not() {
+        // depth20 has a 100ms cadence: a reconnect that resumes far later reports a gap.
+        let depth = Subscription::depth20(inst());
+        let connector = FakeConnector::new();
+        connector.script(
+            StreamTier::Realtime,
+            vec![
+                vec![msg(&depth, 100), WsPoll::Disconnected],
+                vec![msg(&depth, 5_000)], // 4_900ms later, > 100ms cadence
+            ],
+        );
+        let mut reg = ConnectionRegistry::new(connector);
+        reg.subscribe(StreamTier::Realtime, std::slice::from_ref(&depth))
+            .unwrap();
+        reg.pump(StreamTier::Realtime).unwrap(); // 100
+        reg.pump(StreamTier::Realtime).unwrap(); // reconnect
+        let resumed = reg.pump(StreamTier::Realtime).unwrap();
+        let gap = resumed
+            .gap
+            .expect("depth20 has a cadence, so the outage is a gap");
+        assert_eq!((gap.from_ms, gap.to_ms), (100, 5_000));
+
+        // aggTrade is event-driven (no cadence): the same outage flags `reconnected` but reports no gap.
+        let trade = Subscription::agg_trade(inst());
+        let connector = FakeConnector::new();
+        connector.script(
+            StreamTier::Realtime,
+            vec![
+                vec![msg(&trade, 100), WsPoll::Disconnected],
+                vec![msg(&trade, 9_999_999)], // arbitrarily far later — still not a "gap"
+            ],
+        );
+        let mut reg = ConnectionRegistry::new(connector);
+        reg.subscribe(StreamTier::Realtime, std::slice::from_ref(&trade))
+            .unwrap();
+        reg.pump(StreamTier::Realtime).unwrap(); // 100
+        let reconnected = reg.pump(StreamTier::Realtime).unwrap();
+        assert!(reconnected.reconnected && reconnected.gap.is_none());
+        let resumed = reg.pump(StreamTier::Realtime).unwrap();
+        assert_eq!(resumed.message.unwrap().event_time_ms, 9_999_999);
+        assert!(
+            resumed.gap.is_none(),
+            "event-driven streams have no cadence-defined gap"
+        );
     }
 }
