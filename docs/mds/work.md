@@ -12,132 +12,114 @@ to empty**. No running "Completed" list is kept here — the traceable history l
 
 ---
 
-## QE-218 — gRPC transport (Hedge Planner ↔ Edge gateway) — [Ready-for-review]
+## QE-219 — Vintage load (read-only) + rollover — [Ready-for-review]
 
-- **PR:** #69 — https://github.com/aoimasu/quant-engine/pull/69
-- **Ticket:** QE-218 (`Phase: P2` · `Area: ⑤↔⑥` · `Depends on: QE-214, QE-217`)
-- **Branch:** `qe-218/grpc-transport`
-- **Latest commit:** `3ff14ff7b5959e9c746b2973f1f8cc86c983c3b2`
-- **Evidence / design:** `docs/architecture/qe-218-grpc-transport-design.md`
-- **Changed files:** `crates/runtime/src/transport.rs` (new), `crates/runtime/src/lib.rs` (module +
-  re-exports), design note. (Also archives QE-216 → `docs/mds/reviewed/qe-216.md` + clears the prior
-  `work.md` entry.)
+- **PR:** #70 — https://github.com/aoimasu/quant-engine/pull/70
+- **Ticket:** QE-219 (`Phase: P2` · `Area: ① Vintage inputs` · `Depends on: QE-129, QE-207`)
+- **Branch:** `qe-219/vintage-rollover`
+- **Latest commit:** `6705c90ae3d459c52c3b47387e4f3a18ca2ae1b4`
+- **Evidence / design:** `docs/architecture/qe-219-vintage-rollover-design.md`
+- **Changed files:** `crates/runtime/src/vintage_rollover.rs` (new), `crates/runtime/src/lib.rs` (module +
+  re-exports), `crates/runtime/Cargo.toml` (promote `qe-determinism` to a direct dep), design note. (Also
+  archives QE-218 → `docs/mds/reviewed/qe-218.md` + clears the prior `work.md` entry.)
 
 ### Goal
-Decisions flow planner→adapter over gRPC; fills/positions/heartbeat flow back. Backpressure and reconnection
-handled; the QE-301 journal-append path must **never gate** the dispatch.
+Runtime loads the ensemble repo + calibration profile **read-only** at startup; periodic **rollover** replaces
+the vintage in place when training emits a new one, without violating the firewall.
 
 ### Acceptance criteria (from backlog)
-- [x] A target revision reaches the adapter and fills/positions return; the append path (QE-301) never gates
-  this dispatch — `target_revision_reaches_adapter_and_fills_return`, `append_never_gates_dispatch`.
+- [x] Startup loads a vintage read-only; a rollover swaps it atomically with lineage recorded —
+  `startup_loads_vintage_read_only`, `rollover_swaps_in_place_with_lineage_recorded`,
+  `rollover_rejects_unverified_vintage_keeping_current`.
 
 ### Implementation summary
-- New `crates/runtime/src/transport.rs`: `PlannerAdapterLink<A: AppendSink>` — a **deterministic,
-  single-threaded, pull-based** model of the planner↔adapter gRPC bidi stream. `TargetRevision` (absolute,
-  monotonic `seq`) in; `AdapterReport::{Fill, Position, Heartbeat{ack_seq, health}}` (with `VenueHealth`) out.
-- `pump()` → `plan_delta` vs the authoritative kept position → submit **through the QE-216 `VenueKillGate`**
-  → absorb the fill into `VenueKeeper` → return fills + authoritative position + heartbeat.
-- **Backpressure = coalesce-to-latest** (`submit_target` keeps only the newest revision; `dropped_superseded`
-  observable) — lossless *because* `TargetPosition` is absolute.
-- **Reconnection = re-snapshot + re-send latest** (`disconnect`/`reconnect`) — re-sending the latest absolute
-  target is idempotent (`plan_delta` → 0 delta → no double-fill).
-- **Append never gates dispatch:** the `AppendSink` (QE-301 seam) is *offered* the already-produced reports;
-  its `Result` is counted (`append_failures`) but **cannot alter** the dispatch. Real tonic/gRPC wire deferred
-  to the runtime binary (QE-201/202 offline-core convention); no new workspace dep; firewall unaffected.
-- **Scrutinise:** (1) coalescing backpressure **drops** superseded absolute targets — is "lossless because
-  absolute" fully sound (e.g. does any consumer need intermediate revisions)? (2) reconnection re-snapshots
-  from the **sim** `position_report` — right source of truth vs the keeper? (3) `append_never_gates_dispatch`
-  proven structurally (return value produced before `append`) — is that a genuine proof of the AC, or does a
-  real async journal need more? (4) position report sourced from `gate.simulator()` while `plan_delta` reads
-  the `keeper` — are sim and keeper guaranteed in sync on this path? (5) `keeper_mut()` exposed for the
-  mark/account streams — acceptable encapsulation?
+- New `crates/runtime/src/vintage_rollover.rs`: `ActiveVintage` holds the current sealed `Vintage` + a
+  `RolloverRecord` history. `load(repo, id)` uses `VintageRepository::load` (open + **hash-verify**, never
+  write) — read-only startup. `rollover(next)`/`rollover_from(repo, id)` **verify before** the single
+  `current = next` swap (atomic: a bad vintage never becomes active; repo + calibration — calibration lives
+  inside `current.content` — never come from two vintages). Every rollover records `from/to vintage_id` +
+  `from/to Lineage`.
+- Promotes `qe-determinism` (`Lineage`) to a direct dependency — cross-cutting (QE-006), not on either side of
+  the QE-132 firewall, already transitive via `qe-vintage`; firewall test green.
+- **Scrutinise:** (1) atomicity is verify-before-commit on a single-threaded runtime — is that the right
+  reading of "atomically", or is an `Arc`-swap expected now? (2) read-only proven by *using only* `load` (never
+  `write`) + a byte-unchanged assertion — sufficient? (3) unbounded `history` growth across many rollovers —
+  acceptable at rollover cadence? (4) `qe-determinism` promoted dev→direct dep — right call vs re-exporting
+  `Lineage` from `qe-vintage`? (5) rollover accepts *any* verified vintage (no monotonic-lineage / same-id
+  guard) — right boundary, or should a no-op/backwards rollover be rejected?
 
 ### Verification (toolchain 1.96.0)
 - `cargo fmt --all --check` — clean
 - `cargo clippy --workspace --all-targets --locked -- -D warnings` — clean
-- `cargo test --workspace --locked` — 552 passed / 1 ignored / 56 suites (+6 transport tests)
+- `cargo test --workspace --locked` — 559 passed / 1 ignored / 56 suites (+6 vintage_rollover tests)
 - `cargo test -p qe-architecture --test firewall` — 1 passed
 - `cargo deny check` — advisories/bans/licenses/sources ok
 
 ### Feedback
 
-_First review pass, commit `2e2986c8` (2026-07-02). What is correct: AC #1 holds — a target revision reaches
-the adapter and `Fill`+`Position` return (`target_revision_reaches_adapter_and_fills_return`), and the QE-301
-append path is **structurally** non-gating (the reports are computed and returned before `append` is offered
-them, and `append`'s `Result` only bumps a counter — `append_never_gates_dispatch` proves the identical
-reports under a `FailingAppendSink`). Backpressure coalesce-to-latest is sound: dropping a superseded
-**absolute** target is genuinely lossless for position convergence. Reconnect idempotence holds *in this
-model* (zero delta on re-send). No `tokio`/`tonic`/`threads`, no new workspace dependency, firewall
-unaffected. Three items below._
+_First review pass, commit `98558aeb` (2026-07-02). **Approved** — the AC is genuinely met and I found no
+correctness or design defect. Detail + Scrutinise answers below; two minor observations recorded as
+explicitly non-blocking._
 
-**F1 — [Blocker] Heartbeat health misreports `Ok` while the kill is tripped when the delta is zero.**
-`apply_revision` (`transport.rs:255-266`) initialises `health = VenueHealth::Ok` and only ever sets
-`VenueHealth::Down` **inside** the `if let Some(intent) = plan_delta(...)` block, on a failed `gate.submit`.
-So when the position is already **at target** (zero delta) and the kill is tripped, no submit is attempted
-and the heartbeat is emitted with `health: Ok` — telling the planner the venue is healthy while submission is
-in fact halted. This directly contradicts `VenueHealth::Down`'s own doc ("Submission is halted (reason) —
-e.g. the QE-216 kill switch is tripped") and defeats the purpose of the health back-channel: in steady state
-(planner re-sending the same absolute target it already reached) a tripped kill would be reported `Ok` on
-**every** heartbeat, so the out-of-band halt is invisible to the planner over the wire. The existing
-`kill_tripped_dispatch_halts_submission_on_the_wire` test only exercises the non-zero-delta case (flat → target
-10 000), which is why it passes. **Fix direction:** derive `health` from the gate/kill state directly (e.g.
-`if self.gate.kill().is_tripped() { Down(reason) }`) independent of whether a delta happened to be submitted
-this tick, so health reflects venue submission state, not the side effect of a delta. Add a regression test:
-reach a target, trip the kill, re-send the **same** (at-target) revision → `pump` heartbeat must be
-`Down`, not `Ok`.
+**AC fidelity — met.**
+- **Read-only load is genuine.** `ActiveVintage::load` uses only `repo.load` (open + hash-verify, never
+  write), and `ActiveVintage` exposes **no** `repo.write` path at all — the type cannot mutate the repository.
+  `startup_loads_vintage_read_only` snapshots the on-disk bytes before/after and asserts equality, so the test
+  is non-vacuous (a write would fail it).
+- **Rollover is atomic (verify-before-commit).** `rollover` runs `next.verify()?` **before** the single
+  `self.current = next` move; on failure `current` + `history` are left exactly as they were. Because
+  `calibration` lives *inside* `current.content`, the swap moves repo + calibration indivisibly — no torn
+  repo/calibration state is representable. The record is built from the outgoing `self.current` **before** the
+  swap, so `from_*` is correct. `rollover_rejects_unverified_vintage_keeping_current` tampers
+  `content.weights[0]` after sealing so the recomputed hash genuinely mismatches, then asserts current is
+  still v1 with empty history — a real, non-vacuous exercise of the safety boundary.
+- **Lineage recorded** on every transition (both endpoints' `vintage_id` + `Lineage`); the chain test confirms
+  ordering.
 
-**F2 — [Nit] Reconnect re-snapshots from the sim but idempotence rests on the keeper; the two are only
-coincidentally in sync.** `reconnect` (`transport.rs:241-247`) returns `Position` from
-`gate.simulator().position_report(...)`, while resume idempotence depends on `plan_delta` reading
-`keeper.signed_qty()` (`apply_revision:253`). These agree only because every sim fill is applied to the keeper
-(`apply_revision:260`) and nothing else moves the keeper's position — an invariant nothing structurally
-enforces (see F3). `reconnect` also does **not** reconcile the keeper to the snapshot it returns, so if sim and
-keeper ever diverge, the snapshot handed to the planner and the truth `plan_delta` plans against would differ
-and the "zero delta ⇒ no double-fill" argument breaks. Recommend sourcing the reconnect snapshot and the
-planning position from a single truth (or asserting `sim_position == keeper.signed_qty()` on the pump/reconnect
-path and documenting the invariant). Not wrong in the tested model, but the coupling is load-bearing and
-implicit.
+**Scrutinise answers.**
+1. **Atomicity = verify-before-commit on a single-threaded runtime — correct reading; Arc-swap not required
+   by the AC.** No concurrent reader can observe a half-swap in this (established) single-threaded runtime, and
+   the swap is one move guarded by a prior `verify()`. The design note documents Arc-swap as the future path
+   if a concurrent reader is ever introduced — the right place to defer it.
+2. **Read-only proof is sufficient.** Byte-unchanged assertion on the real artefact + the structural fact that
+   the API has no writer. Good.
+3. **Unbounded `history` — acceptable at rollover cadence** (rollovers are rare/periodic); documented, with a
+   ring buffer flagged as a later refinement. Fine.
+4. **`qe-determinism` dev→direct promotion — right call.** It is genuinely the crate that defines `Lineage`;
+   naming it directly is more honest than re-exporting `Lineage` through `qe-vintage` (which would be a facade
+   hiding the true origin). It is cross-cutting (QE-006), already transitive via `qe-vintage`, and adds no
+   train→live firewall edge — the reasoning holds and the firewall test re-proves it.
+5. **No monotonic/same-id guard — the right boundary; I agree with the choice.** Accepting *any verified*
+   vintage preserves legitimate **rollback** (reverting to a known-good vintage after a bad one), and there is
+   no clean total order on vintage ids/lineage to enforce monotonicity against. `verify()` already blocks
+   tampered artefacts. Guarding this would remove a useful capability for a cosmetic gain.
 
-**F3 — [Nit] `keeper_mut()` leaks full mutable access to the authoritative keeper.** `keeper_mut`
-(`transport.rs:154-156`) hands out `&mut VenueKeeper` guarded only by a doc-comment ("only mark + balances").
-Nothing prevents a caller applying a `Fill`/`Position` event that moves the kept position without a
-corresponding sim order, which is exactly the desync F2 warns about. Prefer narrow accessors for the intended
-mark/balance updates (e.g. delegate `observe_mark`/balance mutation) over a blanket `&mut` handle, so the
-sim-as-execution / keeper-as-truth invariant can't be violated from outside the transport.
+**O1 — [Observation, non-blocking] `rollover_from` verifies twice.** `repo.load(next_id)` already returns a
+hash-verified vintage, then `rollover` calls `next.verify()` again — two hash computations per repo-driven
+rollover. This is defensible (it makes `rollover` safe for *any* caller, including in-hand `from_vintage`-style
+vintages, so the swap point is the single safety boundary), and rollovers are rare, so the cost is negligible.
+Noting only so the redundancy is a conscious choice; a one-line comment on `rollover` stating "verifies
+unconditionally so the swap is safe regardless of provenance" would make it self-evident.
 
-_Answers to the Scrutinise list: (1) coalescing lossless — **yes** for position convergence; note only that
-intermediate revisions are also never seen by the QE-301 append sink (only pumped revisions are journalled),
-so a full audit trail of planner decisions would need the dropped ones recorded elsewhere — out of scope for
-this AC but worth a design note. (2) reconnect snapshot source — see F2. (3) append non-gating structural
-proof — **genuine**; holds under any async journal because the return value precedes and is independent of
-`append`. (4) sim vs keeper sync — **coincidental, not guaranteed**; see F2/F3. (5) `keeper_mut` encapsulation
-— see F3._
+**O2 — [Observation, non-blocking] a same-id rollover records a spurious transition.** With no same-id guard,
+`rollover(v_same_id)` would append a `RolloverRecord` with `from == to`. Harmless (and the audit trail then
+honestly reflects that a no-op rollover happened), but if a no-op should be suppressed, a `to_id == from_id`
+early-return would do it. Not required for the AC.
 
-### Fixes applied (commit `3ff14ff7`)
+### Polish applied (commit `6705c90a`) — O1/O2 addressed (doc-only)
 
-**F1 — resolved.** `apply_revision` now derives heartbeat health from the kill directly —
-`if self.gate.kill().is_tripped() { VenueHealth::Down(self.gate.kill_reason()) } else { VenueHealth::Ok }` —
-independent of whether a delta was submitted this tick. So an at-target (zero-delta) revision while the kill is
-tripped reports `Down`, keeping the out-of-band halt visible in steady state. `kill_reason()` reuses the QE-009
-`OrderGate` fallback so the heartbeat reason matches `KillHalt.reason`. Regression test
-`at_target_revision_reports_down_while_killed` (reach target → trip kill → re-send same at-target revision →
-heartbeat `Down`, no fill, no new order).
+Even though both were explicitly non-blocking, resolved them for clarity (no logic change):
 
-**F2 — resolved.** `reconnect()` now **reconciles** the venue snapshot into the keeper
-(`keeper.apply(&UserDataEvent::Position(report))`, QE-217 D3) before returning it, so the snapshot the planner
-receives and the position `plan_delta` re-plans against are one single truth — a divergence would be corrected
-to venue truth on reconnect, not silently split. Test 4 still green (no double-fill on resume).
-
-**F3 — resolved.** Removed `keeper_mut()`; the transport now exposes only the narrow `observe_mark(Price)` and
-`observe_balance(equity, avail)` (venue-truth mark/balance feeds). No caller can apply a `Fill`/`Position` that
-moves the kept position without a corresponding sim order, so the sim-as-execution / keeper-as-truth invariant
-F2 relies on cannot be violated from outside the transport.
-
-**Scrutinise #1 (audit trail of dropped revisions) — noted in the design note Risks** (backpressure section):
-coalesced/superseded revisions are not journalled; a full planner-decision audit trail would record them
-separately. Out of scope for this AC (position convergence is lossless), flagged for QE-301.
+- **O1 — addressed.** `rollover`'s doc comment now states it verifies **unconditionally** — it is the single
+  safety boundary, safe for any caller regardless of provenance — so `rollover_from`'s second verify is
+  documented as deliberate defence-in-depth on a rare path, not an oversight. (Kept the double-verify: making
+  `rollover` self-sufficient is the right invariant.)
+- **O2 — addressed (documented, behaviour intentionally kept).** `rollover`'s doc + the design-note Risks now
+  explain that a **same-id vintage with changed content is a *real* transition** (its content hash differs) and
+  is honestly recorded — there is deliberately no same-id guard, because rollback to a known-good vintage and
+  re-emission of a rebuilt vintage under the same id are legitimate. Suppressing same-id would hide a genuine
+  content change, so the honest record is correct.
 
 **Re-verification (toolchain 1.96.0)** — `cargo fmt --all --check` clean · `cargo clippy --workspace
---all-targets --locked -- -D warnings` clean · `cargo test --workspace --locked` 553 passed / 1 ignored /
-56 suites (+1 F1 regression) · `cargo test -p qe-architecture --test firewall` 1 passed · `cargo deny check`
-ok.
+--all-targets --locked -- -D warnings` clean · `cargo test --workspace --locked` 559 passed / 1 ignored /
+56 suites · `cargo test -p qe-architecture --test firewall` 1 passed · `cargo deny check` ok.

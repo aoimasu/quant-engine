@@ -20,12 +20,12 @@ qe-venue.workspace = true
 # qe-vintage embeds the genome via the shared qe-signal crate, so this edge does NOT reach the training
 # side (qe-wfo) — the QE-001 train/live decoupling invariant holds (genome eval is shared via qe-signal).
 qe-vintage.workspace = true
+# `Lineage` recorded on each vintage rollover (QE-219). Cross-cutting crate (QE-006), not on either side of
+# the QE-132 firewall, and already reached transitively via qe-vintage — the direct edge adds nothing
+# forbidden. Promoted from a dev-dependency now that it is named in the public rollover API.
+qe-determinism.workspace = true
 # Exact-decimal scalar context (funding/OI/premium) joined onto bars in the live factor join (QE-206).
 # A normal dependency is already visible to the crate's tests, so no separate dev-dependency is needed.
 rust_decimal.workspace = true
 # Typed bootstrap errors (QE-209) — reconstruction / REST / decode.
 thiserror.workspace = true
-
-[dev-dependencies]
-# Building a sealed Vintage fixture (its Lineage tag) for the evaluator-session tests (QE-207).
-qe-determinism.workspace = true
