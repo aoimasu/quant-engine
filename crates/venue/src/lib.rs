@@ -12,6 +12,10 @@
 //! resubscribes, and reports gaps. The concrete async websocket adapter is deferred to the runtime wiring
 //! (kept out of the core so the offline build stays dependency-light), mirroring the `http`-gated REST
 //! transport.
+//!
+//! QE-204 adds the private [`userdata`] stream: the fills/positions/heartbeat feed keyed by a venue listen
+//! key, with a [`UserDataSession`](userdata::UserDataSession) that renews the key + re-snapshots position
+//! truth on reconnect, and a [`sim`](userdata::sim) implementation driving the whole loop in sim mode.
 
 pub mod cache;
 pub mod clock;
@@ -19,6 +23,7 @@ pub mod ratelimit;
 pub mod registry;
 pub mod rest;
 pub mod stream;
+pub mod userdata;
 pub mod ws;
 
 pub use cache::RestCache;
@@ -27,6 +32,11 @@ pub use ratelimit::{Acquire, RateLimiter};
 pub use registry::{ConnectionRegistry, PumpOutcome};
 pub use rest::{RestError, RestResponse, RestTransport, VenueRequest, VenueRestClient};
 pub use stream::{Gap, StreamChannel, StreamMessage, StreamTier, Subscription};
+pub use userdata::{
+    Fill, ListenKey, ListenKeyProvider, PositionReport, PositionSnapshot, PositionSnapshotSource,
+    UserDataConnection, UserDataConnector, UserDataError, UserDataEvent, UserDataOutcome,
+    UserDataPoll, UserDataSession,
+};
 pub use ws::{WsConnection, WsConnector, WsError, WsPoll};
 
 #[cfg(feature = "http")]
