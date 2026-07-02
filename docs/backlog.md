@@ -1424,6 +1424,247 @@ mark-EMA, netting, and cutover bugs.
 
 ---
 
+# Phase PreP3 — Admin UI for training & backtesting   *(built after G2, before live)*
+
+> **Numbering note.** PreP3 sits between Phase 2 and Phase 3 and has no free "hundreds" slot
+> (2xx = P2, 3xx = P3), so its tickets use the **25x** band — numerically adjacent to the P2
+> runtime/tooling they extend. `Phase: PreP3` tags them explicitly.
+>
+> **Design of record:** [`docs/superpowers/specs/2026-07-02-admin-ui-training-backtest-design.md`](./superpowers/specs/2026-07-02-admin-ui-training-backtest-design.md)
+> · decisions [`docs/architecture/admin-ui-decisions.md`](./architecture/admin-ui-decisions.md)
+> · v1 plan [`docs/superpowers/plans/2026-07-03-admin-ui-v1-cli-jobs.md`](./superpowers/plans/2026-07-03-admin-ui-v1-cli-jobs.md).
+> Four accepted decisions: **D1** backtest an existing *vintage* over a window (not parametric);
+> **D2** backtest first, training monitor later; **D3** pre-ingested data + a minimal `ingest`;
+> **D4** `qe-server` (axum+tokio) supervising `qe-cli` subprocesses, file-based run store, Google
+> OAuth + email allowlist. Delivery order: CLI jobs → server+auth → SPA → training monitor.
+
+## QE-251 — `qe-cli backtest` job (run a vintage over a window)
+`Phase: PreP3` · `Area: runnable jobs / cli` · `Depends on: QE-129, QE-120, QE-107, QE-108, QE-105`
+
+**Why.** The pipeline is not yet runnable end-to-end from a command; the admin UI needs a real
+backtest to trigger, stream, and display. This wires the existing backtester into a deterministic
+CLI job (decision D1: backtest a sealed **vintage**, not hand-typed parameters).
+
+**Scope / requirements.**
+- New `qe-cli backtest --vintage <id> [--strategy <chromosome>] --start --end --resolution
+  [--universe] [--taker-fee-bps] [--slippage-model] --run-dir [--json]`.
+- Load+`verify()` the vintage (`qe-vintage`), read OHLCV bars for the window (`qe-storage` `scan_bars`).
+- **Feature engineering (required bridge):** `qe_wfo::backtest::backtest` consumes a *decision* bar
+  (`qe_wfo::backtest::Bar { features: FeatureVector, price, funding_rate }`), **not** raw
+  `qe_domain::Bar`. Build decision bars via `qe_signal::feature::assemble_batch` using the vintage's
+  catalogue schema (must match how the genomes were evolved — the genome addresses states by schema
+  order); factors from `scan_funding`/`scan_premium`. Then run each chromosome through `backtest` and
+  weight-aggregate to ensemble returns.
+- Compute the result contract (equity curve, drawdown, CAGR, Sharpe, Sortino, monthly returns) and
+  write `result.json` into `--run-dir`.
+- Emit **JSON-line progress** on stdout (`load/scan/features/simulate/report` → `done`), deterministic.
+
+**Out of scope.** Trade-level metrics (QE-252); server/subprocess supervision (QE-255).
+
+**Acceptance criteria.**
+- A backtest over a committed fixture vintage + sample store produces a deterministic `result.json`
+  matching a golden file; the progress stream ends with `{"t":"done"}`.
+
+`Spec ref: admin-ui spec §5.2, §8.1; plan Tasks 1–3, 5.`
+
+## QE-252 — Backtester trade-level recording (trades, win-rate, profit-factor)
+`Phase: PreP3` · `Area: runnable jobs / wfo` · `Depends on: QE-120`
+
+**Why.** `BacktestResult` emits per-bar returns and a trade **count** only — the design's Trades
+tab and the win-rate / profit-factor / Sortino metrics need per-trade data. Close the gap without
+disturbing the existing hot-path result.
+
+**Scope / requirements.**
+- Add `qe_wfo::backtest::backtest_with_trades(genome, bars, cfg) -> (BacktestResult, Vec<TradeFill>)`;
+  keep `backtest()` delegating and discarding trades (identical `returns`/`net_pnl`).
+- `TradeFill { entry_idx, exit_idx, side, entry_px, exit_px, return_frac }` per closed round-trip.
+- CLI maps `TradeFill → TradeRow`; add `win_rate` and `profit_factor` (Σgains/|Σlosses|, `∞` on no
+  losses, documented).
+
+**Out of scope.** Attribution / per-symbol P&L breakdown (Phase 3, QE-303).
+
+**Acceptance criteria.**
+- A known single winning round-trip yields exactly one `TradeFill` with `return_frac > 0`; the
+  existing `qe-wfo` suite still passes unchanged; `win_rate`/`profit_factor` match hand-computed values.
+
+`Spec ref: admin-ui spec §8.1 (trades); plan Task 4.`
+
+## QE-253 — `qe-cli ingest` scaffold + sample store fixture + coverage query
+`Phase: PreP3` · `Area: runnable jobs / storage` · `Depends on: QE-101, QE-102, QE-105`
+
+**Why.** A backtest needs data in the LMDB store; ingestion isn't wired into any command (decision
+D3). Provide a minimal populate path + a read-only coverage query the UI's Market-data view uses.
+
+**Scope / requirements.**
+- New `qe-cli ingest --config --start --end --resolution` populating a `MarketStore` from the
+  injectable `HistoricalSource` seam (real Binance decoders stay behind the default-off `http`
+  feature — out of scope here).
+- `coverage(store, instruments) -> Vec<CoverageRow{symbol, resolution, from, to, bars}>`.
+- A committed deterministic **sample store fixture** so backtests/tests run offline.
+
+**Out of scope.** Real network ingestion (behind `http`); UI-triggered ingest (Phase 3).
+
+**Acceptance criteria.**
+- `coverage()` over the sample store returns the expected symbol/range/bar-count rows; `ingest`
+  populates a store from an in-memory source in a test.
+
+`Spec ref: admin-ui spec §5.1, §6.2 (coverage); plan Task 6.`
+
+## QE-254 — `qe-server` crate scaffold (axum + tokio, static SPA, firewall guard)
+`Phase: PreP3` · `Area: backend / server` · `Depends on: QE-001`
+
+**Why.** The admin UI needs a backend. A new `qe-server` crate is a **second composition root**
+(decision D4a): all-Rust, async isolated to this crate, reusing the engine crates.
+
+**Scope / requirements.**
+- New `crates/server` (`qe-server`): axum + tokio; health route; serve built SPA static assets at
+  `/` and reserve `/api`.
+- Depends only on training-side + shared crates; **must not** depend on `qe-runtime`/`qe-venue`.
+- Extend the QE-132 firewall / QE-001 decoupling test to assert `qe-server` pulls in no forbidden
+  edge (no `qe-runtime`/`qe-venue`).
+
+**Out of scope.** Run lifecycle (QE-255), auth (QE-256).
+
+**Acceptance criteria.**
+- `qe-server` builds and serves a health endpoint + a static index; the firewall/decoupling tests
+  pass and now cover `qe-server`.
+
+`Spec ref: admin-ui spec §4, §6; ADR D4a.`
+
+## QE-255 — Run store + run lifecycle API + subprocess supervision
+`Phase: PreP3` · `Area: backend / orchestration` · `Depends on: QE-251, QE-254`
+
+**Why.** Trigger runs, track status/progress, serve results (decisions D4b file store, D4c
+subprocess supervision).
+
+**Scope / requirements.**
+- File-based run store `data/runs/<id>/{meta.json, result.json, stdout.log}` + `index.json`.
+- `POST /api/runs` (create+spawn `qe-cli backtest` subprocess), `GET /api/runs`,
+  `GET /api/runs/:id` (status+progress), `GET /api/runs/:id/result`.
+- Supervise the subprocess: tail JSON-line progress into `meta.json`; nonzero exit ⇒ `failed` with
+  captured stderr tail. Bounded worker pool; excess ⇒ `queued`.
+
+**Out of scope.** Auth gating (QE-256) — added on top.
+
+**Acceptance criteria.**
+- Creating a run spawns the job, transitions `queued→running→succeeded`, and the result endpoint
+  serves the `result.json`; a failing job yields `failed` with an error message.
+
+`Spec ref: admin-ui spec §6.1, §6.2; ADR D4b/D4c.`
+
+## QE-256 — Google OAuth + email allowlist + signed session
+`Phase: PreP3` · `Area: backend / auth` · `Depends on: QE-254`
+
+**Why.** Everything must be gated (decision D4d): Google sign-in restricted to an env allowlist.
+
+**Scope / requirements.**
+- Authorization-Code flow: `/api/auth/login` → Google → `/api/auth/callback` (verify ID token:
+  signature, `aud`, `iss`, expiry, `email_verified`).
+- Gate on `email ∈ QE_ADMIN_ALLOWED_EMAILS` (comma-separated, trimmed, case-insensitive) → else 403.
+- HTTP-only `Secure` `SameSite=Lax` **signed session cookie**; verified on every `/api` call;
+  `GET /api/me` returns the email or 401. Env: client id/secret, redirect uri, session secret.
+
+**Out of scope.** Multi-user roles (Phase 3+).
+
+**Acceptance criteria.**
+- No session ⇒ 401; a valid Google login not on the allowlist ⇒ 403; an allowlisted login ⇒ 200 and
+  `/api/me` returns the email (tested with a mocked OAuth verifier).
+
+`Spec ref: admin-ui spec §6.3, §6.4; ADR D4d.`
+
+## QE-257 — Vintages + market-data coverage read APIs
+`Phase: PreP3` · `Area: backend / api` · `Depends on: QE-253, QE-254`
+
+**Why.** The trigger form needs the list of backtestable vintages; the Market-data view needs
+read-only coverage.
+
+**Scope / requirements.**
+- `GET /api/vintages` (list sealed vintages from the artifacts dir with id/label/summary).
+- `GET /api/market-data/coverage` (from QE-253 `coverage()`).
+
+**Out of scope.** UI-triggered ingest (Phase 3).
+
+**Acceptance criteria.**
+- Both endpoints return the fixture vintages / sample-store coverage; both require a valid session.
+
+`Spec ref: admin-ui spec §6.2.`
+
+## QE-258 — Frontend scaffold + design-system port (Vite/React, AppShell, Login)
+`Phase: PreP3` · `Area: frontend` · `Depends on: QE-256`
+
+**Why.** Stand up the SPA and port the Claude Design system faithfully (decision: `web/` Vite app).
+
+**Scope / requirements.**
+- `web/` Vite + React app; port the design tokens + primitives + `AppShell`; Lucide icons; the
+  three brand fonts.
+- **Login** screen (net-new): brand lockup, "Sign in with Google" → `/api/auth/login`,
+  allowlist-rejection state. App shell with the Research nav group; Trade/Risk items disabled.
+- Build into static assets `qe-server` serves.
+
+**Out of scope.** Backtest screens (QE-259).
+
+**Acceptance criteria.**
+- The SPA builds; unauthenticated load shows Login; after a mocked session the shell renders with
+  the Research nav; the design system matches the Claude Design tokens.
+
+`Spec ref: admin-ui spec §7.1, §7.2 (login/shell); ADR D4a.`
+
+## QE-259 — Backtest screens wired to the API
+`Phase: PreP3` · `Area: frontend` · `Depends on: QE-255, QE-257, QE-258`
+
+**Why.** The core user journey: trigger a backtest, watch progress, review results.
+
+**Scope / requirements.**
+- **Backtests (list)** from `GET /api/runs`; **New backtest** form (vintage/window/resolution/
+  universe/costs) → `POST /api/runs`; **Backtest result** (port `BacktestResearch.jsx`) data-driven
+  from `GET /api/runs/:id/result`, with the progress card polling `GET /api/runs/:id` while running;
+  **Market-data coverage** (read-only) from `GET /api/market-data/coverage`.
+- Genome params render read-only (decision D1); "Re-run" clones params into a new run.
+
+**Out of scope.** Training monitor (QE-261); live Trade/Risk surfaces (Phase 3).
+
+**Acceptance criteria.**
+- A backtest can be triggered from the UI, its progress polled to completion, and the full result
+  contract rendered (metrics strip, equity/drawdown, monthly heatmap, trades table).
+
+`Spec ref: admin-ui spec §7.2, §7.3, §8.1.`
+
+## QE-260 — Runnable `qe-cli train` search job + rich progress  *(fast-follow)*
+`Phase: PreP3` · `Area: runnable jobs / wfo` · `Depends on: QE-118, QE-120, QE-126, QE-134`
+
+**Why.** Extend the platform to **training** (decision D2: after backtest). Wire the WFO/MAP-Elites
+search + ensemble + G1 gate into a real runnable job (today `train` only writes a manifest).
+
+**Scope / requirements.**
+- `qe-cli train` runs the real search → ensemble → validation → G1, sealing a vintage.
+- Emit rich JSON-line progress: generation, MAP-Elites archive coverage
+  (`qe_wfo::regularise::coverage`), CV folds, best-so-far fitness, G1 pass/fail.
+
+**Out of scope.** Distributed/parallel search; UI (QE-261).
+
+**Acceptance criteria.**
+- A small-budget training run over the sample store produces a sealed vintage and a progress stream
+  covering generations → gate result; deterministic for a fixed seed.
+
+`Spec ref: admin-ui spec §10 (spec 4).`
+
+## QE-261 — Training-monitor UI screen  *(fast-follow)*
+`Phase: PreP3` · `Area: frontend` · `Depends on: QE-259, QE-260`
+
+**Why.** Visualise a training run (net-new screen — the design has none).
+
+**Scope / requirements.**
+- Trigger a training run; live progress (generations, archive-coverage grid, CV folds, best-so-far,
+  G1 gate result) via polling; on completion, link to the produced vintage's backtest.
+
+**Out of scope.** Live Trade/Risk surfaces (Phase 3).
+
+**Acceptance criteria.**
+- A training run can be triggered and monitored to a G1 verdict from the UI, composed from the
+  design system.
+
+`Spec ref: admin-ui spec §10 (spec 4).`
+
 # Phase 3 — Live, attribution & ops   *(gated by G2; live capital gated by G3)*
 
 ## QE-301 — Strategy Allocation Journal (best-effort, 3-day retry)
