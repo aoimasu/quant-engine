@@ -26,12 +26,16 @@
 //! QE-213 adds position netting ([`live_netter`]): the post-breaker per-strategy targets
 //! (`weight × size_bps/10_000`, signed by direction) sum into one aggregate [`NetTarget`] per instrument —
 //! gated strategies are flat post-breaker, so they contribute zero.
+//! QE-214 adds the Hedge Planner ([`hedger`]): it scales that aggregate by equity into an **absolute**
+//! [`TargetPosition`], sourced from a [`PositionKeeper`] seam. Emitting an absolute target (not a delta) makes
+//! it **stateless** wrt the current venue position — the `target − current` delta is QE-217's concern.
 
 pub mod boot_state;
 pub mod bootstrap;
 pub mod cutover;
 pub mod evaluator;
 pub mod factor_join;
+pub mod hedger;
 pub mod live_breakers;
 pub mod live_kline;
 pub mod live_mark;
@@ -47,6 +51,7 @@ pub use bootstrap::{
 pub use cutover::{Cutover, CutoverError, CutoverStep};
 pub use evaluator::{ChromosomeDecision, EvalOutput, EvaluatorSession, SessionMode};
 pub use factor_join::LiveFactorJoin;
+pub use hedger::{CapitalView, HedgePlanner, PositionKeeper, TargetPosition};
 pub use live_breakers::BreakerLayer;
 pub use live_kline::LiveKlineSource;
 pub use live_mark::{MarkEmaLoop, MarkTick, MarkTickObserver};
