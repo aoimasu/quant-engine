@@ -31,8 +31,13 @@ sequenced specs (see the full spec §10).
 
 - Adds a Node/Vite frontend toolchain (under `web/`) and an async Rust server crate — both new to this repo,
   both isolated.
-- `qe-server` becomes a second composition root; the firewall/decoupling tests must stay green (assert it pulls
-  in no `qe-runtime`/`qe-venue` edge in v1).
+- `qe-server` becomes a second composition root. The current firewall/decoupling tests assert nothing about
+  `qe-server` (it doesn't exist yet); **QE-254 extends the guard** to assert `qe-server` pulls in no
+  `qe-runtime`/`qe-venue` edge in v1.
+- A backtest is **not** a direct `scan_bars → backtest` call: `qe_wfo::backtest::backtest` consumes a *decision*
+  bar (`FeatureVector` + price + funding), so a feature-engineering step (`qe_signal::feature::assemble_batch`,
+  using the vintage's catalogue schema) sits between the OHLCV store read and the backtester. Captured in the
+  v1 plan (QE-251 Task 5a) — it expands that ticket's scope.
 - Delivery order: (1) runnable CLI jobs → (2) `qe-server` + auth → (3) React SPA → (4) training monitor.
 - Live-trading surfaces (Dashboard/Positions/Orders/Risk order ticket), UI-triggered ingest, and any
   real-capital path remain **out of scope** (Phase 3).

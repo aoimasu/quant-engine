@@ -38,21 +38,41 @@ qe_storage::store::MarketStore::open(path: impl AsRef<Path>, map_size: usize) ->
 store.scan_bars(instrument: &InstrumentId, resolution: Resolution, from: Timestamp, to: Timestamp)
     -> Result<Vec<qe_domain::Bar>, StorageError>;
 
-// qe-wfo backtester (QE-120)
-qe_wfo::backtest::backtest(genome: &Genome, bars: &[Bar], cfg: &BacktestConfig) -> BacktestResult;
+// qe-wfo backtester (QE-120) — NOTE: the input is a *decision* bar, NOT raw OHLCV.
+qe_wfo::backtest::backtest(genome: &Genome, bars: &[qe_wfo::backtest::Bar], cfg: &BacktestConfig) -> BacktestResult;
 struct BacktestConfig { friction: qe_wfo::friction::FrictionConfig, min_trades: usize, windows: usize }
 struct BacktestResult { returns: Vec<f64>, trades: usize, net_pnl: Decimal, accepted: bool, fitness: NoiseRobustFitness }
 
-// qe-domain
-struct Bar { open_time: Timestamp, resolution: Resolution, open: Price, high: Price, low: Price, close: Price, volume: Qty, trades: u64 }
+// the wfo DECISION bar (QE-108) — pre-quantised; this is what backtest() consumes, NOT qe_domain::Bar:
+struct qe_wfo::backtest::Bar { features: qe_signal::FeatureVector, price: Decimal, funding_rate: Option<Decimal> }
+
+// qe-domain — RAW OHLCV bar from the store; feeds feature engineering, does NOT go into backtest() directly:
+struct qe_domain::Bar { open_time: Timestamp, resolution: Resolution, open: Price, high: Price, low: Price, close: Price, volume: Qty, trades: u64 }
+
+// qe-signal feature pipeline (QE-107/108) — the REQUIRED bridge OHLCV → decision bar:
+qe_signal::feature::assemble_batch(cfg: &CatalogueConfig, samples: &[Sample]) -> Vec<FeatureVector>;
+// CatalogueConfig / FeatureSchema MUST match the schema the vintage's genomes were evolved against
+// (the genome addresses indicator states by schema order) — sourced from the vintage's config/calibration.
 ```
 
-**Gap to close (Task 4):** `BacktestResult` gives per-bar `returns` and a trade **count** — not a per-trade log, win-rate, profit-factor, or Sortino. The design's Trades tab + two of the six metrics need trade-level data. Task 4 adds a trade-recording path; until then those fields are computed-where-possible and the trade list is explicitly empty (never faked).
+**Bridge to build (Task 5a — the two `Bar` types are different):** `scan_bars` yields `qe_domain::Bar`
+(OHLCV) but `backtest()` needs `qe_wfo::backtest::Bar` (a `FeatureVector` + price + funding). Between them sits
+a mandatory **feature-engineering** step: OHLCV (+ funding/premium factors from `scan_funding`/`scan_premium`)
+→ `Sample`s → `qe_signal::feature::assemble_batch(catalogue_cfg, samples)` → `FeatureVector`s → zip with
+`close` price + funding into decision bars. The `catalogue_cfg`/schema **must** be the one the vintage was
+built with (else the genome's clause indices are meaningless). This materially expands QE-251's scope and is
+its own task step (5a below), depending on QE-107/108.
+
+**Gap to close (Task 4):** `BacktestResult` gives per-bar `returns` and a trade **count** — not a per-trade
+log, win-rate, profit-factor, or Sortino. The design's Trades tab + two of the six metrics need trade-level
+data. Task 4 adds a trade-recording path; until then those fields are computed-where-possible and the trade
+list is explicitly empty (never faked).
 
 ## File structure
 
 - Create `crates/cli/src/jobs/mod.rs` — job dispatch shared types (`ProgressLine`, `RunError`, `emit_progress`).
 - Create `crates/cli/src/jobs/backtest.rs` — the backtest job: params, orchestration, `run_backtest(...) -> Result<BacktestResultDoc, RunError>`.
+- Create `crates/cli/src/jobs/features.rs` — the OHLCV→decision-bar bridge: `to_decision_bars(ohlcv: &[qe_domain::Bar], factors, cfg: &CatalogueConfig) -> Vec<qe_wfo::backtest::Bar>` (Sample assembly + `assemble_batch`), using the vintage's catalogue schema.
 - Create `crates/cli/src/jobs/metrics.rs` — pure functions: equity curve, drawdown, CAGR, Sharpe, Sortino, monthly returns, win-rate, profit-factor (all `#[cfg(test)]`-covered, no IO).
 - Create `crates/cli/src/jobs/result.rs` — the serialisable result contract structs (`BacktestResultDoc`, `Metrics`, `TradeRow`, …) with `serde`.
 - Create `crates/cli/src/jobs/ingest.rs` — the ingest job scaffold + coverage query.
@@ -224,7 +244,19 @@ fn backtest_over_fixture_store_matches_golden() {
 
 - [ ] **Step 2: Build the fixtures** — a tiny committed `MarketStore` (a handful of bars for 1–2 instruments over a short window) and a `sample_vintage.json` (one simple deterministic genome). Generate `golden_result.json` once from the implementation, eyeball it, commit it.
 - [ ] **Step 3: Run to verify it fails** — FAIL (module missing).
-- [ ] **Step 4: Implement `run_backtest`:** open the store (`MarketStore::open`), load+`verify()` the vintage, for each chromosome `scan_bars(instrument, resolution, from, to)` → `backtest_with_trades` → weight-aggregate per-bar returns by `weights`, map trades → `TradeRow`, call the Task-3/4 metrics, assemble `BacktestResultDoc`. Emit progress at `load`(10) / `scan`(30) / `simulate`(70) / `report`(95) / done(100). Parse `--start`/`--end` to `Timestamp` (reuse `qe-domain`/`qe-config` date parsing; `Usage` error on bad dates).
+- [ ] **Step 4a: Feature engineering (the OHLCV→decision-bar bridge — `features.rs`):** for each instrument
+  `scan_bars` (OHLCV) + `scan_funding`/`scan_premium` (factors) → build `Sample`s →
+  `qe_signal::feature::assemble_batch(catalogue_cfg, samples)` → `Vec<FeatureVector>` → zip with `close` +
+  funding into `Vec<qe_wfo::backtest::Bar>`. The `catalogue_cfg`/`FeatureSchema` is taken from the vintage
+  (its config/calibration) so it matches how the genomes were evolved — assert schema compatibility, error
+  (`RunError::SchemaMismatch`) otherwise. Test with the fixture vintage + sample store.
+- [ ] **Step 4b: Implement `run_backtest`:** open the store (`MarketStore::open`), load+`verify()` the vintage,
+  build decision bars via Step 4a, for each chromosome `backtest_with_trades(genome, &decision_bars, cfg)` →
+  weight-aggregate per-bar returns by `weights`, map `TradeFill` → `TradeRow` (sourcing `symbol` from the
+  chromosome's instrument, `id` as a stable `#<index>`, `hold` from `bars[exit_idx].open_time −
+  bars[entry_idx].open_time`), call the Task-3/4 metrics, assemble `BacktestResultDoc`. Emit progress at
+  `load`(10) / `scan`(30) / `features`(50) / `simulate`(80) / `report`(95) / done(100). Parse `--start`/`--end`
+  to `Timestamp` (reuse `qe-domain`/`qe-config` date parsing; `Usage` error on bad dates).
 - [ ] **Step 5: Wire `main.rs`** to call it, print each progress as a JSON line, write `result.json`, print terminal `{"t":"done",...}`, exit 0; on `RunError` print `{"t":"error",...}` and exit non-zero.
 - [ ] **Step 6: Run to verify pass** — `cargo test -p qe-cli --locked`.
 - [ ] **Step 7: Commit** — `git commit -m "feat: PreP3 qe-cli backtest job (progress + result.json)"`.
@@ -257,4 +289,8 @@ fn backtest_over_fixture_store_matches_golden() {
 
 - **Spec coverage (spec §5, §8):** `backtest` job ✓ (T1,T5), result contract ✓ (T2, §8.1), progress protocol ✓ (T5, Global Constraints), `ingest` + coverage ✓ (T6), metric provenance gap ✓ handled (T3 computes equity/dd/cagr/sharpe/sortino/monthly; T4 adds trades + win-rate/profit-factor — nothing invented in the UI). Spec §6/§7 (server/SPA) are separate plans, noted. ✓
 - **Placeholder scan:** none — every code step shows real code or names a verified API; the one true unknown (real Binance decoders) is explicitly out of scope behind `http`, not a hidden TODO. ✓
-- **Type consistency:** `BacktestResultDoc`/`Metrics`/`TradeRow` field names match §8.1 across T2/T3/T5; `TradeFill` (T4) → `TradeRow` (T2) mapping is explicit; `backtest_with_trades` reused by T5. ✓
+- **Type consistency:** `BacktestResultDoc`/`Metrics`/`TradeRow` field names match §8.1 across T2/T3/T5;
+  `TradeFill` (T4) → `TradeRow` (T2) mapping is explicit (incl. `symbol`/`id`/`hold` sourcing, T5 Step 4b);
+  `backtest_with_trades` reused by T5. **The two `Bar` types are disambiguated** — `qe_domain::Bar` (OHLCV,
+  from `scan_bars`) vs `qe_wfo::backtest::Bar` (decision bar into `backtest()`) — with the required
+  `qe_signal::feature::assemble_batch` bridge (`features.rs`, T5 Step 4a) using the vintage's schema. ✓
