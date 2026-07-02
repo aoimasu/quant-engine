@@ -54,6 +54,7 @@ pub mod live_kline;
 pub mod live_mark;
 pub mod live_netter;
 pub mod pretrade;
+pub mod reconciliation;
 pub mod transport;
 pub mod vintage_rollover;
 
@@ -76,6 +77,7 @@ pub use live_mark::{MarkEmaLoop, MarkTick, MarkTickObserver};
 pub use live_netter::{NetLeg, NetTarget, PositionNetter};
 pub use pretrade::{PreTradeDecision, PreTradeGovernor, PreTradeVerdict};
 pub use qe_risk::{KillHandle, KillSwitch};
+pub use reconciliation::{AlarmAction, Divergence, ReconOutcome, ReconciliationGuard};
 pub use transport::{
     AdapterReport, AppendError, AppendSink, NullAppendSink, PlannerAdapterLink, TargetRevision,
     TransportError, VenueHealth,
