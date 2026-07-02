@@ -66,8 +66,9 @@ pub struct KillHalt { pub reason: String }
 The `KillHandle` is a cloneable, latching, `Send + Sync` handle to shared atomic state. A watchdog, the
 clock-skew guard (QE-008), or a manual control holds a **clone** and trips it; the gate observes the same
 trip. Neither `submit`'s halt nor `enforce_kill`'s flatten needs the Hedge Planner to produce a target or the
-cockpit to be alive — the flatten target is a hard-coded **flat** (`Notional::ZERO`), computed from the kept
-position alone. That is exactly the out-of-band, deterministic halt the reviewer required.
+cockpit to be alive — the flatten is always to **flat**, computed from the kept position alone via
+`flatten_intent(current_qty)` (see D1: no `Notional` target and no mark are needed to size it). That is exactly
+the out-of-band, deterministic halt the reviewer required.
 
 ## Test plan (deterministic)
 

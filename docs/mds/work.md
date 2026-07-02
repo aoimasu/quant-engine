@@ -50,36 +50,35 @@ Planner; independently testable trigger.
 
 ### Feedback
 
-**F1 — [Blocker] `enforce_kill` latch-once disarms the flatten on a transiently-flat first call.**
-`crates/runtime/src/kill_gate.rs:128` sets `self.flattened = true` unconditionally, before it is known
-whether `flatten_intent` produced a closing order:
+_Re-review of commit `571f0adb` (2026-07-02)._
 
-```rust
-self.flattened = true;
-let fill = flatten_intent(current_qty).map(|intent| self.sim.submit(intent, fill_price, event_time_ms));
-```
+**F1 — [Blocker] RESOLVED.** `enforce_kill` (`kill_gate.rs:130-143`) now latches `self.flattened = true`
+**only inside the `Some(intent)` branch**, after the closing order is actually submitted. A flat/not-yet-known
+`current_qty` yields `Flattened(None)` and leaves `flattened == false`, so the gate stays armed and a position
+learned on a later tick is still flattened. Verified against the two named failure modes: (a) **no
+double-flatten from keeper fill latency** — the latch is set synchronously in the same call as the submit, so
+a later tick still reporting the pre-flatten qty short-circuits at the `if self.flattened { return Halted }`
+guard; exactly one flatten order can ever be sent; (b) **no spurious never-latch** — the only case that never
+latches is a permanently-flat position, which is correct (nothing to flatten; `submit`/`admit` remain
+structurally halted). Regression test `flat_first_call_stays_armed_and_still_flattens_a_later_position`
+matches the requested case. Accepted.
 
-If `current_qty == 0` at the first post-trip call — e.g. a watchdog trips during a reconnect window where the
-QE-217 `VenueKeeper` has reset and not yet re-absorbed the authoritative position snapshot (the keeper "never
-infers") — no closing order is sent, yet the gate latches. On a later tick, once the real position is known,
-`enforce_kill` returns `Halted` and never flattens it. Because `submit` is already halted, any position the
-keeper learns about after the trip necessarily existed at trip time, so this is a genuine
-open-position-never-flattened hole on the safety path. The design-note risk (design §Risks) only addresses a
-caller that *never* calls `enforce_kill`; it does not cover this. **Fix direction:** latch only after a
-non-flat position has actually been flattened (do not set `flattened` when `flatten_intent` is `None`), while
-still guarding against a double-flatten caused by keeper fill latency. Add a regression test: establish a
-position, trip, call `enforce_kill(current_qty = 0, …)` once, then `enforce_kill(current_qty = 0.2, …)` and
-assert the flatten still occurs.
+**F3 — [Nit] RESOLVED.** `OrderGate::kill_reason()` (`gate.rs:69-73`) is now the single source; both
+`kill_precheck`'s `FlattenAndHalt` and `submit`'s `KillHalt.reason` call it. `OrderGate` is in scope in
+`kill_gate.rs`, so `self.kill_reason()` resolves via the trait default. Accepted.
 
-**F2 — [Nit] Implementation diverged from the design note.** Design §Design (design note line 47) specifies
-`plan_delta(Notional::ZERO, current_qty, mark)`; the code instead hand-rolls `flatten_intent(current_qty)`.
-The rationale (the safety path shouldn't need a mark to compute size) is reasonable — arguably better — but
-update the design note so code and design don't drift.
+**F2 — [Nit] PARTIALLY RESOLVED; one residual drift remains (see F4).** D1, the test plan, and Risks are
+correctly updated to `flatten_intent`. Accepted for those.
 
-**F3 — [Nit] Duplicated kill-reason fallback.** `submit` (`kill_gate.rs:103-106`) re-implements the
-`reason().unwrap_or_else(|| "kill switch tripped".to_owned())` fallback already encoded in the QE-009
-`OrderGate::kill_precheck`. Centralize so `submit`'s `KillHalt.reason` and `admit`'s `FlattenAndHalt` reason
-stay consistent from one source.
+**F4 — [Nit] Residual design drift in D2 — the exact issue F2 was meant to close.** The "Fixes applied"
+note claims "Code and design no longer drift," but `qe-216-venue-kill-switch-design.md:69` (§D2) still reads:
+"the flatten target is a hard-coded **flat** (`Notional::ZERO`), computed from the kept position alone." That
+`Notional::ZERO` parenthetical directly contradicts D1's own deliberate divergence from
+`plan_delta(Notional::ZERO, …)` and the implementation, which uses `flatten_intent(current_qty)` and touches
+no `Notional` at all. **Fix:** drop the stale `(Notional::ZERO)` reference in D2 (e.g. "computed from the kept
+position alone via `flatten_intent`"), so the note is internally consistent with D1. Low severity — the code
+is correct; this is a doc-only inconsistency, but it is precisely the drift F2 flagged, so it must be closed
+before approval.
 
 ### Fixes applied (commit `571f0adb`)
 
@@ -104,3 +103,11 @@ call it, so they cannot diverge.
 **Re-verification (toolchain 1.96.0)** — `cargo fmt --all --check` clean · `cargo clippy --workspace
 --all-targets --locked -- -D warnings` clean · `cargo test --workspace --locked` 546 passed / 1 ignored /
 56 suites · `cargo deny check` advisories/bans/licenses/sources ok.
+
+### F4 fix (commit pending)
+
+**F4 — resolved.** Agreed — genuine residual drift. Design note §D2 (line 69) no longer references
+`Notional::ZERO`; it now reads "the flatten is always to **flat**, computed from the kept position alone via
+`flatten_intent(current_qty)` (see D1: no `Notional` target and no mark are needed to size it)", so D2 is
+internally consistent with D1 and the code. Doc-only change; full green gate re-run and clean (fmt · clippy ·
+`cargo test` 546 passed/1 ignored/56 suites · deny ok).
