@@ -9,12 +9,15 @@ use qe_domain::{InstrumentId, Resolution};
 /// markPrice@1s cadence in milliseconds.
 pub const MARK_PRICE_CADENCE_MS: i64 = 1_000;
 
+/// depth20@100ms cadence in milliseconds.
+pub const DEPTH20_CADENCE_MS: i64 = 100;
+
 /// The wss tier a stream belongs to — the registry's partition key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum StreamTier {
-    /// Market data: kline + markPrice (this ticket).
+    /// Market data (Hedge-Planner path): kline + markPrice.
     Market,
-    /// Realtime/private tier (QE-203) — partitioned here, populated later.
+    /// Realtime tier (Edge gateway path): bookTicker + depth20@100ms + aggTrade.
     Realtime,
 }
 
@@ -23,32 +26,45 @@ impl StreamTier {
     pub const ALL: [StreamTier; 2] = [StreamTier::Market, StreamTier::Realtime];
 }
 
-/// A Market-tier channel.
+/// A wss channel — Market-tier (kline / markPrice) or Realtime-tier (bookTicker / depth20 / aggTrade).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum StreamChannel {
-    /// Kline/candles at a resolution (5m/30m/4h on the Market tier).
+    /// Kline/candles at a resolution (5m/30m/4h). Market tier.
     Kline(Resolution),
-    /// Mark price at 1-second cadence.
+    /// Mark price at 1-second cadence. Market tier.
     MarkPrice,
+    /// Best bid/ask top-of-book updates (`bookTicker`). Realtime tier; event-driven (no fixed cadence).
+    BookTicker,
+    /// 20-level order-book snapshots at 100 ms (`depth20@100ms`). Realtime tier.
+    Depth20,
+    /// Aggregated trades (`aggTrade`). Realtime tier; event-driven (no fixed cadence).
+    AggTrade,
 }
 
 impl StreamChannel {
-    /// Expected inter-message spacing (ms): the resolution length for kline, 1s for markPrice. A larger
-    /// gap than this between consecutive messages is a discontinuity.
+    /// Expected inter-message spacing (ms) for fixed-cadence channels, or `None` for **event-driven**
+    /// channels (`bookTicker`, `aggTrade`) where a time-based gap is undefined. When `Some(ms)`, a spacing
+    /// larger than `ms` between consecutive messages is a discontinuity; when `None`, the registry does no
+    /// cadence-based gap detection (an outage still surfaces via `PumpOutcome.reconnected`).
     #[must_use]
-    pub fn cadence_ms(self) -> i64 {
+    pub fn cadence_ms(self) -> Option<i64> {
         match self {
-            StreamChannel::Kline(res) => i64::from(res.minutes()) * 60_000,
-            StreamChannel::MarkPrice => MARK_PRICE_CADENCE_MS,
+            StreamChannel::Kline(res) => Some(i64::from(res.minutes()) * 60_000),
+            StreamChannel::MarkPrice => Some(MARK_PRICE_CADENCE_MS),
+            StreamChannel::Depth20 => Some(DEPTH20_CADENCE_MS),
+            StreamChannel::BookTicker | StreamChannel::AggTrade => None,
         }
     }
 
-    /// The venue stream suffix (`kline_5m`, `markPrice@1s`).
+    /// The venue stream suffix (`kline_5m`, `markPrice@1s`, `bookTicker`, `depth20@100ms`, `aggTrade`).
     #[must_use]
     pub fn suffix(self) -> String {
         match self {
             StreamChannel::Kline(res) => format!("kline_{}", res.as_str()),
             StreamChannel::MarkPrice => "markPrice@1s".to_owned(),
+            StreamChannel::BookTicker => "bookTicker".to_owned(),
+            StreamChannel::Depth20 => "depth20@100ms".to_owned(),
+            StreamChannel::AggTrade => "aggTrade".to_owned(),
         }
     }
 }
@@ -84,11 +100,33 @@ impl Subscription {
         Self::new(instrument, StreamChannel::MarkPrice)
     }
 
-    /// The tier this subscription belongs to. Kline + markPrice are Market-tier.
+    /// Convenience: a bookTicker (best bid/ask) subscription. Realtime tier.
+    #[must_use]
+    pub fn book_ticker(instrument: InstrumentId) -> Self {
+        Self::new(instrument, StreamChannel::BookTicker)
+    }
+
+    /// Convenience: a depth20@100ms order-book subscription. Realtime tier.
+    #[must_use]
+    pub fn depth20(instrument: InstrumentId) -> Self {
+        Self::new(instrument, StreamChannel::Depth20)
+    }
+
+    /// Convenience: an aggTrade subscription. Realtime tier.
+    #[must_use]
+    pub fn agg_trade(instrument: InstrumentId) -> Self {
+        Self::new(instrument, StreamChannel::AggTrade)
+    }
+
+    /// The tier this subscription belongs to. Kline + markPrice are Market-tier (the Hedge-Planner data
+    /// path); bookTicker + depth20 + aggTrade are Realtime-tier (the Edge gateway path).
     #[must_use]
     pub fn tier(&self) -> StreamTier {
         match self.channel {
             StreamChannel::Kline(_) | StreamChannel::MarkPrice => StreamTier::Market,
+            StreamChannel::BookTicker | StreamChannel::Depth20 | StreamChannel::AggTrade => {
+                StreamTier::Realtime
+            }
         }
     }
 
@@ -143,12 +181,15 @@ mod tests {
 
     #[test]
     fn cadence_and_stream_names_match_the_venue_forms() {
-        assert_eq!(StreamChannel::Kline(Resolution::M5).cadence_ms(), 300_000);
+        assert_eq!(
+            StreamChannel::Kline(Resolution::M5).cadence_ms(),
+            Some(300_000)
+        );
         assert_eq!(
             StreamChannel::Kline(Resolution::H4).cadence_ms(),
-            14_400_000
+            Some(14_400_000)
         );
-        assert_eq!(StreamChannel::MarkPrice.cadence_ms(), 1_000);
+        assert_eq!(StreamChannel::MarkPrice.cadence_ms(), Some(1_000));
 
         assert_eq!(
             Subscription::kline(inst(), Resolution::M5).stream_name(),
@@ -167,5 +208,52 @@ mod tests {
             StreamTier::Market
         );
         assert_eq!(Subscription::mark_price(inst()).tier(), StreamTier::Market);
+    }
+
+    // --- QE-203: Realtime-tier streams ---
+
+    #[test]
+    fn realtime_channels_have_venue_correct_stream_names() {
+        assert_eq!(
+            Subscription::book_ticker(inst()).stream_name(),
+            "btcusdt@bookTicker"
+        );
+        assert_eq!(
+            Subscription::depth20(inst()).stream_name(),
+            "btcusdt@depth20@100ms"
+        );
+        assert_eq!(
+            Subscription::agg_trade(inst()).stream_name(),
+            "btcusdt@aggTrade"
+        );
+    }
+
+    #[test]
+    fn realtime_channels_are_realtime_tier() {
+        assert_eq!(
+            Subscription::book_ticker(inst()).tier(),
+            StreamTier::Realtime
+        );
+        assert_eq!(Subscription::depth20(inst()).tier(), StreamTier::Realtime);
+        assert_eq!(Subscription::agg_trade(inst()).tier(), StreamTier::Realtime);
+        // The Market-tier channels must not be mis-routed by the new arm.
+        assert_eq!(
+            Subscription::kline(inst(), Resolution::M5).tier(),
+            StreamTier::Market
+        );
+        assert_eq!(Subscription::mark_price(inst()).tier(), StreamTier::Market);
+    }
+
+    #[test]
+    fn event_driven_channels_have_no_cadence_but_depth_does() {
+        // Event-driven: no time-defined hole.
+        assert_eq!(StreamChannel::BookTicker.cadence_ms(), None);
+        assert_eq!(StreamChannel::AggTrade.cadence_ms(), None);
+        // depth20 is genuinely 100 ms.
+        assert_eq!(
+            StreamChannel::Depth20.cadence_ms(),
+            Some(DEPTH20_CADENCE_MS)
+        );
+        assert_eq!(StreamChannel::Depth20.cadence_ms(), Some(100));
     }
 }
