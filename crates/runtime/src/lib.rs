@@ -20,12 +20,16 @@
 //! QE-211 adds the in-process cutover ([`cutover`]): the warmed session is switched from replay to live
 //! **in place** (no state copy) while enforcing bar continuity at the seam — overlap bars are dropped (no
 //! duplicate), a skipped bar is surfaced as a gap, and post-cutover decisions match a continuous reference.
+//! QE-212 adds the circuit-breaker layer ([`live_breakers`]): per-strategy + ensemble QE-116 breakers
+//! calibrated from the vintage profile, latching gated scopes and clamping gated strategies to
+//! [`Decision`](qe_signal::Decision)`::Exit` (flat) before netting — firing identically to the QE-116 replay.
 
 pub mod boot_state;
 pub mod bootstrap;
 pub mod cutover;
 pub mod evaluator;
 pub mod factor_join;
+pub mod live_breakers;
 pub mod live_kline;
 pub mod live_mark;
 
@@ -39,6 +43,7 @@ pub use bootstrap::{
 pub use cutover::{Cutover, CutoverError, CutoverStep};
 pub use evaluator::{ChromosomeDecision, EvalOutput, EvaluatorSession, SessionMode};
 pub use factor_join::LiveFactorJoin;
+pub use live_breakers::BreakerLayer;
 pub use live_kline::LiveKlineSource;
 pub use live_mark::{MarkEmaLoop, MarkTick, MarkTickObserver};
 pub use qe_risk::{KillHandle, KillSwitch};
