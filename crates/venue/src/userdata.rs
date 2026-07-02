@@ -208,11 +208,14 @@ where
     /// Establish the stream: create a listen key, open the socket, and take the initial position
     /// snapshot. The snapshot is returned so the caller establishes position truth from the start.
     ///
+    /// This is the **initial-establish** entry point. Calling it again re-establishes a fresh
+    /// key/connection/snapshot (the same mechanism [`pump`](Self::pump) uses on reconnect), so it is
+    /// normally called exactly once at startup.
+    ///
     /// # Errors
     /// [`UserDataError`] if the key, connection, or snapshot fails.
     pub fn connect(&mut self) -> Result<PositionSnapshot, UserDataError> {
-        let (_key, snapshot) = self.establish()?;
-        Ok(snapshot)
+        self.establish()
     }
 
     /// The current listen key (if connected).
@@ -250,7 +253,7 @@ where
             // as a hard disconnect: renew + reconnect + re-snapshot.
             UserDataPoll::Event(UserDataEvent::ListenKeyExpired { .. })
             | UserDataPoll::Disconnected => {
-                let (_key, snapshot) = self.establish()?;
+                let snapshot = self.establish()?;
                 Ok(UserDataOutcome {
                     event: Some(UserDataEvent::Snapshot(snapshot)),
                     reconnected: true,
@@ -264,14 +267,15 @@ where
     }
 
     /// Create a fresh key, connect, and snapshot — the shared connect/reconnect path. Replaces any
-    /// existing key/connection (renewal on reconnect).
-    fn establish(&mut self) -> Result<(ListenKey, PositionSnapshot), UserDataError> {
+    /// existing key/connection (renewal on reconnect). Only mutates `self` after all three seam calls
+    /// succeed, so a mid-reconnect failure leaves the prior key/connection intact for the next `pump`.
+    fn establish(&mut self) -> Result<PositionSnapshot, UserDataError> {
         let key = self.provider.create()?;
         let conn = self.connector.connect(&key)?;
         let snapshot = self.snapshots.snapshot()?;
-        self.key = Some(key.clone());
+        self.key = Some(key);
         self.conn = Some(conn);
-        Ok((key, snapshot))
+        Ok(snapshot)
     }
 }
 
