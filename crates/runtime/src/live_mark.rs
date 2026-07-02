@@ -80,6 +80,10 @@ impl MarkEmaLoop {
 
     /// Drive an ordered sequence of `(event_time_ms, raw)` marks, forwarding each produced [`MarkTick`] to
     /// `observer` (the breaker feed) and returning the ticks in arrival order.
+    ///
+    /// The returned `Vec` and the observer receive the *same* ticks — the vector is a convenience for
+    /// callers that also want the batch (e.g. tests / logging); it is not a second dispatch. Callers that
+    /// only need the streaming side can ignore the return value.
     pub fn drive<I, O>(&mut self, marks: I, observer: &mut O) -> Vec<MarkTick>
     where
         I: IntoIterator<Item = (i64, Decimal)>,
@@ -129,10 +133,11 @@ mod tests {
         for t in 1..=60 {
             last = loop_.observe(t * 1_000, dec(100));
         }
-        // After one half-life the smoothed value is ~halfway from 0 to 100.
+        // After one half-life the smoothed value is exactly ~50 (the only error is alpha's f64→Decimal
+        // rounding), so a tight tolerance is a strong guard against a regression in the alpha formula.
         let smoothed: f64 = last.smoothed.try_into().unwrap();
         assert!(
-            (smoothed - 50.0).abs() < 1.0,
+            (smoothed - 50.0).abs() < 0.05,
             "after one half-life the smoothed mark should be ~50, got {smoothed}"
         );
         assert_eq!(last.raw, dec(100), "raw is the un-smoothed input");
