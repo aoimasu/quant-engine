@@ -109,5 +109,10 @@ pub struct ActiveVintage { current: Vintage, history: Vec<RolloverRecord> }
 - **Lineage history grows unbounded** across many rollovers — a live process rolling over periodically retains
   every transition. Fine at expected cadence (rollovers are rare); a ring buffer is a later refinement if
   needed. Documented.
+- **`rollover` verifies unconditionally** — even when reached via `rollover_from` (whose `repo.load` already
+  verified). This double-verify is deliberate: `rollover` is the single safety boundary, safe for any caller
+  regardless of provenance; the extra hash on a rare path is negligible. A **same-id** vintage with changed
+  content is a *real* transition (its hash differs) and is honestly recorded, not suppressed — there is no
+  same-id guard by design (rollback / re-emission are legitimate).
 - **Firewall.** New direct edge is `qe-runtime → qe-determinism` only (cross-cutting, already transitive); no
   train-side edge. Re-proven by the firewall test.

@@ -99,6 +99,14 @@ impl ActiveVintage {
     /// torn repo/calibration state). On success the transition is recorded (both endpoints' `vintage_id` +
     /// `lineage`) and `current` is replaced. Returns the recorded transition.
     ///
+    /// This is the **single safety boundary**: it verifies `next` *unconditionally* — regardless of provenance
+    /// — so the swap is safe whether `next` came in-hand or from [`rollover_from`] (which already loaded a
+    /// verified vintage; the second verify is deliberate defence-in-depth on a rare path, not an oversight).
+    ///
+    /// No monotonic/same-id guard is imposed: any *verified* vintage may become active, which preserves
+    /// legitimate **rollback** to a known-good vintage and re-emission of a rebuilt vintage under the same id
+    /// (a real transition — its content hash differs — so it is honestly recorded, not suppressed).
+    ///
     /// # Errors
     /// [`VintageError::HashMismatch`] (or a deserialise error) if `next` does not verify; the current vintage
     /// is unchanged.
