@@ -22,12 +22,15 @@ use qe_signal::Decision;
 
 use crate::evaluator::ChromosomeDecision;
 
-/// A threshold that never fires (100% drawdown) — disables a tier (used for the ensemble's slow/med tiers).
+/// A threshold set to 1.0, so a tier only fires at a full 100% drawdown (total wipeout) — effectively
+/// never. Used to disable the ensemble breaker's slow/med tiers (it is fast-drop only).
 fn never_fires() -> Fraction {
     Fraction::new(Decimal::ONE).expect("1.0 is a valid fraction")
 }
 
-/// A zero threshold that fires immediately — the fail-safe for an uncalibrated strategy (never trade one).
+/// A zero-threshold breaker for an uncalibrated strategy. Note this is *defence in depth* only:
+/// [`BreakerLayer::from_calibration`] also **explicitly pre-gates** any uncalibrated strategy, so the
+/// fail-safe does not rely on the breaker's tier thresholds (which could change) to gate it.
 fn fires_immediately() -> BreakerThresholds {
     let zero = Fraction::new(Decimal::ZERO).expect("0.0 is a valid fraction");
     BreakerThresholds {
@@ -80,26 +83,34 @@ impl BreakerLayer {
     }
 
     /// Build a layer from a per-vintage [`CalibrationProfile`], mapping strategy `i` to
-    /// `profile.per_strategy[strategy_ids[i]]`. A strategy **missing** from the profile gets a
-    /// fires-immediately breaker (fail-safe: an uncalibrated strategy is gated, not silently un-protected).
-    /// The ensemble breaker uses `profile.ensemble_fast_drop`.
+    /// `profile.per_strategy[strategy_ids[i]]`. A strategy **missing** from the profile is **explicitly
+    /// pre-gated** (fail-safe: an uncalibrated strategy is never traded) — the gate does not depend on the
+    /// breaker's tier thresholds, so a future threshold-logic change cannot silently un-protect it. Its
+    /// breaker is also given a fires-immediately threshold as defence in depth. The ensemble breaker uses
+    /// `profile.ensemble_fast_drop`.
     #[must_use]
     pub fn from_calibration(
         profile: &CalibrationProfile,
         strategy_ids: &[String],
         fast_window: usize,
     ) -> Self {
-        let per_strategy = strategy_ids
-            .iter()
-            .map(|id| {
-                profile
-                    .per_strategy
-                    .get(id)
-                    .copied()
-                    .unwrap_or_else(fires_immediately)
-            })
-            .collect();
-        Self::new(per_strategy, profile.ensemble_fast_drop, fast_window)
+        let mut per_strategy = Vec::with_capacity(strategy_ids.len());
+        let mut uncalibrated = Vec::new();
+        for (i, id) in strategy_ids.iter().enumerate() {
+            match profile.per_strategy.get(id) {
+                Some(t) => per_strategy.push(*t),
+                None => {
+                    per_strategy.push(fires_immediately());
+                    uncalibrated.push(i);
+                }
+            }
+        }
+        let mut layer = Self::new(per_strategy, profile.ensemble_fast_drop, fast_window);
+        // Explicit fail-safe: gate uncalibrated strategies from the start, independent of any breaker trip.
+        for i in uncalibrated {
+            layer.strategy_gated[i] = true;
+        }
+        layer
     }
 
     /// Observe one equity tick for strategy `index`, latching it gated if any tier trips. Returns the tier
@@ -304,10 +315,16 @@ mod tests {
         let mut layer = BreakerLayer::from_calibration(&profile, &ids, DEFAULT_FAST_WINDOW);
         assert_eq!(layer.strategy_count(), 2);
 
-        // s1 (uncalibrated) fires on its first tick — fail-safe gate.
-        assert!(layer.observe_strategy(1, dec(100)).is_some());
-        assert!(layer.is_gated(1));
-        // s0 (calibrated) does not fire on a flat first tick.
+        // s1 (uncalibrated) is gated from the start — an EXPLICIT pre-gate, before any observe, so the
+        // fail-safe does not depend on the breaker's tier thresholds firing.
+        assert!(layer.is_gated(1), "uncalibrated strategy is pre-gated");
+        assert!(!layer.is_gated(0), "calibrated strategy is not gated");
+        // clamp flattens the uncalibrated strategy immediately.
+        let clamped = layer.clamp(&[enter_long(0), enter_long(1)]);
+        assert_eq!(clamped[1].decision, Decision::Exit);
+        assert_eq!(clamped[0].decision, Decision::Enter(Direction::Long));
+
+        // s0 (calibrated) does not trip on a flat first tick.
         assert!(layer.observe_strategy(0, dec(100)).is_none());
         assert!(!layer.is_gated(0));
     }
