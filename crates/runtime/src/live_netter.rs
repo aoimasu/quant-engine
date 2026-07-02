@@ -25,8 +25,13 @@ use qe_signal::PositionState;
 const BPS_PER_WHOLE: i64 = 10_000;
 
 /// Convert an ensemble weight (`f64`) to `Decimal` deterministically. A non-finite weight maps to `0` (it
-/// contributes nothing) — the ensemble's weights are finite fractions, so this is a defensive fallback.
+/// contributes nothing) — the ensemble's weights are validated finite at seal time, so a `NaN`/`±inf` here is
+/// an upstream bug; the `debug_assert` surfaces it in dev/CI while the release fallback stays fail-safe.
 fn weight_to_decimal(weight: f64) -> Decimal {
+    debug_assert!(
+        weight.is_finite(),
+        "ensemble weight must be finite, got {weight}"
+    );
     Decimal::from_f64_retain(weight).unwrap_or(Decimal::ZERO)
 }
 
@@ -118,11 +123,19 @@ impl PositionNetter {
     /// The per-bar entry: net the (post-breaker) `positions` against the vintage's `weights` and per-genome
     /// `sizes` (all aligned to the chromosomes). A gated strategy's position is already flat, so it
     /// contributes zero.
+    ///
+    /// # Panics
+    /// Panics if `positions`, `weights`, and `sizes` are not the same length. This is a **hard** assert (not
+    /// `debug_assert`): netting is capital-affecting, so a silent per-leg drop from a `zip` truncation would
+    /// mis-size the aggregate target — fail fast instead. Callers pass chromosome-aligned slices.
     #[must_use]
     pub fn net_positions(positions: &[PositionState], weights: &[f64], sizes: &[u16]) -> NetTarget {
-        debug_assert!(
+        assert!(
             positions.len() == weights.len() && weights.len() == sizes.len(),
-            "positions/weights/sizes must be aligned to the vintage's chromosomes"
+            "positions/weights/sizes must be aligned to the vintage's chromosomes (got {}, {}, {})",
+            positions.len(),
+            weights.len(),
+            sizes.len()
         );
         let legs: Vec<NetLeg> = positions
             .iter()
@@ -141,7 +154,6 @@ mod tests {
     use crate::live_breakers::BreakerLayer;
     use qe_risk::{BreakerThresholds, Fraction, DEFAULT_FAST_WINDOW};
     use qe_signal::Decision;
-    use rust_decimal::prelude::FromPrimitive;
     use std::str::FromStr;
 
     fn d(s: &str) -> Decimal {
@@ -282,11 +294,9 @@ mod tests {
             base.signed_target() * Decimal::from(2)
         );
 
-        // f64 → Decimal conversion at the boundary is exact for these fractions.
+        // The production `from_position` (f64 → Decimal via `from_f64_retain`) path is exact: a leg built
+        // from the `f64` weight `0.25` nets identically to one built from the `Decimal` literal `0.25`.
         let via_f64 = NetLeg::from_position(PositionState::held(Direction::Long, 0), 0.25, 400);
-        assert_eq!(
-            via_f64.signed_target(),
-            Decimal::from_f64(0.25).unwrap() * d("0.04")
-        );
+        assert_eq!(via_f64.signed_target(), base.signed_target());
     }
 }
