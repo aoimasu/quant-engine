@@ -87,7 +87,7 @@
   <h1>quant-engine — Current State &amp; Maintainer's Guide</h1>
   <p class="lead">A deterministic, information-firewalled crypto-perp quant trading platform in Rust.</p>
   <p class="muted">Entry point for developers maintaining the repo and for users evaluating it for investment.
-  Everything below was verified against the codebase, not assumed. Generated 2026-06-27 · branch <code>update-doc</code>.</p>
+  Everything below was verified against the codebase, not assumed. Generated 2026-07-02 · branch <code>docs/refresh-current-state-p2</code>.</p>
 
   <!-- ============================================================= -->
   <h2 class="section" id="tldr">1 · TL;DR</h2>
@@ -97,10 +97,14 @@
     (dev universe: <code>BTCUSDT</code>, <code>ETHUSDT</code>). The design is organised around two hard rules
     enforced in CI: <em>everything is deterministic &amp; reproducible from a recorded vintage hash</em>, and
     <em>the strategy search can never see live or portfolio outcomes</em> (the "information firewall").</p>
-    <p><strong>Where it stands.</strong> <span class="pill done">53 / ~75 tickets complete.</span>
-    Phase 0 (foundations) and Phase 1 (training → backtest validation, through the <strong>G1 gate</strong>)
-    are fully implemented and tested. Phase 2 (runtime → paper/sim) is ~6 tickets in — the live data plumbing,
-    the shared evaluator, and the deterministic cold-start bootstrap all exist.</p>
+    <p><strong>Where it stands.</strong> <span class="pill done">69 / ~75 tickets complete.</span>
+    Phase 0 (foundations), Phase 1 (training → backtest validation, through the <strong>G1 gate</strong>), and
+    now <strong>Phase 2 (runtime → paper/sim), through the <span class="pill gate">G2</span> shadow/dry-run
+    gate</strong>, are fully implemented and tested. The full runtime loop — live data plumbing, shared
+    evaluator, deterministic cold-start bootstrap, in-process cutover, circuit breakers, netting, the Hedge
+    Planner, pre-trade risk, the out-of-band kill switch, the venue adapter + simulator, real-time
+    reconciliation, and the G2 shadow gate — all exist and pass tests. Only <strong>Phase 3</strong> (live
+    capital, attribution &amp; ops, through the independent G3 go/no-go) remains.</p>
     <p><strong>The one thing to understand.</strong> The sophisticated machinery lives as
     <em>libraries with deep test coverage</em>. The single shipped <em>binary</em> (<code>qe-cli</code>) currently
     exposes only <code>version</code> and a <code>train</code> command that writes a provenance
@@ -152,20 +156,26 @@
       </ul>
     </div>
     <div class="card">
-      <h4>Runtime side (Phase&nbsp;2 — in progress)</h4>
+      <h4>Runtime side (Phase&nbsp;2 — complete, through G2)</h4>
       <ul>
         <li>Venue-aware REST client: weighted rate-limit back-off, retry budget, ephemeral closed-window cache</li>
-        <li>wss Market-tier streams + tier-partitioned connection registry (reconnect/resubscribe/gap report)</li>
-        <li>Live kline source: REST-prime + wss-stitch + per-tier reconstruction</li>
-        <li>Live factor join: as-of merge of funding/OI/premium onto bars, byte-identical to offline features</li>
-        <li><strong>Evaluator session</strong>: one object runs a sealed vintage through replay &amp; live, no state copy</li>
-        <li><strong>Bootstrap pipeline</strong>: deterministic cold-start state reconstruction from REST historicals</li>
+        <li>wss Market- &amp; Realtime-tier streams + user-data stream + tier-partitioned connection registry</li>
+        <li>Live kline source (REST-prime + wss-stitch), live factor join, mark-EMA tick loop</li>
+        <li><strong>Evaluator session</strong> (one object, replay &amp; live, no state copy) + deterministic
+          <strong>cold-start bootstrap</strong> + in-process <strong>cutover</strong> with restart parity</li>
+        <li>Circuit-breaker layer, position netting, the <strong>Hedge Planner</strong> (absolute target model),
+          and pre-trade risk (clamp/reject governor)</li>
+        <li><strong>Venue adapter + position keeper + paper simulator</strong>, an out-of-band <strong>kill
+          switch</strong> at the adapter, gRPC-style planner↔edge transport, and read-only vintage load + rollover</li>
+        <li>Real-time <strong>reconciliation divergence alarm</strong> (debounced, can trip the kill) and the
+          <strong>G2 shadow / dry-run gate</strong>: would-be orders reconciled vs the simulator, nothing submitted</li>
       </ul>
     </div>
   </div>
-  <p class="muted">These are exercised through <code>cargo test</code> (≈483 tests, 56 suites, all green). There is
-  <strong>no live order submission anywhere</strong> — order ports are interface-only, and the live HTTP/wss
-  transports sit behind a default-off <code>http</code> feature flag.</p>
+  <p class="muted">These are exercised through <code>cargo test</code> (578 tests + 1 ignored, 57 suites, all green).
+  There is still <strong>no live order submission anywhere</strong> — the order path terminates in a
+  kill-gated <em>paper simulator</em>, and the live HTTP/wss transports sit behind a default-off
+  <code>http</code> feature flag.</p>
 
   <!-- ============================================================= -->
   <h2 class="section" id="run">3 · How to run it</h2>
@@ -210,8 +220,10 @@ cat data/artifacts/vintages/*/manifest.json</code></pre>
     </tr>
     <tr>
       <td><span class="pill todo">when wired</span> live / paper</td>
-      <td>The same REST historicals to bootstrap, then live wss streams; venue keys only for the (still-future) order path.</td>
-      <td>Binance Futures wss; the concrete JSON decoders for this are deferred to <span class="tag">QE-219</span>.</td>
+      <td>The same REST historicals to bootstrap, then live wss streams; venue keys only for the (still-future) live order path.</td>
+      <td>Binance Futures wss — the market, realtime, and user-data stream decoders now exist
+      (<span class="tag">QE-202/203/204</span>) behind the default-off <code>http</code> feature; only a live
+      <em>order-submission</em> transport (Phase 3) remains.</td>
     </tr>
   </table>
   <div class="callout warn">
@@ -304,9 +316,9 @@ cat data/artifacts/vintages/*/manifest.json</code></pre>
     <text x="860" y="163" text-anchor="middle" font-size="10" fill="#9aa7b4">REST + wss connectivity</text>
     <rect x="740" y="200" width="240" height="72" rx="8" fill="#14202e" stroke="#4ea1ff"/>
     <text x="860" y="222" text-anchor="middle" font-size="13" font-weight="700" fill="#e6edf3">qe-runtime</text>
-    <text x="860" y="238" text-anchor="middle" font-size="10" fill="#9aa7b4">bootstrap · evaluator session</text>
-    <text x="860" y="251" text-anchor="middle" font-size="10" fill="#9aa7b4">live factor join</text>
-    <text x="860" y="264" text-anchor="middle" font-size="10" fill="#9aa7b4">(future: risk + order loop)</text>
+    <text x="860" y="238" text-anchor="middle" font-size="10" fill="#9aa7b4">bootstrap · evaluator · cutover</text>
+    <text x="860" y="251" text-anchor="middle" font-size="10" fill="#9aa7b4">breakers · netting · hedge planner</text>
+    <text x="860" y="264" text-anchor="middle" font-size="10" fill="#9aa7b4">kill-gated order loop + simulator</text>
     <!-- foundation -->
     <text x="520" y="426" text-anchor="middle" font-size="12" font-weight="600" fill="#9aa7b4">FOUNDATION — used by every layer</text>
     <g font-size="10.5" font-weight="600" fill="#cdd9e5" text-anchor="middle">
@@ -336,8 +348,8 @@ cat data/artifacts/vintages/*/manifest.json</code></pre>
   </div>
   <ul>
     <li><code>qe-signal → qe-domain</code> only. It is the narrowest crate and the spine of everything.</li>
-    <li><code>qe-runtime → {domain, risk, signal, storage, venue, vintage}</code> — <strong>never</strong>
-      <code>wfo</code> or <code>ensemble</code>.</li>
+    <li><code>qe-runtime → {domain, risk, signal, storage, venue, vintage, determinism}</code> —
+      <strong>never</strong> <code>wfo</code> or <code>ensemble</code>.</li>
     <li><code>qe-vintage → {signal, risk, determinism}</code>. Because the strategy genome lives in
       <code>signal</code> (relocated in QE-207), a vintage can carry chromosomes to the runtime <em>without</em>
       dragging in the training crates — that is what keeps the two sides decoupled.</li>
@@ -385,12 +397,12 @@ cat data/artifacts/vintages/*/manifest.json</code></pre>
     <path d="M928,198 L928,224 L115,224 L115,250" stroke="#9aa7b4" stroke-width="1.4" fill="none" marker-end="url(#fl)"/>
     <!-- Row B: runtime -->
     <text x="40" y="244" font-size="13" font-weight="700" fill="#4ea1ff">RUNTIME LOOP</text>
-    <text x="172" y="244" font-size="12" fill="#9aa7b4">in progress</text>
+    <text x="172" y="244" font-size="12" fill="#3fb950">complete · through G2</text>
     <g font-size="12" text-anchor="middle">
       <rect x="40"  y="250" width="150" height="60" rx="8" fill="#14201d" stroke="#3fb950"/><text x="115" y="276" font-weight="600" fill="#e6edf3">Bootstrap</text><text x="115" y="294" font-size="10" fill="#9aa7b4">cold-start replay · QE-209</text>
-      <rect x="210" y="250" width="150" height="60" rx="8" fill="#211c12" stroke="#d29922"/><text x="285" y="276" font-weight="600" fill="#e6edf3">Cutover</text><text x="285" y="294" font-size="10" fill="#cdb98a">bootstrap→live · QE-211</text>
+      <rect x="210" y="250" width="150" height="60" rx="8" fill="#14201d" stroke="#3fb950"/><text x="285" y="276" font-weight="600" fill="#e6edf3">Cutover</text><text x="285" y="294" font-size="10" fill="#9aa7b4">bootstrap→live · QE-211</text>
       <rect x="380" y="250" width="150" height="60" rx="8" fill="#14201d" stroke="#3fb950"/><text x="455" y="272" font-weight="600" fill="#e6edf3">Live evaluation</text><text x="455" y="289" font-size="9.5" fill="#9aa7b4">factor join + genome</text><text x="455" y="301" font-size="9.5" fill="#9aa7b4">QE-206/207</text>
-      <rect x="550" y="250" width="150" height="60" rx="8" fill="#161b22" stroke="#3a4350"/><text x="625" y="276" font-weight="600" fill="#cdd9e5">Risk + order path</text><text x="625" y="294" font-size="10" fill="#9aa7b4">QE-212–218</text>
+      <rect x="550" y="250" width="150" height="60" rx="8" fill="#14201d" stroke="#3fb950"/><text x="625" y="276" font-weight="600" fill="#e6edf3">Risk + order path</text><text x="625" y="294" font-size="10" fill="#9aa7b4">QE-212–218 · paper sim</text>
       <rect x="720" y="250" width="150" height="60" rx="8" fill="#1d1726" stroke="#bc8cff"/><text x="795" y="276" font-weight="700" fill="#bc8cff">GATE G2</text><text x="795" y="294" font-size="9.5" fill="#9aa7b4">shadow / dry-run · QE-222</text>
     </g>
     <g stroke="#9aa7b4" stroke-width="1.4" fill="none">
@@ -486,7 +498,7 @@ cat data/artifacts/vintages/*/manifest.json</code></pre>
     <tr><th>Phase</th><th>Theme</th><th>Exit gate</th><th>Status</th></tr>
     <tr><td><strong>P0</strong></td><td>Foundations</td><td>Workspace, config, storage, shared types, time/risk contracts compile &amp; are tested.</td><td><span class="pill done">complete · 13/13</span></td></tr>
     <tr><td><strong>P1</strong></td><td>Training → backtest validation</td><td><span class="pill gate">G1</span> a vintage passes net-of-cost, purged/embargoed, statistically-deflated validation on an untouched holdout.</td><td><span class="pill done">complete · 34/34 incl. G1</span></td></tr>
-    <tr><td><strong>P2</strong></td><td>Runtime → paper/sim</td><td><span class="pill gate">G2</span> full loop runs in shadow/dry-run against live data, no order submission, reconciled vs simulator.</td><td><span class="pill wip">in progress · 6/22</span></td></tr>
+    <tr><td><strong>P2</strong></td><td>Runtime → paper/sim</td><td><span class="pill gate">G2</span> full loop runs in shadow/dry-run against live data, no order submission, reconciled vs simulator.</td><td><span class="pill done">complete · 22/22 incl. G2</span></td></tr>
     <tr><td><strong>P3</strong></td><td>Live, attribution &amp; ops</td><td><span class="pill gate">G3</span> independent go/no-go sign-off; staged capital ramp under enforced caps.</td><td><span class="pill todo">not started · 0/11</span></td></tr>
   </table>
 
@@ -510,31 +522,31 @@ cat data/artifacts/vintages/*/manifest.json</code></pre>
     <tr><td>Deferred</td><td class="tag">QE-135 Parquet/DuckDB · QE-136 signal viewer</td><td><span class="pill todo">deferred</span></td></tr>
   </table>
 
-  <h3>Phase 2 — Runtime → paper/sim <span class="pill wip">in progress</span></h3>
+  <h3>Phase 2 — Runtime → paper/sim <span class="pill done">complete</span></h3>
   <table>
     <tr><th>Ticket</th><th>What</th><th>Status</th></tr>
     <tr><td class="tag">QE-201</td><td>Venue-aware REST client (rate-limit + ephemeral cache)</td><td><span class="pill done">done</span></td></tr>
     <tr><td class="tag">QE-202</td><td>wss Market-tier streams + connection registry</td><td><span class="pill done">done</span></td></tr>
-    <tr><td class="tag">QE-203</td><td>wss Realtime-tier streams</td><td><span class="pill todo">todo</span></td></tr>
-    <tr><td class="tag">QE-204</td><td>User-data stream subscription</td><td><span class="pill todo">todo</span></td></tr>
+    <tr><td class="tag">QE-203</td><td>wss Realtime-tier streams</td><td><span class="pill done">done</span></td></tr>
+    <tr><td class="tag">QE-204</td><td>User-data stream subscription</td><td><span class="pill done">done</span></td></tr>
     <tr><td class="tag">QE-205</td><td>Streaming bar reconstruction + live kline source</td><td><span class="pill done">done</span></td></tr>
     <tr><td class="tag">QE-206</td><td>Factor join + batch/streaming parity tests</td><td><span class="pill done">done</span></td></tr>
     <tr><td class="tag">QE-207</td><td>Evaluator session (shared replay + live modes)</td><td><span class="pill done">done</span></td></tr>
-    <tr><td class="tag">QE-208</td><td>Mark EMA loop + tick observer</td><td><span class="pill todo">todo</span></td></tr>
+    <tr><td class="tag">QE-208</td><td>Mark EMA loop + tick observer</td><td><span class="pill done">done</span></td></tr>
     <tr><td class="tag">QE-209</td><td>Bootstrap pipeline (deterministic cold start)</td><td><span class="pill done">done</span></td></tr>
-    <tr><td class="tag">QE-210</td><td>Reconstructed state (object handed to cutover)</td><td><span class="pill todo">next</span></td></tr>
-    <tr><td class="tag">QE-211</td><td>Bootstrap→live in-process cutover</td><td><span class="pill todo">next</span></td></tr>
-    <tr><td class="tag">QE-212</td><td>Circuit-breaker layer</td><td><span class="pill todo">todo</span></td></tr>
-    <tr><td class="tag">QE-213</td><td>Position netting</td><td><span class="pill todo">todo</span></td></tr>
-    <tr><td class="tag">QE-214</td><td>Hedge Planner (target-position)</td><td><span class="pill todo">todo</span></td></tr>
-    <tr><td class="tag">QE-215</td><td>Pre-trade risk check</td><td><span class="pill todo">todo</span></td></tr>
-    <tr><td class="tag">QE-216</td><td>Out-of-band kill-switch at venue adapter</td><td><span class="pill todo">todo</span></td></tr>
-    <tr><td class="tag">QE-217</td><td>Venue adapter / position keeper / order lifecycle + simulator</td><td><span class="pill todo">todo</span></td></tr>
-    <tr><td class="tag">QE-218</td><td>gRPC transport (Hedge Planner ↔ Edge gateway)</td><td><span class="pill todo">todo</span></td></tr>
-    <tr><td class="tag">QE-219</td><td>Vintage load (read-only) + rollover</td><td><span class="pill todo">todo</span></td></tr>
-    <tr><td class="tag">QE-220</td><td>Bootstrap/restart parity test</td><td><span class="pill todo">todo</span></td></tr>
-    <tr><td class="tag">QE-221</td><td>Real-time reconciliation divergence alarm</td><td><span class="pill todo">todo</span></td></tr>
-    <tr><td class="tag">QE-222</td><td>GATE G2: live shadow / dry-run</td><td><span class="pill gate">G2 gate</span></td></tr>
+    <tr><td class="tag">QE-210</td><td>Reconstructed state (object handed to cutover)</td><td><span class="pill done">done</span></td></tr>
+    <tr><td class="tag">QE-211</td><td>Bootstrap→live in-process cutover</td><td><span class="pill done">done</span></td></tr>
+    <tr><td class="tag">QE-212</td><td>Circuit-breaker layer</td><td><span class="pill done">done</span></td></tr>
+    <tr><td class="tag">QE-213</td><td>Position netting</td><td><span class="pill done">done</span></td></tr>
+    <tr><td class="tag">QE-214</td><td>Hedge Planner (target-position)</td><td><span class="pill done">done</span></td></tr>
+    <tr><td class="tag">QE-215</td><td>Pre-trade risk check</td><td><span class="pill done">done</span></td></tr>
+    <tr><td class="tag">QE-216</td><td>Out-of-band kill-switch at venue adapter</td><td><span class="pill done">done</span></td></tr>
+    <tr><td class="tag">QE-217</td><td>Venue adapter / position keeper / order lifecycle + simulator</td><td><span class="pill done">done</span></td></tr>
+    <tr><td class="tag">QE-218</td><td>gRPC transport (Hedge Planner ↔ Edge gateway)</td><td><span class="pill done">done</span></td></tr>
+    <tr><td class="tag">QE-219</td><td>Vintage load (read-only) + rollover</td><td><span class="pill done">done</span></td></tr>
+    <tr><td class="tag">QE-220</td><td>Bootstrap/restart parity test</td><td><span class="pill done">done</span></td></tr>
+    <tr><td class="tag">QE-221</td><td>Real-time reconciliation divergence alarm</td><td><span class="pill done">done</span></td></tr>
+    <tr><td class="tag">QE-222</td><td>GATE G2: live shadow / dry-run</td><td><span class="pill done">G2 passed</span></td></tr>
   </table>
 
   <h3>Phase 3 — Live, attribution &amp; ops <span class="pill todo">not started</span></h3>
@@ -556,35 +568,24 @@ cat data/artifacts/vintages/*/manifest.json</code></pre>
   <!-- ============================================================= -->
   <h2 class="section" id="future">8 · What's left to do</h2>
 
-  <h3>Immediate — finish the cold-start → live cutover</h3>
-  <ol>
-    <li><strong><span class="tag">QE-210</span> Reconstructed state</strong> — wrap the warmed
-      <code>EvaluatorSession</code> the bootstrap returns into the object the cutover consumes.</li>
-    <li><strong><span class="tag">QE-211</span> Bootstrap→live cutover</strong> — flip the session to live
-      in-process with no state copy (the evaluator already supports this; needs the orchestration).</li>
-    <li><strong><span class="tag">QE-208</span> Mark EMA loop</strong> — the 1-second mark/funding tick observer
-      feeding the risk layer.</li>
-    <li><strong><span class="tag">QE-219</span> Vintage load + rollover</strong> — read a sealed vintage from
-      disk into the runtime and support hot rollover. <em>This is also the missing piece that lets a real
-      <code>HistoricalSource</code> be assembled</em> (the Binance JSON decoders the bootstrap deliberately
-      kept injectable).</li>
-  </ol>
+  <div class="callout ok">
+    <p style="margin:0"><strong>Phase 2 is complete.</strong> The cold-start → live cutover (<span class="tag">QE-208–211</span>),
+    the full risk &amp; order path (<span class="tag">QE-212–218</span>: breakers, netting, the Hedge Planner,
+    pre-trade risk, the out-of-band kill switch, and the venue adapter + position keeper + <em>paper
+    simulator</em>), vintage load + rollover (<span class="tag">QE-219</span>), restart parity
+    (<span class="tag">QE-220</span>), the reconciliation divergence alarm (<span class="tag">QE-221</span>),
+    and the <strong><span class="tag">QE-222</span> G2 shadow/dry-run gate</strong> have all landed and passed
+    review. The order port now has a body — it terminates in a kill-gated paper simulator, and the G2 gate
+    proves the loop produces would-be orders that reconcile with the simulator with nothing submitted.</p>
+  </div>
 
-  <h3>The risk &amp; order path (no live trading exists until this lands)</h3>
-  <p><span class="tag">QE-212–218</span>: circuit-breaker layer, position netting, the Hedge Planner
-  (target-position model), pre-trade risk checks, the out-of-band kill switch at the venue adapter, and the
-  venue adapter / position keeper / order lifecycle <em>plus a simulator</em>. Today the order port is an
-  interface only; these tickets give it a body.</p>
-
-  <h3>Reach G2, then Phase 3</h3>
-  <ul>
-    <li><strong><span class="tag">QE-220/221</span></strong> bootstrap/restart parity test + real-time
-      reconciliation divergence alarm, then <strong><span class="tag">QE-222 (G2)</span></strong>: the whole loop
-      running in shadow/dry-run against live data, reconciled against the simulator, with no orders sent.</li>
-    <li><strong>Phase 3</strong>: allocation journal, reconciliation, attribution, the operator cockpit,
-      alerting SLAs, incident runbooks, concentration caps — culminating in
-      <strong><span class="tag">QE-308 (G3)</span></strong> independent go/no-go and a staged, capped capital ramp.</li>
-  </ul>
+  <h3>Next — Phase 3: live, attribution &amp; ops</h3>
+  <p>The remaining work is Phase 3 (<span class="tag">QE-301–311</span>): the Strategy Allocation Journal,
+  reconciliation against venue trade history, attribution outputs, the operator cockpit (observability +
+  authenticated manual controls), monitoring/alerting SLAs, incident runbooks, and single-venue concentration
+  caps — culminating in <strong><span class="tag">QE-308 (G3)</span></strong> independent go/no-go and a
+  <strong><span class="tag">QE-309</span></strong> staged, capped capital ramp. <strong>This is where real
+  order submission and real capital first appear</strong>; nothing before it leaves the paper simulator.</p>
 
   <h3>Cross-cutting gaps a maintainer should pick up</h3>
   <ul>
@@ -596,17 +597,21 @@ cat data/artifacts/vintages/*/manifest.json</code></pre>
       packaging, QE-013's intent), or correct the README.</li>
     <li><strong>Deferred analytics:</strong> Parquet export + DuckDB (<span class="tag">QE-135</span>) and the
       signal viewer (<span class="tag">QE-136</span>) for inspecting features/strategies.</li>
-    <li><strong>Bookkeeping fragility noted in review:</strong> the live PR-review scratchpad
-      (<code>docs/mds/work.md</code>) is uncommitted and can be lost on a post-merge reset; archive records to
-      <code>docs/mds/reviewed/&lt;ticket&gt;.md</code> promptly (already the convention going forward).</li>
+    <li><strong>Bookkeeping convention (now established):</strong> <code>docs/mds/work.md</code> is a transient
+      scratchpad for the PR under review only; every merged ticket's approved review record is archived to
+      <code>docs/mds/reviewed/&lt;ticket&gt;.md</code> (all 69 completed tickets, QE-001→QE-222, have records
+      there) and <code>work.md</code> is cleared. Because <code>main</code> is branch-protected, archive
+      commits ride the next ticket's PR through CI.</li>
   </ul>
 
   <h3>For someone evaluating this to invest</h3>
   <div class="callout danger">
-    <p style="margin-top:0"><strong>This system cannot trade today and is not near it.</strong> There is no live
-    order path, no broker integration, and the training pipeline is not yet runnable end-to-end from the CLI.
-    Phase 2 must complete through the <strong>G2 dry-run gate</strong>, and Phase 3 through the independent
-    <strong>G3 go/no-go</strong> with a staged, capped capital ramp, before any real capital is involved.</p>
+    <p style="margin-top:0"><strong>This system cannot trade with real capital today.</strong> Phase 2 is now
+    complete through the <strong>G2 shadow/dry-run gate</strong> — the full runtime loop runs against live data
+    and produces would-be orders reconciled against a simulator — but the order path still terminates in a
+    <em>paper simulator</em>: there is no live broker submission, and the training pipeline is not yet runnable
+    end-to-end from the CLI. Phase 3 must still complete through the independent <strong>G3 go/no-go</strong>
+    with a staged, capped capital ramp before any real capital is involved.</p>
     <p style="margin-bottom:0">What <em>is</em> strong and verifiable: a disciplined, deterministic,
     information-firewalled design with deep test coverage, a friction-true backtest (fees + real funding +
     slippage so no strategy is ranked on returns that won't exist live), and statistical over-fit gates
@@ -615,10 +620,11 @@ cat data/artifacts/vintages/*/manifest.json</code></pre>
   </div>
 
   <div class="foot">
-    Generated from the repository on 2026-06-27. Source of truth: <code>docs/backlog.md</code> (roadmap),
+    Generated from the repository on 2026-07-02. Source of truth: <code>docs/backlog.md</code> (roadmap),
     <code>docs/mds/reviewed/</code> (completed-ticket records), <code>crates/*/Cargo.toml</code> (dependency
-    graph), and <code>crates/cli/src/</code> (runnable surface). Test baseline: 483 tests across 56 suites,
-    green; firewall + decoupling guards green. Re-verify against the code before relying on any single claim.
+    graph), and <code>crates/cli/src/</code> (runnable surface). Test baseline: 578 tests (+1 ignored) across
+    57 suites, green; firewall + decoupling guards green. Re-verify against the code before relying on any
+    single claim.
   </div>
 </main>
 </div>
