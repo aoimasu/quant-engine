@@ -29,6 +29,9 @@
 //! QE-214 adds the Hedge Planner ([`hedger`]): it scales that aggregate by equity into an **absolute**
 //! [`TargetPosition`], sourced from a [`PositionKeeper`] seam. Emitting an absolute target (not a delta) makes
 //! it **stateless** wrt the current venue position — the `target − current` delta is QE-217's concern.
+//! QE-215 adds the pre-trade governor ([`pretrade`]): it enforces the QE-009 [`RiskLimits`](qe_risk::RiskLimits)
+//! on a [`TargetPosition`] before it is sent — clamping (max notional/leverage), rejecting (gross/net,
+//! liquidation-distance floor, margin ceiling), or halting by outcome severity.
 
 pub mod boot_state;
 pub mod bootstrap;
@@ -40,6 +43,7 @@ pub mod live_breakers;
 pub mod live_kline;
 pub mod live_mark;
 pub mod live_netter;
+pub mod pretrade;
 
 pub use boot_state::{
     BootStateError, CommittedPeak, DormancyLatch, ReconstructedState, StrategyState,
@@ -56,6 +60,7 @@ pub use live_breakers::BreakerLayer;
 pub use live_kline::LiveKlineSource;
 pub use live_mark::{MarkEmaLoop, MarkTick, MarkTickObserver};
 pub use live_netter::{NetLeg, NetTarget, PositionNetter};
+pub use pretrade::{PreTradeDecision, PreTradeGovernor, PreTradeVerdict};
 pub use qe_risk::{KillHandle, KillSwitch};
 
 /// The runtime's live order-submission port.
