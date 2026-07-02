@@ -12,108 +12,116 @@ to empty**. No running "Completed" list is kept here — the traceable history l
 
 ---
 
-## QE-221 — Real-time reconciliation divergence alarm — [Ready-for-review]
+## QE-222 — GATE G2: Live shadow / dry-run — [Ready-for-review]
 
-- **PR:** #72 — https://github.com/aoimasu/quant-engine/pull/72
-- **Ticket:** QE-221 (`Phase: P2` · `Area: ⑨ + risk` · `Depends on: QE-217`)
-- **Branch:** `qe-221/recon-divergence-alarm`
-- **Latest commit:** `f2693ea5f3fb51abaff9ded4a29383d9089d6923`
-- **Evidence / design:** `docs/architecture/qe-221-recon-divergence-alarm-design.md`
-- **Changed files:** `crates/runtime/src/reconciliation.rs` (new), `crates/runtime/src/lib.rs` (module +
-  re-exports), design note. (Also archives QE-220 → `docs/mds/reviewed/qe-220.md` + clears the prior
-  `work.md` entry.)
+- **PR:** #73 — https://github.com/aoimasu/quant-engine/pull/73
+- **Ticket:** QE-222 (`Phase: P2` · `Area: gate` · `Depends on: QE-218, QE-221` · **Blocks: Phase 3 live capital**)
+- **Branch:** `qe-222/g2-live-shadow`
+- **Latest commit:** `f76045f218b5f57d25051c7068e9c5d3ed35e8f6`
+- **Evidence / design:** `docs/architecture/qe-222-g2-live-shadow-design.md`
+- **Changed files:** `crates/runtime/src/shadow.rs` (new), `crates/runtime/src/lib.rs` (module + re-exports +
+  crate doc). (Also archives QE-221 → `docs/mds/reviewed/qe-221.md` + clears the prior `work.md` entry.)
 
 ### Goal
-*(Reviewer-added.)* Reconciliation should not be post-hoc only; a live position mismatch beyond tolerance
-should be a fast safety check that can trip the kill-switch.
+*(Reviewer-added.)* Before any capital, run the full loop against live data computing **would-be** orders with
+**no submission**, reconciled vs the simulator — catching wss-stitch, mark-EMA, netting, cutover bugs.
 
 ### Acceptance criteria (from backlog)
-- [x] An injected position desync beyond tolerance raises an alarm and can halt —
-  `divergence_beyond_tolerance_alarms_and_halts`.
+- [x] A shadow run over a defined live period produces would-be orders that **reconcile with the simulator
+  within tolerance**; **no orders are submitted** — `shadow_run_reconciles_with_simulator_and_submits_nothing`.
 
 ### Implementation summary
-- New `crates/runtime/src/reconciliation.rs`: `ReconciliationGuard::check(expected, &PositionReport)` compares
-  the runtime's expected signed position against the venue's authoritative report. `delta = |expected − venue|`;
-  within tolerance → `Reconciled`; beyond → an alarm (`alarms += 1`) and, under `AlarmAction::Halt`, trips the
-  QE-216 `KillHandle` (out-of-band flatten-and-halt). `AlarmOnly` alarms without halting.
-- **Sign-aware** (a flip sums magnitudes), **latching** (QE-009 kill), **fails safe** (negative tolerance
-  clamped to 0). Detector only — attribution is QE-302; takes `expected` explicitly (no circular self-check).
-- **Scrutinise:** (1) tolerance is **absolute contracts** — right unit, or should it be fractional of the
-  expected magnitude? (2) `expected` is caller-supplied (not the keeper the report updated) to avoid a circular
-  check — is that the right seam, or should the guard own both sides? (3) sign-flip summing magnitudes — the
-  correct severity ordering? (4) latching means a single halt persists across periods while alarms keep
-  counting — acceptable? (5) is a stateless-per-check guard (no divergence-streak / hysteresis) sufficient for
-  "periodically compare", or is a consecutive-breach threshold needed to avoid flapping?
+- New `crates/runtime/src/shadow.rs`. **`ShadowGateway`** = the Edge gateway in dry-run: `observe(&rev)` runs
+  the same `plan_delta` the live edge does but **logs** the `WouldBeOrder` and advances a shadow position
+  as-if-filled, submitting nothing (`orders_submitted()` is a literal `0` — no submit path exists).
+  **`ShadowRun`** drives each `TargetRevision` through both the shadow edge and a submitting reference QE-218
+  `PlannerAdapterLink`, reconciling the two positions via the QE-221 `ReconciliationGuard` (`AlarmOnly` — a
+  dry-run reports, never halts); `report()` yields `ShadowReport`.
+- **Scrutinise:** (1) both paths share `plan_delta`, so the happy-path reconcile is exact — is that vacuous, or
+  do test 1's "reference actually traded" assertion + test 4's stale-mark divergence adequately prove the gate
+  bites? (2) `AlarmOnly` for the gate (no halt in a dry-run) — right call? (3) the reference sim IS the
+  expectation oracle *and* the "no submission" contrast — is comparing shadow-vs-sim (both from `plan_delta`)
+  the right reconciliation, or should the shadow reconcile against something more independent? (4) is a
+  synthetic target/mark stream a fair stand-in for "live data" at this layer (real feed = runtime wiring, out
+  of scope like QE-202's socket)? (5) `orders_submitted()` const `0` — guaranteed-by-construction vs a flag:
+  agree?
 
 ### Verification (toolchain 1.96.0)
 - `cargo fmt --all --check` — clean
 - `cargo clippy --workspace --all-targets --locked -- -D warnings` — clean
-- `cargo test --workspace --locked` — 571 passed / 1 ignored / 57 suites (+8 reconciliation tests)
+- `cargo test --workspace --locked` — 577 passed / 1 ignored / 57 suites (+4 shadow tests)
 - `cargo test -p qe-architecture --test firewall` — 1 passed
 - `cargo deny check` — advisories/bans/licenses/sources ok
 
 ### Feedback
 
-_First review pass, commit `b4789c58` (2026-07-02). **What is correct and I verified:** the divergence math is
-right — `signed_qty` (Long→+qty / Short→−qty / None→0), `delta = |expected − venue_qty|`, an **inclusive**
-tolerance bound, sign-flip summing magnitudes (correct severity ordering), flat-venue-vs-expected detecting a
-phantom position; all in `Decimal` (no float error). Fail-safe clamp (`tolerance.max(0)`) is the right
-direction. The AC holds: beyond tolerance both alarms and (under `Halt`) trips the QE-216 kill via a held
-clone — genuine out-of-band — and within tolerance is silent. Latching is honoured. Scrutinise #2 (caller
-supplies `expected`, not the keeper the report fed) is the right seam — the alternative would be a circular
-self-check. Scrutinise #3 (flip sums magnitudes) and #4 (latch persists, alarms keep counting) are both
-correct. Determinism, encapsulation, and no-new-dep/firewall are clean; the 8 tests are non-vacuous. One
-substantive design item (F1) plus one minor note (F2)._
+_First review pass, commit `d2ea50b8` (2026-07-02). **What is correct:** "no submission" is genuinely
+structural — `ShadowGateway` has no submit path and `orders_submitted()` is a literal `0`, sourced into the
+report and asserted (Scrutinise #5: const-`0`-by-construction beats a mutable flag — agreed). `AlarmOnly` for
+a dry-run gate is the right call (nothing live to halt; auto-halt belongs to the live path — Scrutinise #2).
+`would_be_orders_match_simulator_fills` and `at_target_revision_logs_no_would_be_order` are non-vacuous and
+correct. Determinism, encapsulation, no new dep/firewall edge all hold. The synthetic target/mark stream as a
+stand-in for the live feed is fair at this layer (real feed = runtime wiring, out of scope like QE-202's
+socket — Scrutinise #4). One blocker (F1) and one scope note (F2). Because this is the gate that blocks Phase
+3 live capital, I am holding the bar high on whether the gate actually bites._
 
-**F1 — [Blocker / the Scrutinise #5 call] `Halt` mode needs a consecutive-breach (hysteresis) threshold; a
-stateless single-check auto-halt will false-halt on routine report/fill skew.** Firm opinion: for a
-safety-critical **auto-halt** driven by **eventually-consistent** venue `PositionReport`s, tripping the kill on
-a *single* beyond-tolerance check is too aggressive. The concrete, likely failure mode: the guard is meant to
-"periodically compare", so a timer-driven `check` will routinely fire while an order is **in flight** — the
-runtime's `expected` already reflects an order the venue has not yet reported as filled, so `delta` briefly
-equals the full in-flight quantity, exceeds tolerance, and **auto-halts the entire book on a benign
-propagation blip**. This is not a corner case; with periodic checks during active hedging it is routine, and a
-guard that halts trading during normal operation is unfit as a safety control (it gets disabled in practice,
-defeating its purpose). The two mitigations present do **not** cover this: sizing `tolerance` large enough to
-absorb an in-flight order would blind the detector to real desyncs of that size, and `AlarmOnly` abandons the
-auto-halt the AC asks for. The standard, correct design is a **streak/debounce**: require *N* consecutive
-diverged checks (or a persisted divergence across a short window) before `Halt` trips — a genuine desync
-persists across periods, whereas a timing skew clears within one or two. **Required resolution — either:** (a)
-add a consecutive-breach threshold gating the `Halt` trip (keep `alarms` counting from the first breach for
-observability, but only trip after the run reaches the threshold; a test: two isolated single-period breaches
-separated by a reconciled check do **not** halt, N-in-a-row does); **or** (b) if single-check halt is
-deliberate, document the concrete operational contract that makes it safe — e.g. `check` is only invoked at
-quiescent points with no in-flight orders, and both `expected` and the venue report are confirmed-state with
-sub-tolerance propagation latency — so the routine false-halt above cannot occur. I acknowledge the fail-safe
-counter-argument (halting is the safe direction, so err toward halt); it does not resolve F1, because a
-control that fires on normal operation is not a usable safety control, and the fix (debounce) preserves the
-fail-safe halt for a *sustained* divergence.
+**F1 — [Blocker] The `ShadowRun` gate is structurally incapable of reporting a divergence, so its
+`reconciled == true` result is vacuous as a gate — the red state is unreachable and untested.** Inside
+`ShadowRun`, the shadow and the reference are fed **identical inputs** by construction: `observe_mark(m)`
+pushes the same `m` to both (`shadow.rs:147-150`), and `observe(rev)` runs the same `rev` through both
+(`shadow.rs:155-168`). The shadow advances `shadow_qty` by `plan_delta(...).qty` as-if-filled; the reference
+submits the same intent to a **full-fill** paper `VenueSimulator` (verified: `Order::on_fill` reaches `Filled`
+at the full qty, keeper applies the whole fill), so its position advances by exactly the same qty. Both sides
+start flat, share `plan_delta`, and never receive divergent data — therefore `self.reconciled` /
+`self.max_divergence` are **constant `true` / `0` for every possible input**, and `report.reconciled` can
+**never** be `false` through the gate's own API. The AC test's `assert!(report.reconciled)` and
+`max_divergence == 0` are consequently vacuous: they would pass for *any* target stream. Test 4
+(`reconciliation_catches_a_pipeline_divergence`) does prove the `ReconciliationGuard` bites on a stale-mark
+divergence — but it **hand-wires a separate `ShadowGateway` + `PlannerAdapterLink` with different marks,
+bypassing `ShadowRun` entirely**; it proves the *guard*, not the *gate*. So the answer to "does the gate bite
+and would it catch a real pipeline bug?" is: **not through `ShadowRun` as delivered** — the one code path a
+go/no-go reviewer would trust (drive the period, read `report.reconciled`) can only ever show green. A gate
+whose fail state is unreachable gives false assurance at the most safety-critical checkpoint. **Required
+resolution:** make a divergence reachable *through the gate's own API* and test it red — e.g. give `ShadowRun`
+a way to feed the shadow edge a pipeline distinct from the reference (separate mark stream, or an injectable
+pipeline-fault/mark-skew on the shadow side), then add a test that drives it and asserts
+`report.reconciled == false` **and** `report.max_divergence > tolerance` via `ShadowRun`. Then `reconciled`
+is a real gate signal, not dead code. (If you contend the divergent feed is strictly out of scope, that is
+not acceptable for *this* ticket: the gate's whole purpose per the goal — "catching wss-stitch, mark-EMA,
+netting, cutover bugs" — is the bite, and it must be demonstrable through the gate, not only a hand-wired
+guard.)
 
-**F2 — [Nit, non-blocking] Absolute-contracts tolerance is coarse across scales.** The same absolute bound
-means very different sensitivity for a 0.1-contract vs a 1000-contract expected position. Documented as a
-later refinement (fractional-of-magnitude) and acceptable for this AC — noting only that it interacts with F1:
-an absolute tolerance sized to damp in-flight skew for large positions would be far too loose for small ones,
-which is another reason to solve the transient problem with a streak threshold rather than a wider tolerance.
+**F2 — [Note, tied to F1] The reconciliation oracle is not independent of the sizing logic.** Both the shadow
+and the reference derive the order from the **same** `plan_delta`, so a bug **in** `plan_delta` (or in the
+notional→contracts sizing) would corrupt *both* sides identically and still reconcile at delta 0 — this gate
+cannot catch it. That is a defensible scope boundary (the gate targets input-pipeline divergences —
+mark/stitch/netting/cutover — and `plan_delta` has its own QE-217 tests), but it should be stated explicitly
+in the design note as a known blind spot, and it reinforces F1: the gate's value is entirely in detecting when
+the shadow's *inputs* diverge from the reference's, which is precisely the path that is currently unreachable
+and untested. Not independently blocking; resolve alongside F1.
 
-### Fix applied (commit `f2693ea5`)
+### Fix applied (commit `f76045f2`)
 
-**F1 — resolved (agreed; correct safety critique).** Replaced `AlarmAction::Halt` with
-`AlarmAction::HaltAfter { consecutive: u32 }` and added a **consecutive-breach debounce**: the guard tracks a
-`streak` incremented on each beyond-tolerance check and **reset to 0 by any reconciled check**; the kill trips
-only once `streak ≥ consecutive.max(1)`. So a *sustained* desync still auto-halts (fail-safe preserved), while
-a one-period in-flight-order skew that clears on the next check does **not** halt the book. `alarms` still
-counts every breach from the first (observability); `Divergence` gains a `consecutive` field. New regression
-`transient_single_period_skew_does_not_halt` (breach → reconcile → breach never trips under `HaltAfter{2}`),
-and `sustained_divergence_alarms_and_halts_after_threshold` is the AC (halts on the 2nd consecutive breach).
-`AlarmAction::halt_immediately()` (`HaltAfter{1}`) restores single-check halt, documented as safe only at
-quiescent points. Design note D1/D2/test-plan/Risks updated.
+**F1 — resolved (agreed; the critique is exactly right).** The gate's red state was unreachable through its
+own API because `ShadowRun` fed the shadow and reference identical inputs (and the sim does full fills), so
+`report.reconciled` was constant-true and the AC assertion vacuous. Added
+**`ShadowRun::observe_marks(shadow_mark, reference_mark)`** — the shadow edge (the live pipeline under test)
+and the reference keeper (venue truth) now take marks **independently**, so the shadow's mark pipeline can
+drift exactly as a mark-EMA / stitch / stale-tick bug would; `observe_mark(m)` is the aligned shorthand
+(`observe_marks(m, m)`). The next `observe` then diverges and `report.reconciled` becomes `false` — **reachable
+end-to-end through the gate**. Replaced the hand-wired guard test with
+`gate_reports_a_mark_pipeline_divergence_through_shadow_run` (drives `ShadowRun` with a skewed shadow mark →
+`reconciled == false`, `max_divergence == 0.05 > tolerance`, `orders_submitted == 0` even on the fail path),
+and added `a_divergence_latches_the_run_red` (a run-level latch — one diverged step condemns the run, peak
+`max_divergence` retained, even after a later re-converging step). `reconciled` is now a real gate signal, not
+dead code.
 
-**F2 — acknowledged (deferred), and explicitly *not* worked around by widening tolerance.** Kept absolute
-contracts (fractional-of-magnitude flagged as a later refinement). Per your note, the in-flight transient is
-solved by the streak threshold, **not** a looser tolerance (which would blind the detector / be far too loose
-for small positions). Documented in the design-note Risks.
+**F2 — acknowledged and documented as a known blind spot.** The oracle shares `plan_delta` with the code under
+test, so a bug **inside** `plan_delta` / the notional→contracts sizing corrupts both sides identically and
+reconciles at delta 0 — this gate cannot catch it. Stated explicitly in the design-note Risks: the gate's
+scope is **input-pipeline** divergences (mark-EMA / stitch / netting / cutover); `plan_delta` has its own
+QE-217 tests. Kept as a deliberate scope boundary, now surfaced so it is not mistaken for full E2E coverage.
 
 **Re-verification (toolchain 1.96.0)** — `cargo fmt --all --check` clean · `cargo clippy --workspace
---all-targets --locked -- -D warnings` clean · `cargo test --workspace --locked` 573 passed / 1 ignored /
-57 suites (10 reconciliation tests) · `cargo test -p qe-architecture --test firewall` 1 passed ·
-`cargo deny check` ok.
+--all-targets --locked -- -D warnings` clean · `cargo test --workspace --locked` 578 passed / 1 ignored /
+57 suites (5 shadow tests) · `cargo test -p qe-architecture --test firewall` 1 passed · `cargo deny check` ok.

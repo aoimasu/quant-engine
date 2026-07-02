@@ -40,6 +40,15 @@
 //! simulator with the QE-009 [`KillHandle`], so a trip from anywhere (watchdog / manual, cockpit-independent)
 //! **halts submission** and **flattens** the kept position deterministically — satisfying the QE-009
 //! [`OrderGate`](qe_risk::OrderGate) conformance.
+//! QE-221 adds the reconciliation divergence alarm ([`reconciliation`]): [`ReconciliationGuard`] compares the
+//! runtime's **expected** position against the venue's authoritative report each period and, once a divergence
+//! beyond tolerance **persists** (a debounce that ignores in-flight-order skew), alarms and can trip the QE-216
+//! kill out-of-band — the fast *detector* (attribution is QE-302).
+//! QE-222 adds GATE G2 — live shadow / dry-run ([`shadow`]): [`ShadowGateway`] is the Edge gateway in
+//! **dry-run** (runs `plan_delta` and **logs** the would-be order, advancing a shadow position as-if-filled,
+//! submitting nothing), and [`ShadowRun`] drives a target stream through it **and** a submitting reference
+//! [`PlannerAdapterLink`], reconciling the two via the QE-221 guard so a pipeline discrepancy is reported
+//! before any live capital.
 
 pub mod boot_state;
 pub mod bootstrap;
@@ -55,6 +64,7 @@ pub mod live_mark;
 pub mod live_netter;
 pub mod pretrade;
 pub mod reconciliation;
+pub mod shadow;
 pub mod transport;
 pub mod vintage_rollover;
 
@@ -78,6 +88,7 @@ pub use live_netter::{NetLeg, NetTarget, PositionNetter};
 pub use pretrade::{PreTradeDecision, PreTradeGovernor, PreTradeVerdict};
 pub use qe_risk::{KillHandle, KillSwitch};
 pub use reconciliation::{AlarmAction, Divergence, ReconOutcome, ReconciliationGuard};
+pub use shadow::{ShadowGateway, ShadowReport, ShadowRun, WouldBeOrder};
 pub use transport::{
     AdapterReport, AppendError, AppendSink, NullAppendSink, PlannerAdapterLink, TargetRevision,
     TransportError, VenueHealth,
