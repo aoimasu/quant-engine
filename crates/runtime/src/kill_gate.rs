@@ -31,10 +31,12 @@ pub struct KillHalt {
 pub enum KillOutcome {
     /// The switch is live — normal trading.
     Live,
-    /// The switch just tripped: the position was flattened (`Some` fill if an order was needed, `None` if
-    /// already flat). Submission is now halted.
+    /// The switch is tripped and the flatten was handled for this tick: `Some(fill)` when a closing order
+    /// was actually submitted (the gate now **latches** halted), or `None` when the position was flat/not
+    /// yet known — in which case the gate stays **armed** so a position learned on a later tick is still
+    /// flattened. Submission is halted regardless.
     Flattened(Option<SimFill>),
-    /// The switch is tripped and the position was already flattened — submission stays halted.
+    /// The switch is tripped and a real position has already been flattened — submission stays halted.
     Halted,
 }
 
@@ -60,7 +62,9 @@ fn flatten_intent(current_qty: Decimal) -> Option<OrderIntent> {
 pub struct VenueKillGate {
     kill: KillHandle,
     sim: VenueSimulator,
-    /// Whether the post-trip flatten has already been submitted (so it happens exactly once).
+    /// Whether a real (non-flat) position has already been flattened, so the closing order is submitted at
+    /// most once. Stays `false` while the position is flat/unknown, keeping the gate armed for a position
+    /// that only becomes known on a later tick (e.g. after a keeper reconnect).
     flattened: bool,
 }
 
@@ -99,20 +103,21 @@ impl VenueKillGate {
         event_time_ms: i64,
     ) -> Result<SimFill, KillHalt> {
         if self.kill.is_tripped() {
+            // Reuse the QE-009 shared fallback so this halt reason matches `admit`'s `FlattenAndHalt`.
             return Err(KillHalt {
-                reason: self
-                    .kill
-                    .reason()
-                    .unwrap_or_else(|| "kill switch tripped".to_owned()),
+                reason: self.kill_reason(),
             });
         }
         Ok(self.sim.submit(intent, fill_price, event_time_ms))
     }
 
-    /// Enforce the out-of-band kill for one tick. On the first call after a trip it **flattens** the kept
-    /// position (`current_qty`, signed contracts) by submitting the closing order directly to the simulator
-    /// — the kill's own action, so it bypasses the submission halt — then latches halted. Driven only by the
-    /// [`KillHandle`]; no planner target or cockpit is involved.
+    /// Enforce the out-of-band kill for one tick. While the switch is tripped and a real position has not
+    /// yet been flattened, it **flattens** the kept position (`current_qty`, signed contracts) by submitting
+    /// the closing order directly to the simulator — the kill's own action, so it bypasses the submission
+    /// halt. It latches halted only *after* a non-flat position has actually been flattened; a flat (or
+    /// not-yet-known) `current_qty` leaves the gate armed, so a position that only becomes known on a later
+    /// tick — e.g. after a QE-217 keeper reconnect that re-absorbs the authoritative snapshot — is still
+    /// flattened. Driven only by the [`KillHandle`]; no planner target or cockpit is involved.
     pub fn enforce_kill(
         &mut self,
         current_qty: Decimal,
@@ -125,10 +130,17 @@ impl VenueKillGate {
         if self.flattened {
             return KillOutcome::Halted;
         }
-        self.flattened = true;
-        let fill = flatten_intent(current_qty)
-            .map(|intent| self.sim.submit(intent, fill_price, event_time_ms));
-        KillOutcome::Flattened(fill)
+        match flatten_intent(current_qty) {
+            // A real position: flatten it and latch. Latching here also guards against a double-flatten
+            // from keeper fill latency (a later tick still reporting the pre-flatten qty is ignored).
+            Some(intent) => {
+                let fill = self.sim.submit(intent, fill_price, event_time_ms);
+                self.flattened = true;
+                KillOutcome::Flattened(Some(fill))
+            }
+            // Flat, or the position is not yet known: stay armed so it is still flattened once learned.
+            None => KillOutcome::Flattened(None),
+        }
     }
 }
 
@@ -261,11 +273,16 @@ mod tests {
         assert!(gate.kill().is_tripped());
     }
 
-    /// Flattening a position that is already flat submits no order but still halts.
+    /// A kill while the position is flat submits no order but leaves the gate **armed**: if a real position
+    /// is only learned on a later tick — e.g. a watchdog trips during a reconnect window where the QE-217
+    /// keeper has reset and not yet re-absorbed the authoritative snapshot — it must still be flattened
+    /// (F1 regression). Only after that real flatten does the gate latch to `Halted`.
     #[test]
-    fn flatten_when_already_flat_halts_without_an_order() {
+    fn flat_first_call_stays_armed_and_still_flattens_a_later_position() {
         let mut gate = gate();
         gate.kill().trip("halt");
+
+        // Flat (or not-yet-known) at the first post-trip call: no order, and NOT latched.
         assert_eq!(
             gate.enforce_kill(dec("0"), price("50000"), 1),
             KillOutcome::Flattened(None)
@@ -275,9 +292,25 @@ mod tests {
             0,
             "no order for a flat position"
         );
+        // Still flat → still armed, still no order.
         assert_eq!(
             gate.enforce_kill(dec("0"), price("50000"), 2),
-            KillOutcome::Halted
+            KillOutcome::Flattened(None)
+        );
+
+        // The keeper now knows the real position → it is flattened, and only now does the gate latch.
+        match gate.enforce_kill(dec("0.2"), price("50000"), 3) {
+            KillOutcome::Flattened(Some(f)) => {
+                assert_eq!(f.order.side, Side::Sell);
+                assert_eq!(f.order.qty, qty("0.2"));
+            }
+            other => panic!("expected the later position to be flattened, got {other:?}"),
+        }
+        assert_eq!(gate.simulator().orders_submitted(), 1);
+        assert_eq!(
+            gate.enforce_kill(dec("0.2"), price("50000"), 4),
+            KillOutcome::Halted,
+            "latched after the real flatten — no double-flatten on keeper fill latency"
         );
     }
 

@@ -63,16 +63,21 @@ pub trait OrderGate {
         }
     }
 
+    /// The latched kill reason with the shared fallback. The single source for the halt-reason string, so
+    /// [`kill_precheck`](OrderGate::kill_precheck)'s `FlattenAndHalt` and any gate's own submission-halt
+    /// error (e.g. QE-216's `KillHalt`) stay consistent.
+    fn kill_reason(&self) -> String {
+        self.kill_handle()
+            .reason()
+            .unwrap_or_else(|| "kill switch tripped".to_owned())
+    }
+
     /// The kill check every gate performs before anything else: `Some(FlattenAndHalt)` when the
     /// switch is tripped, else `None`.
     fn kill_precheck(&self) -> Option<Admission> {
-        let kill = self.kill_handle();
-        kill.is_tripped().then(|| {
-            Admission::FlattenAndHalt(
-                kill.reason()
-                    .unwrap_or_else(|| "kill switch tripped".to_owned()),
-            )
-        })
+        self.kill_handle()
+            .is_tripped()
+            .then(|| Admission::FlattenAndHalt(self.kill_reason()))
     }
 
     /// `Err(Fatal)` (→ [`Halt`](qe_error::Disposition::Halt)) when the kill switch is tripped, else
