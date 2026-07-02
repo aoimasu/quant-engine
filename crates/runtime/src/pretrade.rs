@@ -168,6 +168,8 @@ impl PreTradeGovernor {
         }
 
         let verdict = match most_severe(&breaches) {
+            // Currently unreachable: no enforced pre-trade cap defaults to Halt (DrawdownCap → Halt is the
+            // QE-212 breaker / QE-216 kill path). Kept so adding a Halt-kind later needs no change here.
             Some(LimitOutcome::Halt) => PreTradeVerdict::Halt,
             Some(LimitOutcome::Reject) => PreTradeVerdict::Reject,
             Some(LimitOutcome::Clamp) => {
@@ -372,5 +374,56 @@ mod tests {
         assert!(decision.breaches.is_empty());
         // Sanity: a flat target has no direction.
         assert_eq!(target("0").direction(), None::<Direction>);
+    }
+
+    /// The catastrophic-account edges: a live position with no positive equity / no available margin. These
+    /// are the paths a risk governor most needs to prove correct.
+    #[test]
+    fn degenerate_capital_is_handled_safely() {
+        // (a) Zero/negative equity with a leverage cap → leverage is infinite → clamp to flat.
+        let lev_gov = PreTradeGovernor::new(
+            RiskLimits {
+                max_leverage: Some(lev("3")),
+                ..RiskLimits::default()
+            },
+            frac("0"),
+        );
+        for equity in ["0", "-100"] {
+            let decision = lev_gov.check(target("5000"), capital(equity, "100000"));
+            assert_eq!(
+                decision.verdict,
+                PreTradeVerdict::Send(Notional::ZERO),
+                "no positive equity clamps the position to flat (equity {equity})"
+            );
+            assert!(breach_of(&decision, LimitKind::MaxLeverage));
+        }
+
+        // (b) Zero/negative equity with a liquidation-distance floor → distance ≤ −mmr < floor → reject.
+        let liq_gov = PreTradeGovernor::new(
+            RiskLimits {
+                liquidation_distance_floor: Some(frac("0.05")),
+                ..RiskLimits::default()
+            },
+            frac("0.005"),
+        );
+        for equity in ["0", "-100"] {
+            let decision = liq_gov.check(target("5000"), capital(equity, "100000"));
+            assert_eq!(decision.verdict, PreTradeVerdict::Reject);
+            assert!(breach_of(&decision, LimitKind::LiquidationDistanceFloor));
+        }
+
+        // (c) No available margin with a position and a margin-utilisation ceiling → reject.
+        let margin_gov = PreTradeGovernor::new(
+            RiskLimits {
+                margin_utilisation_ceiling: Some(frac("0.5")),
+                ..RiskLimits::default()
+            },
+            frac("0.01"),
+        );
+        for avail in ["0", "-50"] {
+            let decision = margin_gov.check(target("5000"), capital("100000", avail));
+            assert_eq!(decision.verdict, PreTradeVerdict::Reject);
+            assert!(breach_of(&decision, LimitKind::MarginUtilisationCeiling));
+        }
     }
 }
