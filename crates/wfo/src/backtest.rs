@@ -82,6 +82,27 @@ impl BacktestResult {
     }
 }
 
+/// One closed round-trip recorded by [`backtest_with_trades`]: the entry and exit fills of a single
+/// position, from flat → position (entry) to position → flat (close). Only *completed* round-trips are
+/// recorded — a position still open at the last bar produces no `TradeFill`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TradeFill {
+    /// Bar index of the entry fill (flat → position).
+    pub entry_idx: usize,
+    /// Bar index of the close fill (position → flat).
+    pub exit_idx: usize,
+    /// Position side (Long/Short) — the *position* side, not the per-fill order side.
+    pub side: Direction,
+    /// Fill price at entry (`> 0`).
+    pub entry_px: Decimal,
+    /// Fill price at exit (`> 0`).
+    pub exit_px: Decimal,
+    /// Signed **gross** price return of the round-trip (`Long: (exit−entry)/entry`,
+    /// `Short: (entry−exit)/entry`). A winning trade is `> 0`. Deliberately price-only: net-of-cost
+    /// accounting lives in the aggregate [`BacktestResult::returns`] / [`BacktestResult::net_pnl`].
+    pub return_frac: f64,
+}
+
 /// An order scheduled by bar `i`'s decision, to fill at bar `i+1`.
 #[derive(Debug, Clone, Copy)]
 enum Pending {
@@ -112,9 +133,23 @@ fn split_windows(returns: &[f64], k: usize) -> Vec<Vec<f64>> {
     out
 }
 
-/// Backtest `genome` over `bars` with `cfg` — the QE-120 fitness engine.
+/// Backtest `genome` over `bars` with `cfg` — the QE-120 fitness engine. Convenience wrapper over
+/// [`backtest_with_trades`] that **discards** the per-trade records; the returned [`BacktestResult`]
+/// (`returns` / `net_pnl` / `accepted` / `fitness`) is byte-for-byte identical.
 #[must_use]
 pub fn backtest(genome: &Genome, bars: &[Bar], cfg: &BacktestConfig) -> BacktestResult {
+    backtest_with_trades(genome, bars, cfg).0
+}
+
+/// Backtest `genome` over `bars` with `cfg`, additionally recording one [`TradeFill`] per **closed**
+/// round-trip. The [`BacktestResult`] is exactly what [`backtest`] returns — the trade recorder is
+/// purely additive and never touches the cash/mark ledger, `returns`, or `fitness`.
+#[must_use]
+pub fn backtest_with_trades(
+    genome: &Genome,
+    bars: &[Bar],
+    cfg: &BacktestConfig,
+) -> (BacktestResult, Vec<TradeFill>) {
     let size_frac = Decimal::from(genome.risk.size_bps) / Decimal::from(BPS_DENOMINATOR);
 
     let mut cash = Decimal::ONE; // unit starting capital
@@ -125,6 +160,12 @@ pub fn backtest(genome: &Genome, bars: &[Bar], cfg: &BacktestConfig) -> Backtest
 
     let mut returns: Vec<f64> = Vec::with_capacity(bars.len().saturating_sub(1));
     let mut trades = 0usize;
+
+    // Trade recorder: the open entry (idx, side, fill price) between a paired entry and close, plus the
+    // completed round-trips. `open` is `Some` iff a position is currently held (entries are flat-only
+    // and at most one fill lands per bar, so entries and closes strictly alternate).
+    let mut open: Option<(usize, Direction, Decimal)> = None;
+    let mut fills: Vec<TradeFill> = Vec::new();
 
     for (i, bar) in bars.iter().enumerate() {
         let price = bar.price;
@@ -144,6 +185,7 @@ pub fn backtest(genome: &Genome, bars: &[Bar], cfg: &BacktestConfig) -> Backtest
                             apply_fill(&mut cash, &mut pos_qty, side, qty, price, cfg);
                             entry_bar = Some(i);
                             trades += 1;
+                            open = Some((i, dir, price));
                         }
                     }
                     Pending::Close => {
@@ -156,6 +198,22 @@ pub fn backtest(genome: &Genome, bars: &[Bar], cfg: &BacktestConfig) -> Backtest
                             };
                             apply_fill(&mut cash, &mut pos_qty, side, qty, price, cfg);
                             entry_bar = None;
+                            if let Some((entry_idx, dir, entry_px)) = open.take() {
+                                let return_frac = match dir {
+                                    Direction::Long => (price - entry_px) / entry_px,
+                                    Direction::Short => (entry_px - price) / entry_px,
+                                }
+                                .to_f64()
+                                .unwrap_or(0.0);
+                                fills.push(TradeFill {
+                                    entry_idx,
+                                    exit_idx: i,
+                                    side: dir,
+                                    entry_px,
+                                    exit_px: price,
+                                    return_frac,
+                                });
+                            }
                         }
                     }
                 }
@@ -211,13 +269,14 @@ pub fn backtest(genome: &Genome, bars: &[Bar], cfg: &BacktestConfig) -> Backtest
         }
     };
 
-    BacktestResult {
+    let result = BacktestResult {
         returns,
         trades,
         net_pnl,
         accepted,
         fitness,
-    }
+    };
+    (result, fills)
 }
 
 /// Apply one fill to the cash/mark ledger: move cash by the signed notional and the (multiplied) costs,
@@ -430,6 +489,86 @@ mod tests {
             ..incumbent
         };
         assert!(should_replace(&incumbent, &robust, DEFAULT_K_SIGMA));
+    }
+
+    /// A rising series engineered to fire the long genome's entry **exactly once**: feature-0 is high
+    /// only on bar 0 (so only bar 0's decision enters), price drifts up, and the time-based exit closes
+    /// the position a few bars later ⇒ exactly one closed, winning round-trip.
+    fn single_entry_uptrend(schema: &FeatureSchema, n: usize) -> Vec<Bar> {
+        (0..n)
+            .map(|i| {
+                let state0 = if i == 0 { 4 } else { 0 };
+                let price = Decimal::from(100 + i as i64); // +1 per bar → a long trade profits gross
+                bar(schema, i as i64 * 60_000, price, state0)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn single_winning_round_trip_records_one_trade() {
+        let s = schema();
+        let bars = single_entry_uptrend(&s, 8);
+        let g = long_genome(2, 5_000); // exit 2 bars after entry
+        let cfg = BacktestConfig {
+            min_trades: 1,
+            windows: 2,
+            ..BacktestConfig::default()
+        };
+
+        let (res, fills) = backtest_with_trades(&g, &bars, &cfg);
+
+        // Exactly one entry ⇒ the aggregate counter and the recorded fills agree.
+        assert_eq!(
+            res.trades, 1,
+            "the engineered series must enter exactly once"
+        );
+        assert_eq!(fills.len(), 1, "one closed round-trip ⇒ one TradeFill");
+
+        let t = fills[0];
+        assert_eq!(t.side, Direction::Long);
+        assert!(t.entry_idx < t.exit_idx, "exit must be after entry");
+        assert!(t.entry_px > Decimal::ZERO && t.exit_px > t.entry_px);
+        assert!(
+            t.return_frac > 0.0,
+            "a rising-price long round-trip must have return_frac > 0, got {}",
+            t.return_frac
+        );
+        // return_frac is the signed gross price return of the round-trip.
+        let expected = ((t.exit_px - t.entry_px) / t.entry_px).to_f64().unwrap();
+        assert!((t.return_frac - expected).abs() < 1e-12);
+    }
+
+    #[test]
+    fn backtest_delegates_to_with_trades() {
+        let s = schema();
+        let bars = uptrend_bars(&s, 160);
+        let g = long_genome(2, 5_000);
+        let cfg = BacktestConfig::default();
+        // `backtest` must be exactly the trade-discarding projection of `backtest_with_trades` — the
+        // hot-path result is unchanged by construction.
+        assert_eq!(
+            backtest(&g, &bars, &cfg),
+            backtest_with_trades(&g, &bars, &cfg).0
+        );
+    }
+
+    #[test]
+    fn open_position_at_end_records_no_trade() {
+        let s = schema();
+        // Enter once and never exit (huge holding cap, series ends while still long).
+        let bars = single_entry_uptrend(&s, 6);
+        let g = long_genome(1_000, 5_000);
+        let cfg = BacktestConfig {
+            min_trades: 1,
+            windows: 2,
+            ..BacktestConfig::default()
+        };
+        let (res, fills) = backtest_with_trades(&g, &bars, &cfg);
+        assert_eq!(res.trades, 1, "one entry fill");
+        assert!(
+            fills.is_empty(),
+            "an unclosed position is not a completed round-trip"
+        );
     }
 
     #[test]

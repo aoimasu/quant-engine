@@ -60,7 +60,8 @@ pub use archive::{
     IndicatorFamily, TimescaleBand, CELLS_PER_DIRECTION, STABILITY_THRESHOLD, SUBPOP_SIZE,
 };
 pub use backtest::{
-    backtest, BacktestConfig, BacktestResult, Bar, DEFAULT_MIN_TRADES, DEFAULT_WINDOWS,
+    backtest, backtest_with_trades, BacktestConfig, BacktestResult, Bar, TradeFill,
+    DEFAULT_MIN_TRADES, DEFAULT_WINDOWS,
 };
 pub use cv::{Fold, PurgedKFold};
 pub use fitness::{geom_return, log_growth, should_replace, NoiseRobustFitness, DEFAULT_K_SIGMA};
