@@ -1774,6 +1774,30 @@ read handlers do **blocking `std::fs`** on the async runtime (and reopen `stdout
 
 `Spec ref: reviewed/qe-255.md §nits, reviewed/qe-260.md §nits.`
 
+## QE-267 — Enforce the no-`unwrap` convention with `clippy::unwrap_used = "deny"`  *(P3 — quality/hardening)*
+`Phase: Hardening` · `Area: tooling / lint` · `Depends on: —` · `Priority: P3`
+
+**Why.** A workspace review found **zero** production `.unwrap()` on the panic path except a single guarded one
+(`crates/cli/src/jobs/metrics.rs:58`, provably safe — the `equity.len() < 2` early-return on line 55 guarantees
+`.last()` is `Some`). This "no bare `unwrap`" property is maintained **by convention only**: clippy's default
+`all` group does **not** include `unwrap_used` (a `restriction` lint), so the next `.unwrap()` that slips through
+review becomes a latent panic with nothing to catch it. Cheap to convert the convention into a compiler-enforced
+invariant — it passes today.
+
+**Scope / requirements.**
+- Rewrite the lone bare unwrap in `metrics::cagr` (`metrics.rs:58`) to the house expect-with-reason style, e.g.
+  `.expect("equity.len() >= 2 verified above")`, or restructure so no `unwrap` is needed.
+- Add `unwrap_used = "deny"` to `[workspace.lints.clippy]` in the root `Cargo.toml`. Leave **`expect_used` off** —
+  it is deliberately used for newtype-invariant reconstruction (see QE-268 for the order-path exception).
+- Add a `clippy.toml` at the workspace root with `allow-unwrap-in-tests = true` so the ~577 legitimate `.unwrap()`
+  calls in colocated `#[cfg(test)]` modules keep compiling.
+
+**Acceptance criteria.**
+- `cargo clippy --workspace --all-targets` stays green with the new `deny`; a freshly-introduced production
+  `.unwrap()` fails the gate; test-module unwraps are unaffected.
+
+`Spec ref: workspace-review 2026-07-04 (findings 1 & 2).`
+
 # Phase 3 — Live, attribution & ops   *(gated by G2; live capital gated by G3)*
 
 ## QE-301 — Strategy Allocation Journal (best-effort, 3-day retry)

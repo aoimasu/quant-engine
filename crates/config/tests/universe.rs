@@ -2,6 +2,8 @@
 //! tradable at an as-of date, and resizes by config alone (no code change).
 //!
 //! `figment::Error` is a large enum fixed by the `Jail` API, so allow the lint for this test file.
+
+#![allow(clippy::unwrap_used)] // integration test: whole file is test-only code (QE-267)
 #![allow(clippy::result_large_err)]
 
 use figment::Jail;

@@ -1,6 +1,8 @@
 //! QE-106 cache bridge: reconstruct base (5m) bars into coarser tiers, cache them into the
 //! synthetic store tagged with source lineage, and prove the round-trip + lineage staleness.
 
+#![allow(clippy::unwrap_used)] // integration test: whole file is test-only code (QE-267)
+
 use rust_decimal::Decimal;
 
 use qe_domain::{Bar, InstrumentId, Price, Qty, Resolution, Timestamp};

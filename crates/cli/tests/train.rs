@@ -5,6 +5,8 @@
 //! the documented example config loads, the default storage paths are relative (no hard-coded
 //! absolutes), and the Docker image runs the same `qe` binary as a local run.
 
+#![allow(clippy::unwrap_used)] // integration test: whole file is test-only code (QE-267)
+
 use std::path::Path;
 
 use qe_config::Config;

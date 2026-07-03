@@ -1,6 +1,8 @@
 //! AC #1 (round-trip + range-scan per record kind) and AC #2 (schema version recorded + mismatch
 //! detected), plus concurrent-read coverage.
 
+#![allow(clippy::unwrap_used)] // integration test: whole file is test-only code (QE-267)
+
 use std::sync::Arc;
 
 use heed::types::Str;

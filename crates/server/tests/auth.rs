@@ -4,6 +4,8 @@
 //! login, a non-allowlisted login, a rejected token, a tampered session, a CSRF mismatch — is
 //! exercised deterministically without talking to Google.
 
+#![allow(clippy::unwrap_used)] // integration test: whole file is test-only code (QE-267)
+
 use std::path::PathBuf;
 use std::sync::Arc;
 

@@ -8,6 +8,8 @@
 //! timeout (no fixed sleeps) to avoid flakes.
 //!
 //! Unix-only: the fake job is a POSIX shell script (dev + CI are macOS/Linux).
+
+#![allow(clippy::unwrap_used)] // integration test: whole file is test-only code (QE-267)
 #![cfg(unix)]
 
 use std::os::unix::fs::PermissionsExt;

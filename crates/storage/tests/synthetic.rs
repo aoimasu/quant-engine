@@ -1,6 +1,8 @@
 //! AC #1 (cached indicator states byte-identical to input) and AC #2 (stale-source detection +
 //! invalidation), plus reconstructed-bar coverage.
 
+#![allow(clippy::unwrap_used)] // integration test: whole file is test-only code (QE-267)
+
 use rust_decimal::Decimal;
 
 use qe_domain::{Bar, InstrumentId, Price, Qty, Resolution, Timestamp};

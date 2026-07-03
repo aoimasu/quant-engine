@@ -1,6 +1,8 @@
 //! QE-105 acceptance: a full fuse→persist run is **reproducible** and **range-queryable** over the
 //! public API, with **idempotent** persistence keyed by lineage.
 
+#![allow(clippy::unwrap_used)] // integration test: whole file is test-only code (QE-267)
+
 use rust_decimal::Decimal;
 
 use qe_domain::{

@@ -1,5 +1,7 @@
 //! AC #2 — a skew event is logged with the correlation fields and the health state.
 
+#![allow(clippy::unwrap_used)] // integration test: whole file is test-only code (QE-267)
+
 use std::sync::{Arc, Mutex};
 
 use qe_clock::{record_skew, SkewGuard};
