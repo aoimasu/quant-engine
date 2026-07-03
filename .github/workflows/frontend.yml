@@ -1,0 +1,43 @@
+name: frontend
+
+# Protects the admin SPA build (web/) on PRs and pushes to main.
+# Separate from the Rust gates in ci.yml; not a required check until an admin
+# marks it so (it still runs and surfaces failures).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'web/**'
+      - '.github/workflows/frontend.yml'
+  pull_request:
+    paths:
+      - 'web/**'
+      - '.github/workflows/frontend.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: frontend-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: web
+
+jobs:
+  build-test:
+    name: build & test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run build
+      - run: npm test

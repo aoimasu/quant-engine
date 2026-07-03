@@ -1,0 +1,67 @@
+/* ------------------------------------------------------------------
+   Quant Engine — Typography tokens
+   Space Grotesk (display) · Hanken Grotesk (UI/body) · JetBrains Mono (data)
+   Data, tickers, numbers and code ALWAYS use --font-mono with tabular
+   figures. Never render a price or metric in a proportional face.
+   Ported verbatim from the Claude Design "Quant Engine Design System".
+------------------------------------------------------------------ */
+
+:root {
+  /* Families */
+  --font-display: 'Space Grotesk', 'Hanken Grotesk', system-ui, sans-serif;
+  --font-sans: 'Hanken Grotesk', system-ui, -apple-system, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+
+  /* Weights */
+  --fw-regular: 400;
+  --fw-medium: 500;
+  --fw-semibold: 600;
+  --fw-bold: 700;
+
+  /* Type scale (px) — 1.20 minor-third-ish, tuned for data UI */
+  --fs-micro: 11px;
+  --fs-caption: 12px;
+  --fs-sm: 13px;
+  --fs-body: 14px;      /* default UI text */
+  --fs-md: 16px;
+  --fs-lg: 18px;
+  --fs-h3: 20px;
+  --fs-h2: 24px;
+  --fs-h1: 30px;
+  --fs-display: 38px;
+  --fs-display-lg: 50px;
+  --fs-display-xl: 66px;
+
+  /* Line heights */
+  --lh-tight: 1.1;
+  --lh-snug: 1.25;
+  --lh-normal: 1.5;
+  --lh-relaxed: 1.65;
+
+  /* Letter spacing */
+  --ls-tight: -0.02em;
+  --ls-snug: -0.01em;
+  --ls-normal: 0;
+  --ls-wide: 0.02em;
+  --ls-caps: 0.08em;
+
+  /* Tabular numerals — apply to any numeric element */
+  --num-feature: "tnum" 1, "zero" 1, "cv01" 1;
+}
+
+/* Utility: monospace tabular numbers (used across data cells) */
+.qe-tnum {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1, "zero" 1;
+}
+
+/* Uppercase micro-label / eyebrow */
+.qe-eyebrow {
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  font-weight: var(--fw-medium);
+  letter-spacing: var(--ls-caps);
+  text-transform: uppercase;
+  color: var(--text-muted);
+}

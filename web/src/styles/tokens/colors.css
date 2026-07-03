@@ -1,0 +1,95 @@
+/* ------------------------------------------------------------------
+   Quant Engine — Color tokens (dark-first)
+   Base scales + semantic aliases. Institutional-fintech dark surfaces,
+   violet/indigo brand accent, financial P&L semantics (up = green,
+   down = red). All values hand-tuned for dark UI legibility.
+   Ported verbatim from the Claude Design "Quant Engine Design System".
+------------------------------------------------------------------ */
+
+:root {
+  color-scheme: dark;
+
+  /* ---- Neutral / surface ramp (cool near-black → white) ---- */
+  --ink-900: #06070b;   /* app void / deepest bg          */
+  --ink-850: #0a0c12;   /* app background                 */
+  --ink-800: #0f1119;   /* base surface                   */
+  --ink-750: #14161f;   /* raised surface / card          */
+  --ink-700: #1a1d28;   /* elevated / popover             */
+  --ink-650: #222634;   /* hover fill                     */
+  --ink-600: #2b3040;   /* active fill / strong divider   */
+  --ink-500: #3a4155;   /* disabled surface               */
+  --ink-400: #5b6478;   /* muted text / icon              */
+  --ink-300: #7d879c;   /* tertiary text                  */
+  --ink-200: #9aa4bc;   /* secondary text                 */
+  --ink-100: #c7cddd;   /* primary-dim text               */
+  --ink-050: #e7eaf3;   /* primary text                   */
+  --ink-000: #f7f8fc;   /* high-emphasis / pure           */
+
+  /* ---- Brand accent — violet / indigo ---- */
+  --violet-050: #efeafe;
+  --violet-100: #d9cffd;
+  --violet-200: #b9a8fb;
+  --violet-300: #9a82f9;
+  --violet-400: #8a6ff8;
+  --violet-500: #7c5cff;   /* PRIMARY brand accent */
+  --violet-600: #6b47f0;
+  --violet-700: #573adb;
+  --violet-800: #4530b0;
+  --violet-glow: rgba(124, 92, 255, 0.35);
+
+  --indigo-400: #6d8bff;
+  --indigo-500: #5b7cf7;   /* secondary accent / links */
+  --indigo-600: #4763e6;
+
+  /* ---- Financial semantics ---- */
+  --up-500: #34d399;    /* gain / long / positive P&L */
+  --up-600: #22b884;
+  --up-050: #0f2b23;    /* gain fill (subtle)          */
+  --down-500: #ff5d6c;  /* loss / short / negative P&L */
+  --down-600: #f0434f;
+  --down-050: #2e1319;  /* loss fill (subtle)          */
+  --warn-500: #f7b955;  /* caution / risk limit        */
+  --warn-050: #2c2113;
+  --info-500: #4cc7f5;  /* info / neutral flag         */
+  --info-050: #0e2531;
+
+  /* ================= SEMANTIC ALIASES ================= */
+
+  /* Surfaces */
+  --bg-app: var(--ink-850);
+  --bg-void: var(--ink-900);
+  --surface-base: var(--ink-800);
+  --surface-card: var(--ink-750);
+  --surface-raised: var(--ink-700);
+  --surface-hover: var(--ink-650);
+  --surface-active: var(--ink-600);
+  --surface-inset: var(--ink-900);
+
+  /* Text */
+  --text-primary: var(--ink-050);
+  --text-secondary: var(--ink-200);
+  --text-tertiary: var(--ink-300);
+  --text-muted: var(--ink-400);
+  --text-inverse: var(--ink-900);
+  --text-accent: var(--violet-400);
+  --text-link: var(--indigo-400);
+
+  /* Borders / dividers (alpha over dark) */
+  --border-subtle: rgba(255, 255, 255, 0.06);
+  --border-default: rgba(255, 255, 255, 0.10);
+  --border-strong: rgba(255, 255, 255, 0.16);
+  --border-accent: var(--violet-500);
+  --divider: rgba(255, 255, 255, 0.08);
+
+  /* Interactive brand */
+  --accent: var(--violet-500);
+  --accent-hover: var(--violet-400);
+  --accent-active: var(--violet-600);
+  --accent-fill-soft: rgba(124, 92, 255, 0.14);
+  --accent-ring: var(--violet-glow);
+
+  /* P&L helpers */
+  --pnl-up: var(--up-500);
+  --pnl-down: var(--down-500);
+  --pnl-flat: var(--ink-300);
+}

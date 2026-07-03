@@ -1,0 +1,14 @@
+/* ==================================================================
+   Quant Engine — Global stylesheet entry point
+   Mirrors the design system's styles.css: tokens → base. Fonts are
+   self-hosted and loaded separately in main.tsx (see styles/fonts.ts).
+   ================================================================== */
+
+@import './tokens/colors.css';
+@import './tokens/typography.css';
+@import './tokens/spacing.css';
+@import './tokens/effects.css';
+@import './tokens/base.css';
+
+html, body, #root { height: 100%; }
+#root { isolation: isolate; }
