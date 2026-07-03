@@ -1665,6 +1665,115 @@ search + ensemble + G1 gate into a real runnable job (today `train` only writes 
 
 `Spec ref: admin-ui spec §10 (spec 4).`
 
+## PreP3 follow-ups (QE-262..QE-266)
+
+> Hardening / completeness items surfaced by the PreP3 code reviews (recorded in
+> `docs/mds/reviewed/qe-251.md` … `qe-261.md`). **None blocks PreP3** — it shipped green. Priority tags:
+> **P1** = correctness/safety, do before trusting training output for decisions; **P2** = do before wider
+> exposure or heavier load; **P3** = opportunistic quality. Same 25x/26x band as PreP3.
+
+## QE-262 — Persist catalogue version + states in the vintage; assert on load  *(P1 — correctness)*
+`Phase: PreP3-followup` · `Area: vintage / signal` · `Depends on: QE-260, QE-251` · `Priority: P1`
+
+**Why.** `train` (QE-260) and `backtest` (QE-251) both build decision bars against
+`CatalogueConfig::default()` (`{states:5}`) — the only catalogue in the tree today — and `Genome::is_valid`
+only **bounds-checks** feature/state indices. It does **not** detect a same-width/same-`num_states` catalogue
+**reorder** or a `CATALOGUE_VERSION` bump. `VintageContent` persists neither the catalogue version nor `states`,
+so the moment anyone changes `CatalogueConfig`, adds/reorders an indicator, or re-seals an older vintage, a
+backtest could **silently score genomes against the wrong schema** and produce wrong numbers with **no error**.
+Benign today (single catalogue), a latent trap the moment training is trusted for real decisions.
+
+**Scope / requirements.**
+- Add `catalogue_version: u32` (`CATALOGUE_VERSION`) and the catalogue `states` (or a full catalogue fingerprint)
+  to `VintageContent`; seal them in `train`.
+- On `Vintage::load`/`verify()` (and in the `backtest` feature bridge's `check_schema`), assert the loaded
+  vintage's catalogue version/fingerprint matches the runtime `CatalogueConfig` → loud `SchemaMismatch` on drift.
+- Soften/replace the now-accurate risk note in `crates/cli/src/jobs/features.rs`.
+
+**Acceptance criteria.**
+- A vintage sealed under one catalogue fingerprint and loaded under a different one (version bump or reordered
+  catalogue) fails loudly on load/backtest; the matching case still passes; `train`→`backtest` round-trip green.
+
+`Spec ref: reviewed/qe-251.md §follow-up, reviewed/qe-260.md.`
+
+## QE-263 — Run-store startup reconciler for orphaned `running` runs  *(P2)*
+`Phase: PreP3-followup` · `Area: backend / orchestration` · `Depends on: QE-255` · `Priority: P2`
+
+**Why.** QE-255's supervisor owns each run in-process; a server restart leaves any in-flight run wedged at
+`running`/`queued` in `meta.json` forever (documented limitation). Fine for a single-node dev tool, wrong once
+restarts are routine.
+
+**Scope / requirements.**
+- On startup, scan `data/runs/*/meta.json`; any non-terminal run whose child is no longer alive (no live
+  supervisor, no recent progress) is reconciled to `failed` (or re-queued, if the design prefers) with a clear
+  "orphaned by restart" reason. Idempotent; doesn't touch terminal runs or a run a fresh supervisor now owns.
+
+**Acceptance criteria.**
+- A `meta.json` left `running` with no live process is transitioned to a terminal state on next startup; a
+  genuinely-terminal run is untouched; tested with a fabricated orphaned run dir.
+
+`Spec ref: reviewed/qe-255.md §deferred.`
+
+## QE-264 — Enrich read APIs for the admin UI (vintage symbol roster + run metrics summary)  *(P2 — UX completeness)*
+`Phase: PreP3-followup` · `Area: backend / api + frontend` · `Depends on: QE-257, QE-259` · `Priority: P2`
+
+**Why.** Two QE-259 UI deviations stem from thin read APIs: (a) the New-backtest **universe** options are sourced
+from `/api/market-data/coverage` because `/api/vintages` exposes **no per-vintage symbol roster**; (b) the
+**Backtests list omits a key-metrics column** because `RunMeta` carries no metrics (they live only in
+`result.json`). Spec §7.2 lists both.
+
+**Scope / requirements.**
+- `/api/vintages`: include each vintage's instrument roster (the symbols its genomes were evolved against) so the
+  trigger form offers vintage-scoped universe options; point the UI at it.
+- `RunMeta` (or the run index): carry a small metrics summary (e.g. CAGR/Sharpe/max_dd) written on run
+  completion, so the list can show a metrics column without fetching every `result.json` (lazy-fetch acceptable
+  as an alternative). Wire the QE-259 list column.
+
+**Acceptance criteria.**
+- The New-backtest universe options come from the selected vintage's roster; the Backtests list shows key
+  metrics for completed runs; both session-gated; frontend + server tests.
+
+`Spec ref: reviewed/qe-259.md §deferred (1,2); admin-ui spec §7.2.`
+
+## QE-265 — Auth hardening: OIDC `nonce` + local JWKS/RS256 verification  *(P2 — security defense-in-depth)*
+`Phase: PreP3-followup` · `Area: backend / auth` · `Depends on: QE-256` · `Priority: P2`
+
+**Why.** QE-256 is sound for a trusted single-tenant allowlist, but two hardening gaps were flagged: no OIDC
+`nonce` binding (replay defense-in-depth), and ID-token **signature verification is delegated to Google's
+`tokeninfo`** endpoint (behind `http`) rather than local JWKS/RS256 — chosen only to avoid `ring`
+(license)/`rsa` (RUSTSEC-2023-0071). Do before any wider/less-trusted exposure.
+
+**Scope / requirements.**
+- Add a `nonce` to the auth-code request bound to the browser (like the `state` cookie) and verify it in the ID
+  token on callback.
+- Replace the `tokeninfo` delegation with **local JWKS fetch + RS256 verification** using a license-/advisory-clean
+  crate (re-evaluate the ecosystem; keep `cargo deny` green), removing the extra Google network round-trip.
+
+**Acceptance criteria.**
+- A replayed/absent-nonce token is rejected; ID tokens are verified locally against Google's JWKS (mocked in
+  tests); `cargo deny` stays green; the existing 401/403/200 auth contract is unchanged.
+
+`Spec ref: reviewed/qe-256.md §follow-ups (1,2).`
+
+## QE-266 — qe-server non-blocking I/O + run-supervision robustness nits  *(P3 — quality/scale)*
+`Phase: PreP3-followup` · `Area: backend / server` · `Depends on: QE-255, QE-257` · `Priority: P3`
+
+**Why.** Small quality items harmless at admin scale, worth closing before heavier load: the run store /
+read handlers do **blocking `std::fs`** on the async runtime (and reopen `stdout.log` per line); a job that emits
+`done`+exit 0 but **writes no `result.json`** is classified `succeeded` (then 409s on `/result`).
+
+**Scope / requirements.**
+- Move the run-store / read-handler file I/O to `tokio::fs` or `spawn_blocking`; stop reopening `stdout.log` per
+  progress line.
+- Classify a `done`-without-`result.json` job as `failed` with a clear reason (remove the QE-255 `// TODO`).
+- (Opportunistic, only if trivial) de-`O(n²)` the QE-260 `elite_pool` dedup; mark QE-251 `costs.slippage_model`
+  as nominal in-contract if not already clear.
+
+**Acceptance criteria.**
+- No blocking `std::fs` on the request path (spot-checked); a `done`-without-result job ⇒ `failed`; green gate + no regressions.
+
+`Spec ref: reviewed/qe-255.md §nits, reviewed/qe-260.md §nits.`
+
 # Phase 3 — Live, attribution & ops   *(gated by G2; live capital gated by G3)*
 
 ## QE-301 — Strategy Allocation Journal (best-effort, 3-day retry)
