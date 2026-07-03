@@ -18,31 +18,39 @@ export interface BacktestsAreaProps {
  * (a QE-261 training → backtest deep-link), it opens directly on the New-backtest form.
  */
 export function BacktestsArea({ initialVintage }: BacktestsAreaProps = {}) {
+  // The deep-linked vintage is a **one-shot** seed: it preselects only the auto-opened New-backtest
+  // form on mount. Any navigation within the area (`go`) spends it, so a later *manual* "New backtest"
+  // starts blank instead of re-preselecting a stale vintage.
+  const [seed, setSeed] = useState<string | undefined>(initialVintage);
   const [state, setState] = useState<View>(initialVintage ? { view: 'new' } : { view: 'list' });
+  const go = (next: View) => {
+    setSeed(undefined);
+    setState(next);
+  };
 
   switch (state.view) {
     case 'new':
       return (
         <NewBacktest
-          initialVintage={initialVintage}
-          onCreated={(id) => setState({ view: 'result', runId: id })}
-          onCancel={() => setState({ view: 'list' })}
+          initialVintage={seed}
+          onCreated={(id) => go({ view: 'result', runId: id })}
+          onCancel={() => go({ view: 'list' })}
         />
       );
     case 'result':
       return (
         <BacktestResult
           runId={state.runId}
-          onBack={() => setState({ view: 'list' })}
-          onReRun={(id) => setState({ view: 'result', runId: id })}
+          onBack={() => go({ view: 'list' })}
+          onReRun={(id) => go({ view: 'result', runId: id })}
         />
       );
     case 'list':
     default:
       return (
         <BacktestsList
-          onOpen={(id) => setState({ view: 'result', runId: id })}
-          onNew={() => setState({ view: 'new' })}
+          onOpen={(id) => go({ view: 'result', runId: id })}
+          onNew={() => go({ view: 'new' })}
         />
       );
   }

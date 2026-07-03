@@ -411,9 +411,9 @@ exit 0
     // The sealed vintage id from the terminal `done` is exposed for the deep-link.
     assert_eq!(train["vintage"], json!("vintage-abc123"));
 
-    // The coarse progress bar still advances off the rich lines (last was the gate line).
-    assert_eq!(meta["progress"]["pct"], json!(85));
-    assert_eq!(meta["progress"]["stage"], json!("gate"));
+    // The coarse progress bar reaches 100% on a succeeded train run (past the gate line's 85%).
+    assert_eq!(meta["progress"]["pct"], json!(100));
+    assert_eq!(meta["progress"]["stage"], json!("done"));
 
     // The result endpoint serves the artefact the train job wrote.
     let (rstatus, rbody) = get(&app, &format!("/api/runs/{id}/result")).await;

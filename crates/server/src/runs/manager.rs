@@ -297,6 +297,15 @@ async fn supervise(
         // `GET /result` then returns 409. Consider treating a missing result artefact as `failed`.
         meta.status = RunStatus::Succeeded;
         meta.error = None;
+        // A succeeded train run should read 100% — its last coarse stage was the gate line (85%). The
+        // backtest job reports its own terminal `report` pct, so leave backtest progress unchanged.
+        if matches!(spec, RunSpec::Train(_)) {
+            meta.progress = Progress {
+                pct: 100,
+                stage: "done".to_owned(),
+                msg: "training complete".to_owned(),
+            };
+        }
         if store.result_path(&meta.id).exists() {
             meta.artifacts = vec!["result.json".to_owned()];
         }
