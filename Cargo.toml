@@ -40,6 +40,14 @@ tracing-appender = "0.2"
 proptest = "1"
 # Temp directories for storage tests; dev-dependency only.
 tempfile = "3"
+# Admin-UI backend (QE-254, ADR D4a): async web stack, isolated to the `qe-server` composition root.
+# `axum` default features cover routing + JSON; `tokio` gets only the multi-thread runtime + macros +
+# net it needs; `tower-http/fs` provides static-asset serving (`ServeDir`/`ServeFile`).
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
+tower-http = { version = "0.6", features = ["fs"] }
+# `tower::ServiceExt::oneshot` drives the router in-process for the async integration test (dev-only).
+tower = { version = "0.5", features = ["util"] }
 
 # Internal crates (path deps) — referenced by member crates as `qe-domain.workspace = true`.
 qe-domain = { path = "crates/domain" }

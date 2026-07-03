@@ -194,6 +194,10 @@ pub struct FirewallRule {
 /// The information-firewall rules: **search ⟂ portfolio ⟂ live** (QE-001/QE-132). Search (`qe-wfo`) may
 /// read neither portfolio (`qe-ensemble`) nor live (`qe-runtime`/`qe-venue`); portfolio may read neither
 /// search nor live. (Live reading search/portfolio *outputs* is the allowed downstream direction.)
+///
+/// QE-254 adds the **second composition root** `qe-server` (admin-UI backend, ADR D4a): it reuses the
+/// training-side + shared crates but must stay clear of the live side — no `qe-runtime`/`qe-venue`
+/// edge — so async stays isolated to that crate and the server never links the live trading path.
 #[must_use]
 pub fn firewall_rules() -> Vec<FirewallRule> {
     vec![
@@ -204,6 +208,10 @@ pub fn firewall_rules() -> Vec<FirewallRule> {
         FirewallRule {
             upstream: "qe-ensemble",
             forbidden: &["qe-wfo", "qe-runtime", "qe-venue"],
+        },
+        FirewallRule {
+            upstream: "qe-server",
+            forbidden: &["qe-runtime", "qe-venue"],
         },
     ]
 }
