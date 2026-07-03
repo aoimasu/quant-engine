@@ -9,6 +9,8 @@
 
 use std::path::{Path, PathBuf};
 
+pub mod jobs;
+
 use qe_config::Config;
 use qe_determinism::Lineage;
 use qe_domain::VintageHash;
@@ -151,7 +153,7 @@ fn write_file(path: &Path, bytes: &[u8]) -> Result<(), CliError> {
 // ---- command-line parsing ------------------------------------------------------------------------
 
 /// A parsed command.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Command {
     /// Print the version and exit (the bare invocation).
     Version,
@@ -161,6 +163,29 @@ pub enum Command {
         config: PathBuf,
         /// Operating profile.
         profile: qe_config::Profile,
+    },
+    /// Backtest a sealed vintage over a window (QE-251).
+    Backtest {
+        /// Vintage id to load from the repository.
+        vintage: String,
+        /// Optional single-chromosome selector (unset ⇒ the whole ensemble).
+        strategy: Option<String>,
+        /// Inclusive window start (`YYYY-MM-DD`).
+        start: String,
+        /// Exclusive window end (`YYYY-MM-DD`).
+        end: String,
+        /// Bar resolution (`1h`, `5m`, …).
+        resolution: String,
+        /// Instrument symbols to backtest (v1 uses the first).
+        universe: Vec<String>,
+        /// Taker fee, in basis points of notional.
+        taker_fee_bps: f64,
+        /// Slippage-model label (recorded in the result contract).
+        slippage_model: String,
+        /// Run directory the job writes `result.json` into.
+        run_dir: PathBuf,
+        /// Emit JSON-line progress on stdout.
+        json: bool,
     },
 }
 
@@ -205,8 +230,72 @@ where
             }
             Ok(Command::Train { config, profile })
         }
+        "backtest" => {
+            let mut vintage: Option<String> = None;
+            let mut strategy: Option<String> = None;
+            let mut start = String::new();
+            let mut end = String::new();
+            let mut resolution = String::new();
+            let mut universe: Vec<String> = Vec::new();
+            let mut taker_fee_bps = 2.0_f64;
+            let mut slippage_model = "square-root-impact".to_owned();
+            let mut run_dir = PathBuf::new();
+            let mut json = false;
+            while let Some(flag) = it.next() {
+                match flag.as_str() {
+                    "--vintage" => vintage = Some(value(&mut it, "--vintage")?),
+                    "--strategy" => strategy = Some(value(&mut it, "--strategy")?),
+                    "--start" => start = value(&mut it, "--start")?,
+                    "--end" => end = value(&mut it, "--end")?,
+                    "--resolution" => resolution = value(&mut it, "--resolution")?,
+                    "--universe" => {
+                        // Comma- or repeat-separated; accept both for ergonomics.
+                        let raw = value(&mut it, "--universe")?;
+                        universe.extend(
+                            raw.split(',')
+                                .map(str::trim)
+                                .filter(|s| !s.is_empty())
+                                .map(str::to_owned),
+                        );
+                    }
+                    "--taker-fee-bps" => {
+                        let v = value(&mut it, "--taker-fee-bps")?;
+                        taker_fee_bps = v.parse().map_err(|_| {
+                            CliError::Usage(format!("--taker-fee-bps expects a number, got `{v}`"))
+                        })?;
+                    }
+                    "--slippage-model" => slippage_model = value(&mut it, "--slippage-model")?,
+                    "--run-dir" => run_dir = PathBuf::from(value(&mut it, "--run-dir")?),
+                    "--json" => json = true,
+                    other => return Err(CliError::Usage(format!("unknown flag `{other}`"))),
+                }
+            }
+            let vintage =
+                vintage.ok_or_else(|| CliError::Usage("--vintage is required".to_owned()))?;
+            Ok(Command::Backtest {
+                vintage,
+                strategy,
+                start,
+                end,
+                resolution,
+                universe,
+                taker_fee_bps,
+                slippage_model,
+                run_dir,
+                json,
+            })
+        }
         other => Err(CliError::Usage(format!("unknown command `{other}`"))),
     }
+}
+
+/// Pull the value that must follow a flag, or a `Usage` error naming the flag.
+fn value<I>(it: &mut I, flag: &str) -> Result<String, CliError>
+where
+    I: Iterator<Item = String>,
+{
+    it.next()
+        .ok_or_else(|| CliError::Usage(format!("{flag} needs a value")))
 }
 
 fn parse_profile(s: &str) -> Result<qe_config::Profile, CliError> {
@@ -266,6 +355,89 @@ mod tests {
         ));
         assert!(matches!(
             parse_args(["train", "--config"]),
+            Err(CliError::Usage(_))
+        ));
+    }
+
+    #[test]
+    fn backtest_parses_required_and_optional_flags() {
+        let cmd = parse_args([
+            "backtest",
+            "--vintage",
+            "v-2026-07",
+            "--start",
+            "2021-01-01",
+            "--end",
+            "2024-12-31",
+            "--resolution",
+            "1h",
+            "--run-dir",
+            "/tmp/r",
+            "--json",
+        ])
+        .unwrap();
+        assert_eq!(
+            cmd,
+            Command::Backtest {
+                vintage: "v-2026-07".into(),
+                strategy: None,
+                start: "2021-01-01".into(),
+                end: "2024-12-31".into(),
+                resolution: "1h".into(),
+                universe: vec![],
+                taker_fee_bps: 2.0,
+                slippage_model: "square-root-impact".into(),
+                run_dir: PathBuf::from("/tmp/r"),
+                json: true,
+            }
+        );
+    }
+
+    #[test]
+    fn backtest_overrides_costs_universe_and_strategy() {
+        let cmd = parse_args([
+            "backtest",
+            "--vintage",
+            "v1",
+            "--strategy",
+            "#3",
+            "--start",
+            "2021-01-01",
+            "--end",
+            "2021-02-01",
+            "--resolution",
+            "5m",
+            "--universe",
+            "BTCUSDT,ETHUSDT",
+            "--taker-fee-bps",
+            "5",
+            "--slippage-model",
+            "linear",
+            "--run-dir",
+            "/tmp/r",
+        ])
+        .unwrap();
+        assert_eq!(
+            cmd,
+            Command::Backtest {
+                vintage: "v1".into(),
+                strategy: Some("#3".into()),
+                start: "2021-01-01".into(),
+                end: "2021-02-01".into(),
+                resolution: "5m".into(),
+                universe: vec!["BTCUSDT".into(), "ETHUSDT".into()],
+                taker_fee_bps: 5.0,
+                slippage_model: "linear".into(),
+                run_dir: PathBuf::from("/tmp/r"),
+                json: false,
+            }
+        );
+    }
+
+    #[test]
+    fn backtest_requires_vintage() {
+        assert!(matches!(
+            parse_args(["backtest", "--start", "2021-01-01"]),
             Err(CliError::Usage(_))
         ));
     }
