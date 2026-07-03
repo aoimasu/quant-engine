@@ -24,6 +24,11 @@ use tempfile::TempDir;
 use tokio::time::Instant;
 use tower::ServiceExt;
 
+mod common;
+
+/// The allowlisted email these tests authenticate as (QE-256 gates all `/api/runs*` behind a session).
+const TEST_EMAIL: &str = "runner@example.com";
+
 /// Write `body` as an executable `/bin/sh` script at `path`.
 fn write_script(path: &Path, body: &str) {
     std::fs::write(path, body).expect("write script");
@@ -41,8 +46,11 @@ fn app_with_script(data_dir: &Path, script: &Path, max_concurrency: usize) -> Ro
         spawner,
         max_concurrency,
     ));
+    // QE-256 gates `/api/runs*` behind a session; wire an auth context whose session secret matches
+    // the one the test's `Cookie` header is signed with (both from `common`).
+    let auth = common::auth_context(TEST_EMAIL, None);
     // The static dir is irrelevant here (no `/` requests); an absent path is fine.
-    build_router(&data_dir.join("static"), manager)
+    build_router(&data_dir.join("static"), common::app_state(manager, auth))
 }
 
 /// A create-run request body for a minimal valid backtest.
@@ -73,7 +81,13 @@ async fn read_json(resp: axum::response::Response) -> (StatusCode, Value) {
 async fn get(app: &Router, uri: &str) -> (StatusCode, Value) {
     let resp = app
         .clone()
-        .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri(uri)
+                .header("cookie", common::session_cookie_header(TEST_EMAIL))
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .expect("router responds");
     read_json(resp).await
@@ -87,6 +101,7 @@ async fn post_run(app: &Router, body: &Value) -> (StatusCode, Value) {
                 .method("POST")
                 .uri("/api/runs")
                 .header("content-type", "application/json")
+                .header("cookie", common::session_cookie_header(TEST_EMAIL))
                 .body(Body::from(body.to_string()))
                 .unwrap(),
         )
