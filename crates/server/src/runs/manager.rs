@@ -213,6 +213,9 @@ async fn supervise(
     meta.finished_ms = Some(now_ms());
 
     if done_seen && exit == Some(0) {
+        // TODO(QE-follow-up): a misbehaving job that emits `done` + exits 0 but writes no
+        // `result.json` is currently classified `succeeded` (with empty `artifacts`), so
+        // `GET /result` then returns 409. Consider treating a missing result artefact as `failed`.
         meta.status = RunStatus::Succeeded;
         meta.error = None;
         if store.result_path(&meta.id).exists() {

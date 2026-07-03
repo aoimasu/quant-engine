@@ -41,18 +41,27 @@ fn default_slippage_model() -> String {
 
 /// Backtest parameters — the `params` object of a create-run request, persisted verbatim in
 /// `meta.json` and mapped 1:1 onto the `qe-cli backtest` flags.
+///
+/// **Every** field is `#[serde(default)]` so the body parses **leniently**: a missing required field
+/// deserialises to an empty value rather than a serde reject (which axum would surface as `422`). All
+/// required-ness is then enforced in one place (`manager::validate`), which returns a uniform `400`
+/// with a clear message for any missing/invalid param (nit 2).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BacktestParams {
     /// Vintage id to backtest (required; `--vintage`).
+    #[serde(default)]
     pub vintage: String,
     /// Optional single-chromosome selector (`--strategy`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strategy: Option<String>,
-    /// Inclusive window start `YYYY-MM-DD` (`--start`).
+    /// Inclusive window start `YYYY-MM-DD` (required; `--start`).
+    #[serde(default)]
     pub start: String,
-    /// Exclusive window end `YYYY-MM-DD` (`--end`).
+    /// Exclusive window end `YYYY-MM-DD` (required; `--end`).
+    #[serde(default)]
     pub end: String,
-    /// Bar resolution (`--resolution`).
+    /// Bar resolution (required; `--resolution`).
+    #[serde(default)]
     pub resolution: String,
     /// Instrument symbols (`--universe`, repeated). Must be non-empty (the job needs ≥1 instrument).
     #[serde(default)]
@@ -65,18 +74,37 @@ pub struct BacktestParams {
     pub slippage_model: String,
 }
 
+impl Default for BacktestParams {
+    fn default() -> Self {
+        Self {
+            vintage: String::new(),
+            strategy: None,
+            start: String::new(),
+            end: String::new(),
+            resolution: String::new(),
+            universe: Vec::new(),
+            taker_fee_bps: default_taker_fee_bps(),
+            slippage_model: default_slippage_model(),
+        }
+    }
+}
+
 /// Default run type when omitted from a create request.
 fn default_run_type() -> String {
     "backtest".to_owned()
 }
 
 /// `POST /api/runs` body: `{ "type": "backtest", "params": { … } }`.
+///
+/// Both fields are `#[serde(default)]` so the body parses leniently and every required-ness check is
+/// enforced uniformly in `manager::validate` as a `400` (never a serde `422`).
 #[derive(Debug, Clone, Deserialize)]
 pub struct CreateRunRequest {
     /// Run type — only `backtest` is supported in v1.
     #[serde(rename = "type", default = "default_run_type")]
     pub run_type: String,
     /// Backtest parameters.
+    #[serde(default)]
     pub params: BacktestParams,
 }
 

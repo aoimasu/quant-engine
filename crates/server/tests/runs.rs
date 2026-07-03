@@ -112,15 +112,20 @@ async fn poll_status(app: &Router, id: &str, want: &str, timeout: Duration) -> V
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Success path: create → running → succeeded, then the result endpoint serves `result.json`, and the
-/// list endpoint shows the run.
+/// Full AC transition `queued → running → succeeded`, with an **observed** `running` snapshot.
+///
+/// The fake job emits a progress line then **blocks until a release sentinel appears**, so `running`
+/// is deterministically observable — the job cannot finish before we poll it (no race). We then
+/// release it, confirm `succeeded`, and confirm `/result` serves the artefact.
 #[tokio::test]
-async fn run_succeeds_and_serves_result() {
+async fn run_transitions_running_then_succeeds_and_serves_result() {
     let tmp = TempDir::new().unwrap();
+    let release = tmp.path().join("release");
     let script = tmp.path().join("job_ok.sh");
     write_script(
         &script,
-        r#"#!/bin/sh
+        &format!(
+            r#"#!/bin/sh
 run_dir=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -128,12 +133,16 @@ while [ $# -gt 0 ]; do
     *) shift ;;
   esac
 done
-printf '{"t":"progress","pct":10,"stage":"load","msg":"loading"}\n'
-printf '{"t":"progress","pct":80,"stage":"simulate","msg":"simulating"}\n'
-printf '{"ok":true}' > "$run_dir/result.json"
-printf '{"t":"done","result":"result.json"}\n'
+printf '{{"t":"progress","pct":10,"stage":"load","msg":"loading"}}\n'
+# Block in `running` until released, so the test can observe the running snapshot deterministically.
+while [ ! -f "{release}" ]; do sleep 0.02; done
+printf '{{"t":"progress","pct":80,"stage":"simulate","msg":"simulating"}}\n'
+printf '{{"ok":true}}' > "$run_dir/result.json"
+printf '{{"t":"done","result":"result.json"}}\n'
 exit 0
 "#,
+            release = release.display()
+        ),
     );
     let app = app_with_script(tmp.path(), &script, 2);
 
@@ -141,11 +150,26 @@ exit 0
     assert_eq!(status, StatusCode::CREATED, "create returned {body}");
     let id = body["id"].as_str().expect("id in response").to_owned();
 
+    // Observe the `running` snapshot while the job is blocked (deterministic — it can't finish yet).
+    let running = poll_status(&app, &id, "running", TIMEOUT).await;
+    assert_eq!(running["status"], json!("running"));
+    assert!(
+        running["started_ms"].is_u64(),
+        "started while running: {running}"
+    );
+    assert!(
+        running["finished_ms"].is_null(),
+        "not yet finished while running: {running}"
+    );
+
+    // Release the job → it finishes.
+    std::fs::write(&release, b"go").unwrap();
+
     let meta = poll_status(&app, &id, "succeeded", TIMEOUT).await;
-    // Went through `running` (started) and progress was tailed from the subprocess stdout.
     assert!(meta["started_ms"].is_u64(), "started_ms set: {meta}");
     assert!(meta["finished_ms"].is_u64(), "finished_ms set: {meta}");
     assert_eq!(meta["exit"], json!(0));
+    // Progress was tailed from the subprocess stdout (last line before `done`).
     assert_eq!(meta["progress"]["pct"], json!(80));
     assert_eq!(meta["progress"]["stage"], json!("simulate"));
     assert_eq!(meta["artifacts"], json!(["result.json"]));
@@ -257,20 +281,41 @@ exit 0
     }
 }
 
-/// Validation: a missing required param ⇒ 400 and no run is created.
+/// Validation is uniform `400` (never a serde `422`) for every invalid/missing param — a missing
+/// required **string** field parses leniently and is rejected in one place, same as an empty one; and
+/// no run is created.
 #[tokio::test]
-async fn create_rejects_invalid_request() {
+async fn create_rejects_invalid_request_uniform_400() {
     let tmp = TempDir::new().unwrap();
     let script = tmp.path().join("job_ok.sh");
     write_script(&script, "#!/bin/sh\nexit 0\n");
     let app = app_with_script(tmp.path(), &script, 2);
 
-    // Missing `universe`.
-    let bad = json!({
+    // A missing required string field (`vintage` absent) ⇒ 400, NOT 422.
+    let missing_vintage = json!({
+        "type": "backtest",
+        "params": { "start": "2021-01-01", "end": "2021-02-01", "resolution": "1h", "universe": ["BTCUSDT"] }
+    });
+    let (status, body) = post_run(&app, &missing_vintage).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "missing vintage: {body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("vintage"),
+        "clear error naming the field: {body}"
+    );
+
+    // A missing `universe` ⇒ 400 too.
+    let missing_universe = json!({
         "type": "backtest",
         "params": { "vintage": "v", "start": "2021-01-01", "end": "2021-02-01", "resolution": "1h" }
     });
-    let (status, _) = post_run(&app, &bad).await;
+    let (status, _) = post_run(&app, &missing_universe).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // An entirely empty body ⇒ 400 (lenient parse → validation), not a serde 422.
+    let (status, _) = post_run(&app, &json!({})).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 
     let (lstatus, list) = get(&app, "/api/runs").await;
