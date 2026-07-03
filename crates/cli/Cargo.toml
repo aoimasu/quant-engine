@@ -27,9 +27,12 @@ qe-wfo.workspace = true
 qe-ensemble.workspace = true
 qe-venue.workspace = true
 qe-runtime.workspace = true
+qe-vintage.workspace = true
+rust_decimal.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+qe-risk.workspace = true
