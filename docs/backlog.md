@@ -1798,6 +1798,35 @@ invariant — it passes today.
 
 `Spec ref: workspace-review 2026-07-04 (findings 1 & 2).`
 
+## QE-268 — Extend the panic-freedom `deny` attribute from the demonstrator to the live order-emission path  *(P2 — live-trading safety)*
+`Phase: Hardening` · `Area: runtime / safety` · `Depends on: QE-267` · `Priority: P2`
+
+**Why.** `qe-error` documents that *"modules on the order-emission path must reject `unwrap`/`expect`/`panic`"* and
+ships a `hot_path` demonstrator plus `tests/hot_path_lint.rs` proving clippy enforces it — but the
+`#![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]` attribute decorates **only** `error::hot_path`.
+The **actual** live path — `runtime::{edge, kill_gate, pretrade, hedger, live_netter, live_breakers, evaluator}` —
+carries **none** of it, and a handful reconstruct validated newtypes via `.expect()` on in-range arithmetic
+(e.g. `edge.rs` `Qty::new(mag).expect("magnitude is non-negative")`, `live_breakers.rs` `Fraction::new(..).expect(..)`).
+Correct today *by proof*, but the single most safety-critical invariant of a live-capital engine is enforced by
+**convention exactly where it matters most**. Close before G2/live exposure.
+
+**Scope / requirements.**
+- Add `#![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]` to each order-emission module, following
+  the `qe-error::hot_path` playbook.
+- Replace each **production** `.expect()`/`panic!` on that path with a proof-carrying alternative: fallible newtype
+  constructors propagated via `?` into the module's error type (not `expect`), or a total `match` — no
+  `unreachable!`. Reconfirm each converted invariant is genuinely infallible or now surfaces a typed error.
+- Ensure `clippy.toml` (from QE-267) has `allow-expect-in-tests = true` + `allow-unwrap-in-tests = true` so the
+  colocated test modules still build under the stricter per-module attribute.
+- Extend/duplicate the `hot_path_lint.rs` fixture assertion if a second guarded module warrants its own proof.
+
+**Acceptance criteria.**
+- Every listed order-emission module carries the `deny` attribute; `cargo clippy --workspace --all-targets` is
+  green; introducing an `unwrap`/`expect`/`panic!` into any of those modules fails clippy; live behaviour is
+  unchanged (`order_port_conformance` + `restart_parity` tests green).
+
+`Spec ref: workspace-review 2026-07-04 (finding 3); crates/error/src/lib.rs §hot_path.`
+
 # Phase 3 — Live, attribution & ops   *(gated by G2; live capital gated by G3)*
 
 ## QE-301 — Strategy Allocation Journal (best-effort, 3-day retry)

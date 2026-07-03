@@ -116,10 +116,31 @@ impl Qty {
         Ok(Qty(value))
     }
 
+    /// Construct a quantity from the **magnitude** of a signed decimal — total and infallible.
+    ///
+    /// Returns `|value|`, which is non-negative by construction, so the `Qty` invariant always holds.
+    /// This is the proof-carrying replacement for `Qty::new(value.abs()).expect(..)` on the order path:
+    /// where a magnitude has already been derived from a signed quantity (a delta, a signed position),
+    /// there is no error case to reconstruct.
+    #[must_use]
+    pub fn abs_of(value: Decimal) -> Qty {
+        Qty(value.abs())
+    }
+
     /// The underlying decimal.
     #[must_use]
     pub fn get(self) -> Decimal {
         self.0
+    }
+}
+
+/// `+` is exact (decimal addition) and total: the sum of two non-negative quantities is non-negative,
+/// so the result is always a valid [`Qty`] without re-validation. Panics only on 96-bit decimal
+/// overflow (as [`Notional`]'s `Add` does) — well outside realistic fill/position magnitudes.
+impl Add for Qty {
+    type Output = Qty;
+    fn add(self, rhs: Self) -> Self {
+        Qty(self.0 + rhs.0)
     }
 }
 
@@ -234,6 +255,27 @@ mod tests {
             Err(DomainError::NegativeMoney { kind: "qty", .. })
         ));
         assert!(Price::new(Decimal::ZERO).is_ok());
+    }
+
+    #[test]
+    fn qty_abs_of_takes_magnitude_and_is_total() {
+        // A signed value's magnitude is always a valid (non-negative) Qty.
+        assert_eq!(Qty::abs_of(dec("-2.5")), Qty::new(dec("2.5")).unwrap());
+        assert_eq!(Qty::abs_of(dec("2.5")), Qty::new(dec("2.5")).unwrap());
+        assert_eq!(Qty::abs_of(Decimal::ZERO), Qty::ZERO);
+    }
+
+    #[test]
+    fn qty_add_is_total_and_exact() {
+        // Sum of two non-negative quantities is a valid Qty; addition is exact in decimal.
+        assert_eq!(
+            Qty::new(dec("0.1")).unwrap() + Qty::new(dec("0.2")).unwrap(),
+            Qty::new(dec("0.3")).unwrap()
+        );
+        assert_eq!(
+            Qty::ZERO + Qty::new(dec("1.5")).unwrap(),
+            Qty::new(dec("1.5")).unwrap()
+        );
     }
 
     #[test]

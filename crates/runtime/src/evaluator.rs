@@ -6,6 +6,9 @@
 //! decision stream cannot change at the boundary (the AC). The session loads the vintage
 //! (chromosomes/ensemble/calibration) read-only and drives the shared QE-206 factor join + `Genome::decide`.
 
+// Order-emission path (QE-268): reject `unwrap`/`expect`/`panic` — a panic here is a live-trading fault.
+#![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
 use rust_decimal::Decimal;
 
 use qe_domain::Bar;

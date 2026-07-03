@@ -12,6 +12,9 @@
 //! surfaced for the cockpit and QE-215 pre-trade caps but does not clamp the target here (sizing caps are
 //! QE-215).
 
+// Order-emission path (QE-268): reject `unwrap`/`expect`/`panic` — a panic here is a live-trading fault.
+#![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
 use qe_domain::{Direction, Notional};
 
 use crate::live_netter::NetTarget;

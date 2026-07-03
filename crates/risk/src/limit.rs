@@ -112,6 +112,12 @@ impl<'de> Deserialize<'de> for Leverage {
 pub struct Fraction(Decimal);
 
 impl Fraction {
+    /// Zero — the lower bound of the valid `[0, 1]` range.
+    pub const ZERO: Fraction = Fraction(Decimal::ZERO);
+
+    /// One — the upper bound of the valid `[0, 1]` range.
+    pub const ONE: Fraction = Fraction(Decimal::ONE);
+
     /// Construct a fraction, rejecting values outside `[0, 1]`.
     ///
     /// # Errors
@@ -217,6 +223,16 @@ mod tests {
             LimitOutcome::Reject
         );
         assert_eq!(LimitKind::DrawdownCap.default_outcome(), LimitOutcome::Halt);
+    }
+
+    #[test]
+    fn fraction_bound_consts_match_constructor() {
+        // The `ZERO`/`ONE` bound consts equal the validated constructor at the range endpoints, so the
+        // order path can use them instead of `Fraction::new(..).expect(..)`.
+        assert_eq!(Fraction::ZERO, Fraction::new(Decimal::ZERO).unwrap());
+        assert_eq!(Fraction::ONE, Fraction::new(Decimal::ONE).unwrap());
+        assert_eq!(Fraction::ZERO.get(), Decimal::ZERO);
+        assert_eq!(Fraction::ONE.get(), Decimal::ONE);
     }
 
     #[test]

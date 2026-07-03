@@ -16,6 +16,11 @@
 //! [`BreakerLayer::clamp`]: crate::live_breakers::BreakerLayer::clamp
 //! [`Decision::Exit`]: qe_signal::Decision::Exit
 
+// Order-emission path (QE-268): reject `unwrap`/`expect`/`panic` — a panic here is a live-trading fault.
+// `assert!`/`debug_assert!` (the deliberate capital-affecting alignment guards) are not `panic!` and so
+// are unaffected; they stay as the intended hard fail-fast.
+#![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
 use rust_decimal::Decimal;
 
 use qe_domain::Direction;
