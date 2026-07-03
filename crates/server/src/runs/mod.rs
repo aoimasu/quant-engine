@@ -14,5 +14,8 @@ pub mod spawn;
 pub mod store;
 
 pub use manager::{CreateError, RunManager};
-pub use model::{BacktestParams, CreateRunRequest, RunMeta, RunStatus};
+pub use model::{
+    BacktestParams, CreateRunRequest, EnsembleSnapshot, GateSnapshot, GenSnapshot, RunMeta,
+    RunSpec, RunStatus, TrainParams, TrainProgress,
+};
 pub use spawn::{resolve_cli_bin, CliJobSpawner, JobSpawner};

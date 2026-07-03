@@ -14,7 +14,10 @@ use serde::Deserialize;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{Mutex, Semaphore};
 
-use super::model::{CreateRunRequest, IndexEntry, Progress, RunMeta, RunStatus};
+use super::model::{
+    BacktestParams, CreateRunRequest, EnsembleSnapshot, GateSnapshot, GenSnapshot, IndexEntry,
+    Progress, RunMeta, RunSpec, RunStatus, TrainParams, TrainProgress,
+};
 use super::spawn::JobSpawner;
 use super::store::RunStore;
 
@@ -68,15 +71,17 @@ impl RunManager {
     /// # Errors
     /// [`CreateError::Validation`] on a bad request; [`CreateError::Io`] on a persistence failure.
     pub async fn create(&self, req: CreateRunRequest) -> Result<String, CreateError> {
-        validate(&req)?;
+        let spec = build_spec(&req)?;
         let id = uuid::Uuid::new_v4().to_string();
         let created_ms = now_ms();
+        let run_type = spec.run_type().to_owned();
         let meta = RunMeta {
             id: id.clone(),
-            run_type: req.run_type.clone(),
+            run_type: run_type.clone(),
             status: RunStatus::Queued,
-            params: req.params.clone(),
+            params: spec.params_value(),
             progress: Progress::default(),
+            train: None,
             created_ms,
             started_ms: None,
             finished_ms: None,
@@ -92,9 +97,9 @@ impl RunManager {
             let mut index = self.store.read_index()?;
             index.push(IndexEntry {
                 id: id.clone(),
-                run_type: req.run_type,
+                run_type,
                 created_ms,
-                label: req.params.vintage.clone(),
+                label: spec.label(),
             });
             self.store.write_index(&index)?;
         }
@@ -105,37 +110,71 @@ impl RunManager {
         let spawner = Arc::clone(&self.spawner);
         let permits = Arc::clone(&self.permits);
         tokio::spawn(async move {
-            supervise(store, spawner, permits, meta).await;
+            supervise(store, spawner, permits, meta, spec).await;
         });
 
         Ok(id)
     }
 }
 
-/// Validate a create-run request.
-fn validate(req: &CreateRunRequest) -> Result<(), CreateError> {
-    if req.run_type != "backtest" {
-        return Err(CreateError::Validation(format!(
-            "unsupported run type `{}` (only `backtest` in v1)",
-            req.run_type
-        )));
-    }
-    let p = &req.params;
-    for (name, value) in [
-        ("vintage", &p.vintage),
-        ("start", &p.start),
-        ("end", &p.end),
-        ("resolution", &p.resolution),
-    ] {
-        if value.trim().is_empty() {
-            return Err(CreateError::Validation(format!("`{name}` is required")));
+/// Build the typed [`RunSpec`] from a create-run request: dispatch on `type`, deserialize the opaque
+/// `params` into the run type's typed struct (lenient — every field defaults), then validate required
+/// fields. Every failure is a uniform [`CreateError::Validation`] (→ `400`), never a serde `422`.
+fn build_spec(req: &CreateRunRequest) -> Result<RunSpec, CreateError> {
+    // A missing / `null` params object still parses into the all-default struct so required-ness is
+    // enforced uniformly below (an empty body 400s on the first missing field, not a serde reject).
+    let params = if req.params.is_null() {
+        serde_json::Value::Object(serde_json::Map::new())
+    } else {
+        req.params.clone()
+    };
+    match req.run_type.as_str() {
+        "backtest" => {
+            let p: BacktestParams = serde_json::from_value(params)
+                .map_err(|e| CreateError::Validation(format!("invalid backtest params: {e}")))?;
+            validate_backtest(&p)?;
+            Ok(RunSpec::Backtest(p))
         }
+        "train" => {
+            let p: TrainParams = serde_json::from_value(params)
+                .map_err(|e| CreateError::Validation(format!("invalid train params: {e}")))?;
+            validate_train(&p)?;
+            Ok(RunSpec::Train(p))
+        }
+        other => Err(CreateError::Validation(format!(
+            "unsupported run type `{other}` (expected `backtest` or `train`)"
+        ))),
     }
+}
+
+/// Enforce a non-empty required string field.
+fn require(name: &str, value: &str) -> Result<(), CreateError> {
+    if value.trim().is_empty() {
+        return Err(CreateError::Validation(format!("`{name}` is required")));
+    }
+    Ok(())
+}
+
+/// Validate backtest params (QE-255 semantics, unchanged).
+fn validate_backtest(p: &BacktestParams) -> Result<(), CreateError> {
+    require("vintage", &p.vintage)?;
+    require("start", &p.start)?;
+    require("end", &p.end)?;
+    require("resolution", &p.resolution)?;
     if p.universe.is_empty() || p.universe.iter().all(|s| s.trim().is_empty()) {
         return Err(CreateError::Validation(
             "`universe` must contain at least one instrument".to_owned(),
         ));
     }
+    Ok(())
+}
+
+/// Validate train params (QE-261): the training window is required; the budget/config are optional
+/// (the `qe train` CLI supplies its own defaults) and the universe is config-derived.
+fn validate_train(p: &TrainParams) -> Result<(), CreateError> {
+    require("start", &p.start)?;
+    require("end", &p.end)?;
+    require("resolution", &p.resolution)?;
     Ok(())
 }
 
@@ -149,6 +188,10 @@ fn now_ms() -> u64 {
 
 /// One subprocess progress line (mirror of the `qe-cli` `§5.3` protocol — mirrored here rather than
 /// depending on `qe-cli`, which would risk a firewall edge and pull the whole training tree).
+///
+/// QE-261 adds the QE-260 training variants (`gen`/`ensemble`/`gate`) and the sealed `vintage` id on
+/// the terminal `done`. Every float is `Option<f64>`: `serde_json` renders a non-finite `f64` (e.g. a
+/// `-inf` best-so-far) as `null`, and a required `f64` would fail the whole line's parse.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "t", rename_all = "snake_case")]
 enum ProgressLine {
@@ -157,9 +200,44 @@ enum ProgressLine {
         stage: String,
         msg: String,
     },
+    Gen {
+        pct: u8,
+        generation: usize,
+        generations: usize,
+        coverage: usize,
+        coverage_long: usize,
+        coverage_short: usize,
+        #[serde(default)]
+        best_fitness: Option<f64>,
+    },
+    Ensemble {
+        pct: u8,
+        folds: usize,
+        members: usize,
+        #[serde(default)]
+        score: Option<f64>,
+    },
+    Gate {
+        pct: u8,
+        promoted: bool,
+        #[serde(default)]
+        failed: Vec<String>,
+        #[serde(default)]
+        in_sample_sharpe: Option<f64>,
+        #[serde(default)]
+        holdout_sharpe: Option<f64>,
+        #[serde(default)]
+        dsr: Option<f64>,
+        #[serde(default)]
+        spa_pvalue: Option<f64>,
+        n_trials: usize,
+    },
     Done {
         #[allow(dead_code)]
         result: String,
+        /// The sealed vintage id (train job); absent for backtest.
+        #[serde(default)]
+        vintage: Option<String>,
     },
     Error {
         #[allow(dead_code)]
@@ -174,6 +252,7 @@ async fn supervise(
     spawner: Arc<dyn JobSpawner>,
     permits: Arc<Semaphore>,
     mut meta: RunMeta,
+    spec: RunSpec,
 ) {
     // Block here until a worker-pool slot is free — the run stays `queued` meanwhile. The permit is
     // released when `_permit` drops at the end of this task.
@@ -191,7 +270,7 @@ async fn supervise(
     let _ = store.write_meta(&meta);
 
     let run_dir = store.run_dir(&meta.id);
-    let mut child = match spawner.spawn(&run_dir, &meta.params) {
+    let mut child = match spawner.spawn(&run_dir, &spec) {
         Ok(child) => child,
         Err(e) => {
             finish_failed(&store, &mut meta, None, format!("failed to spawn job: {e}"));
@@ -257,11 +336,91 @@ async fn drain_stdout(
                 meta.progress = Progress { pct, stage, msg };
                 let _ = store.write_meta(meta);
             }
-            Ok(ProgressLine::Done { .. }) => done_seen = true,
+            Ok(ProgressLine::Gen {
+                pct,
+                generation,
+                generations,
+                coverage,
+                coverage_long,
+                coverage_short,
+                best_fitness,
+            }) => {
+                meta.progress = Progress {
+                    pct,
+                    stage: "search".to_owned(),
+                    msg: format!("generation {generation}/{generations}"),
+                };
+                train_mut(meta).generation = Some(GenSnapshot {
+                    generation,
+                    generations,
+                    coverage,
+                    coverage_long,
+                    coverage_short,
+                    best_fitness,
+                });
+                let _ = store.write_meta(meta);
+            }
+            Ok(ProgressLine::Ensemble {
+                pct,
+                folds,
+                members,
+                score,
+            }) => {
+                meta.progress = Progress {
+                    pct,
+                    stage: "ensemble".to_owned(),
+                    msg: format!("ensemble: {members} members over {folds} folds"),
+                };
+                train_mut(meta).ensemble = Some(EnsembleSnapshot {
+                    folds,
+                    members,
+                    score,
+                });
+                let _ = store.write_meta(meta);
+            }
+            Ok(ProgressLine::Gate {
+                pct,
+                promoted,
+                failed,
+                in_sample_sharpe,
+                holdout_sharpe,
+                dsr,
+                spa_pvalue,
+                n_trials,
+            }) => {
+                meta.progress = Progress {
+                    pct,
+                    stage: "gate".to_owned(),
+                    msg: format!("G1 {}", if promoted { "passed" } else { "failed" }),
+                };
+                train_mut(meta).gate = Some(GateSnapshot {
+                    promoted,
+                    failed,
+                    in_sample_sharpe,
+                    holdout_sharpe,
+                    dsr,
+                    spa_pvalue,
+                    n_trials,
+                });
+                let _ = store.write_meta(meta);
+            }
+            Ok(ProgressLine::Done { vintage, .. }) => {
+                done_seen = true;
+                if let Some(vintage) = vintage {
+                    train_mut(meta).vintage = Some(vintage);
+                    let _ = store.write_meta(meta);
+                }
+            }
             Ok(ProgressLine::Error { .. }) | Err(_) => {}
         }
     }
     done_seen
+}
+
+/// Mutable access to the run's [`TrainProgress`], created on first use. Backtest runs never emit the
+/// train variants, so `meta.train` stays `None` and their `meta.json` shape is unchanged.
+fn train_mut(meta: &mut RunMeta) -> &mut TrainProgress {
+    meta.train.get_or_insert_with(TrainProgress::default)
 }
 
 /// Read subprocess stderr fully, returning the last [`STDERR_TAIL_BYTES`] as a lossy-UTF-8 string.
