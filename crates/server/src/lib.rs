@@ -26,6 +26,11 @@ pub const DEFAULT_ADDR: &str = "127.0.0.1:8080";
 /// Default static-assets directory when `QE_SERVER_STATIC_DIR` is unset. A **relative** path (never a
 /// hard-coded absolute one): the placeholder `index.html` committed here is served until QE-258 builds
 /// the real SPA into this dir.
+///
+/// This default is **CWD-relative**, so it only resolves to the committed placeholder when the binary
+/// is launched from the workspace root. A real deploy should set `QE_SERVER_STATIC_DIR` to the built
+/// SPA's absolute path (QE-258 builds the SPA to the configured directory); if the path can't be
+/// resolved, static serving degrades to `404` rather than panicking (see [`build_router`]).
 pub const DEFAULT_STATIC_DIR: &str = "crates/server/static";
 
 /// Environment variable naming the bind address (12-factor, `QE_`-prefixed like `qe-config`).

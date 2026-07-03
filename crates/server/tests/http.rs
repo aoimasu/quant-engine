@@ -82,6 +82,29 @@ async fn unknown_client_route_falls_back_to_index() {
 }
 
 #[tokio::test]
+async fn missing_static_dir_degrades_to_404_not_panic() {
+    // Pre-QE-258 graceful degradation: before the SPA is built, the configured static dir may not
+    // exist. Building the router against a nonexistent dir must NOT panic, and `GET /` must return a
+    // plain 404 (ServeDir + the index.html fallback both miss). This locks the documented behavior so
+    // QE-258 can't silently regress it.
+    let dir = tempfile::tempdir().expect("create temp dir");
+    let absent = dir.path().join("does-not-exist");
+    assert!(
+        !absent.exists(),
+        "the static dir must be absent for this test"
+    );
+
+    let app = build_router(&absent);
+
+    let response = app
+        .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+        .await
+        .expect("router responds without panicking");
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn unknown_api_route_is_reserved_404() {
     // `/api` is a reserved JSON namespace: an unknown `/api/*` path must NOT be swallowed by the SPA
     // fallback — it returns 404 so later tickets can add real routes without ambiguity.
