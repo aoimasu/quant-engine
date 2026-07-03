@@ -31,6 +31,58 @@ export interface BacktestParams {
   slippage_model: string;
 }
 
+/** Training parameters — the `params` object of a `type:"train"` create-run request (QE-261). */
+export interface TrainParams {
+  start: string;
+  end: string;
+  resolution: string;
+  seed?: number;
+  generations?: number;
+  population?: number;
+  holdout?: number;
+  embargo?: number;
+  config?: string;
+  profile?: string;
+}
+
+/** Latest MAP-Elites search-generation snapshot (QE-260 `gen` line). */
+export interface GenSnapshot {
+  generation: number;
+  generations: number;
+  coverage: number;
+  coverage_long: number;
+  coverage_short: number;
+  /** Best-so-far archive fitness; `null` while still −∞ (before any accepted elite). */
+  best_fitness: number | null;
+}
+
+/** Latest ensemble-construction snapshot (QE-260 `ensemble` line). */
+export interface EnsembleSnapshot {
+  folds: number;
+  members: number;
+  score: number | null;
+}
+
+/** The G1 gate verdict snapshot (QE-260/QE-134 `gate` line). */
+export interface GateSnapshot {
+  promoted: boolean;
+  failed: string[];
+  in_sample_sharpe: number | null;
+  holdout_sharpe: number | null;
+  dsr: number | null;
+  spa_pvalue: number | null;
+  n_trials: number;
+}
+
+/** Rich training progress a `train` run exposes for polling (QE-261) — latest of each kind. */
+export interface TrainProgress {
+  generation?: GenSnapshot;
+  ensemble?: EnsembleSnapshot;
+  gate?: GateSnapshot;
+  /** The sealed vintage id from the terminal `done` (the deep-link target). */
+  vintage?: string;
+}
+
 /** A run's `meta.json` — the authoritative status + progress record (§6.1 / §8.2). */
 export interface RunMeta {
   id: string;
@@ -38,6 +90,8 @@ export interface RunMeta {
   status: RunStatus;
   params: BacktestParams;
   progress: Progress;
+  /** Rich training progress — present only on `train` runs (QE-261). */
+  train?: TrainProgress;
   created_ms: number;
   started_ms: number | null;
   finished_ms: number | null;
@@ -170,15 +224,25 @@ export function getCoverage(): Promise<CoverageRow[]> {
   return getJson<CoverageRow[]>('/api/market-data/coverage');
 }
 
-/** Create + spawn a backtest run. Resolves to the new run id; throws {@link ApiError} on a 400. */
-export async function createRun(params: BacktestParams): Promise<string> {
+/** POST a create-run request and resolve to the new run id; throws {@link ApiError} on a 400. */
+async function postRun(type: string, params: unknown): Promise<string> {
   const res = await fetch('/api/runs', {
     method: 'POST',
     credentials: 'same-origin',
     headers: { ...JSON_HEADERS, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ type: 'backtest', params }),
+    body: JSON.stringify({ type, params }),
   });
   if (!res.ok) throw new ApiError(res.status, await errorMessage(res));
   const body = (await res.json()) as { id: string };
   return body.id;
+}
+
+/** Create + spawn a backtest run. Resolves to the new run id; throws {@link ApiError} on a 400. */
+export function createRun(params: BacktestParams): Promise<string> {
+  return postRun('backtest', params);
+}
+
+/** Create + spawn a training run (QE-261). Resolves to the new run id; throws {@link ApiError} on 400. */
+export function createTrainRun(params: TrainParams): Promise<string> {
+  return postRun('train', params);
 }

@@ -32,19 +32,22 @@ const SLIPPAGE_MODELS = ['square-root-impact', 'linear-impact', 'fixed-bps', 'no
 export interface NewBacktestProps {
   onCreated: (id: string) => void;
   onCancel: () => void;
+  /** A vintage id to preselect (QE-261 training → backtest deep-link). */
+  initialVintage?: string;
 }
 
 /**
  * New backtest (trigger) form — vintage/window/resolution/universe/costs → `POST /api/runs`.
  * Client-side validation surfaces missing fields; a server 400 is surfaced inline. Genome params are
- * NOT editable here (D1) — the user backtests a sealed vintage, not hand-typed genome params.
+ * NOT editable here (D1) — the user backtests a sealed vintage, not hand-typed genome params. An
+ * `initialVintage` (a QE-261 deep-link) is preselected instead of defaulting to the first vintage.
  */
-export function NewBacktest({ onCreated, onCancel }: NewBacktestProps) {
+export function NewBacktest({ onCreated, onCancel, initialVintage }: NewBacktestProps) {
   const [vintages, setVintages] = useState<VintageListItem[]>([]);
   const [coverage, setCoverage] = useState<CoverageRow[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
 
-  const [vintage, setVintage] = useState('');
+  const [vintage, setVintage] = useState(initialVintage ?? '');
   const [start, setStart] = useState('');
   const [end, setEnd] = useState('');
   const [resolution, setResolution] = useState('1h');
@@ -63,7 +66,9 @@ export function NewBacktest({ onCreated, onCancel }: NewBacktestProps) {
         if (cancelled) return;
         setVintages(vs);
         setCoverage(cov);
-        if (vs.length > 0) setVintage(vs[0].id);
+        // Preselect the deep-linked vintage when present (and known); else default to the first.
+        if (initialVintage && vs.some((v) => v.id === initialVintage)) setVintage(initialVintage);
+        else if (vs.length > 0) setVintage(vs[0].id);
         // Default-select every symbol present in the store (the backtestable set).
         setSelected(new Set(cov.map((r) => r.symbol)));
       })
@@ -73,7 +78,7 @@ export function NewBacktest({ onCreated, onCancel }: NewBacktestProps) {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [initialVintage]);
 
   const symbols = useMemo(
     () => Array.from(new Set(coverage.map((r) => r.symbol))).sort(),

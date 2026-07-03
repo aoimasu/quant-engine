@@ -64,6 +64,7 @@ const NAV: NavItem[] = [
   { id: 'orders', label: 'Orders', icon: 'list-checks', disabled: true },
   { sec: 'Research' },
   { id: 'strategies', label: 'Strategies', icon: 'git-branch' },
+  { id: 'training', label: 'Training', icon: 'activity' },
   { id: 'backtest', label: 'Backtests', icon: 'flask-conical' },
   { id: 'data', label: 'Market data', icon: 'database' },
   { sec: 'System' },
