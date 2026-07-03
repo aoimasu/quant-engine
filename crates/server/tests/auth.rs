@@ -113,14 +113,26 @@ async fn allowlisted_login_sets_a_session_and_me_returns_the_email() {
 }
 
 #[tokio::test]
-async fn valid_login_not_on_allowlist_is_403() {
+async fn valid_login_not_on_allowlist_redirects_to_spa_with_error() {
     // A genuine Google login (verifier succeeds, claims pass policy) but the email isn't allowlisted.
+    // QE-259: instead of a raw JSON 403, the browser is redirected back to the SPA with
+    // `?error=forbidden` so the styled allowlist-rejection Callout fires. Still no session cookie.
     let (app, _tmp) = app(
         "admin@example.com",
         Some(common::valid_claims("intruder@example.com")),
     );
     let resp = send(&app, callback("auth-code", "state-1")).await;
-    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        resp.status(),
+        StatusCode::FOUND,
+        "rejection redirects the browser back to the SPA"
+    );
+    let location = resp
+        .headers()
+        .get(header::LOCATION)
+        .and_then(|v| v.to_str().ok())
+        .expect("Location header");
+    assert_eq!(location, "/?error=forbidden");
     assert!(
         session_cookie_from(&resp).is_none(),
         "no session on rejection"

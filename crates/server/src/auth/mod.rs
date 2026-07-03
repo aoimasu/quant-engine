@@ -307,7 +307,10 @@ async fn callback(
     }
 
     if !auth.config.is_allowed(&claims.email) {
-        return reject(StatusCode::FORBIDDEN, "email is not on the admin allowlist");
+        // A genuine Google login that isn't allowlisted is rejected — but redirect the *browser*
+        // back to the SPA with `?error=forbidden` (not a raw JSON 403) so the styled allowlist
+        // rejection Callout fires (QE-258 `detectRejection`). No session cookie is set.
+        return redirect_to_spa("/?error=forbidden");
     }
 
     let exp = now.saturating_add(auth.config.session_ttl_secs);
@@ -402,6 +405,13 @@ fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
 /// A JSON error response with `status` + message.
 fn reject(status: StatusCode, msg: &str) -> Response {
     (status, Json(json!({ "error": msg }))).into_response()
+}
+
+/// A `302` redirect back to the same-origin SPA at `location` (e.g. `/?error=forbidden`). Used for
+/// the allowlist-reject path so the browser lands back on the app and the styled rejection UI fires,
+/// rather than seeing a raw JSON body.
+fn redirect_to_spa(location: &str) -> Response {
+    (StatusCode::FOUND, [(header::LOCATION, location.to_owned())]).into_response()
 }
 
 /// The first set, non-empty value among `keys`, or empty string.
