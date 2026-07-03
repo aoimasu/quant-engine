@@ -7,24 +7,24 @@ use std::process::Stdio;
 
 use tokio::process::{Child, Command};
 
-use super::model::BacktestParams;
+use super::model::{BacktestParams, RunSpec, TrainParams};
 
 /// Environment variable naming the `qe-cli` binary to spawn.
 pub const ENV_CLI_BIN: &str = "QE_SERVER_CLI_BIN";
 
-/// Spawns a backtest subprocess. The seam that lets tests substitute a controllable fake job while
-/// production runs the real `qe-cli backtest`.
+/// Spawns a run subprocess. The seam that lets tests substitute a controllable fake job while
+/// production runs the real `qe-cli backtest` / `qe-cli train`.
 pub trait JobSpawner: Send + Sync + 'static {
-    /// Spawn the job for `params`, instructing it to write artefacts into `run_dir`. The returned
+    /// Spawn the job for `spec`, instructing it to write artefacts into `run_dir`. The returned
     /// [`Child`] must have its `stdout` and `stderr` piped so the supervisor can tail progress and
     /// capture an error tail.
     ///
     /// # Errors
     /// Any OS error spawning the process (e.g. the binary does not exist).
-    fn spawn(&self, run_dir: &Path, params: &BacktestParams) -> std::io::Result<Child>;
+    fn spawn(&self, run_dir: &Path, spec: &RunSpec) -> std::io::Result<Child>;
 }
 
-/// Production spawner: builds `<bin> backtest … --run-dir <dir> --json` and spawns it with stdout +
+/// Production spawner: builds `<bin> <subcommand> … --run-dir <dir> --json` and spawns it with stdout +
 /// stderr piped. The arg-building here is exercised verbatim by the tests (which only swap `bin`).
 #[derive(Debug, Clone)]
 pub struct CliJobSpawner {
@@ -45,37 +45,80 @@ impl CliJobSpawner {
 }
 
 impl JobSpawner for CliJobSpawner {
-    fn spawn(&self, run_dir: &Path, params: &BacktestParams) -> std::io::Result<Child> {
+    fn spawn(&self, run_dir: &Path, spec: &RunSpec) -> std::io::Result<Child> {
         let mut cmd = Command::new(&self.bin);
-        cmd.arg("backtest").arg("--vintage").arg(&params.vintage);
-        if let Some(strategy) = &params.strategy {
-            cmd.arg("--strategy").arg(strategy);
+        match spec {
+            RunSpec::Backtest(params) => backtest_args(&mut cmd, params, run_dir),
+            RunSpec::Train(params) => train_args(&mut cmd, params, run_dir),
         }
-        cmd.arg("--start")
-            .arg(&params.start)
-            .arg("--end")
-            .arg(&params.end)
-            .arg("--resolution")
-            .arg(&params.resolution);
-        // `--universe` is repeat-separated (the CLI accepts either repeats or a comma list).
-        for symbol in &params.universe {
-            cmd.arg("--universe").arg(symbol);
-        }
-        cmd.arg("--taker-fee-bps")
-            .arg(params.taker_fee_bps.to_string())
-            .arg("--slippage-model")
-            .arg(&params.slippage_model)
-            .arg("--run-dir")
-            .arg(run_dir)
-            .arg("--json");
         cmd.stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             // Reap the child if the supervising task is dropped (e.g. server shutdown) so we never
-            // leak a runaway backtest.
+            // leak a runaway job.
             .kill_on_drop(true);
         cmd.spawn()
     }
+}
+
+/// Build the `backtest … --run-dir <dir> --json` argv (QE-255, unchanged).
+fn backtest_args(cmd: &mut Command, params: &BacktestParams, run_dir: &Path) {
+    cmd.arg("backtest").arg("--vintage").arg(&params.vintage);
+    if let Some(strategy) = &params.strategy {
+        cmd.arg("--strategy").arg(strategy);
+    }
+    cmd.arg("--start")
+        .arg(&params.start)
+        .arg("--end")
+        .arg(&params.end)
+        .arg("--resolution")
+        .arg(&params.resolution);
+    // `--universe` is repeat-separated (the CLI accepts either repeats or a comma list).
+    for symbol in &params.universe {
+        cmd.arg("--universe").arg(symbol);
+    }
+    cmd.arg("--taker-fee-bps")
+        .arg(params.taker_fee_bps.to_string())
+        .arg("--slippage-model")
+        .arg(&params.slippage_model)
+        .arg("--run-dir")
+        .arg(run_dir)
+        .arg("--json");
+}
+
+/// Build the `train … --run-dir <dir> --json` argv (QE-260/QE-261). The instrument/universe + store +
+/// artefacts roots come from the config file (`--config`, defaulted by the CLI), not flags; the budget
+/// knobs are only passed when the request set them, so the CLI's own defaults otherwise apply.
+fn train_args(cmd: &mut Command, params: &TrainParams, run_dir: &Path) {
+    cmd.arg("train");
+    if let Some(config) = &params.config {
+        cmd.arg("--config").arg(config);
+    }
+    if let Some(profile) = &params.profile {
+        cmd.arg("--profile").arg(profile);
+    }
+    cmd.arg("--start")
+        .arg(&params.start)
+        .arg("--end")
+        .arg(&params.end)
+        .arg("--resolution")
+        .arg(&params.resolution);
+    if let Some(seed) = params.seed {
+        cmd.arg("--seed").arg(seed.to_string());
+    }
+    if let Some(generations) = params.generations {
+        cmd.arg("--generations").arg(generations.to_string());
+    }
+    if let Some(population) = params.population {
+        cmd.arg("--population").arg(population.to_string());
+    }
+    if let Some(holdout) = params.holdout {
+        cmd.arg("--holdout").arg(holdout.to_string());
+    }
+    if let Some(embargo) = params.embargo {
+        cmd.arg("--embargo").arg(embargo.to_string());
+    }
+    cmd.arg("--run-dir").arg(run_dir).arg("--json");
 }
 
 /// Resolve the `qe-cli` binary path: `QE_SERVER_CLI_BIN` if set, else a `qe` binary co-located with

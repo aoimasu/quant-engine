@@ -143,7 +143,7 @@ mod tests {
             id: id.to_owned(),
             run_type: "backtest".to_owned(),
             status: RunStatus::Queued,
-            params: BacktestParams {
+            params: serde_json::to_value(BacktestParams {
                 vintage: "v".to_owned(),
                 strategy: None,
                 start: "2021-01-01".to_owned(),
@@ -152,8 +152,10 @@ mod tests {
                 universe: vec!["BTCUSDT".to_owned()],
                 taker_fee_bps: 2.0,
                 slippage_model: "square-root-impact".to_owned(),
-            },
+            })
+            .expect("serialize backtest params"),
             progress: Progress::default(),
+            train: None,
             created_ms: 123,
             started_ms: None,
             finished_ms: None,

@@ -1,5 +1,7 @@
 import {
+  Activity,
   ArrowLeft,
+  ArrowRight,
   Circle,
   Database,
   FlaskConical,
@@ -33,7 +35,9 @@ export interface IconProps extends Omit<LucideProps, 'ref'> {
 }
 
 const REGISTRY: Record<string, LucideIcon> = {
+  activity: Activity,
   'arrow-left': ArrowLeft,
+  'arrow-right': ArrowRight,
   circle: Circle,
   database: Database,
   'flask-conical': FlaskConical,

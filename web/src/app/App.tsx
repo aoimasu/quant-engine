@@ -3,14 +3,16 @@ import { AppShell } from '../design';
 import { Login } from './Login';
 import { Placeholder } from './Placeholder';
 import { BacktestsArea } from './backtest/BacktestsArea';
+import { TrainingArea } from './training/TrainingArea';
 import { MarketData } from './MarketData';
 import { fetchMe, logout, detectRejection, type Me } from '../api/session';
 
 type Status = 'loading' | 'unauth' | 'auth';
 
-/** Human titles for each Research destination (spec §7.2). */
+/** Human titles for each Research destination (spec §7.2, + QE-261 Training). */
 const SCREEN_TITLES: Record<string, string> = {
   strategies: 'Strategies',
+  training: 'Training',
   backtest: 'Backtests',
   data: 'Market data',
 };
@@ -20,6 +22,21 @@ export function App() {
   const [me, setMe] = useState<Me | null>(null);
   const [rejected] = useState<boolean>(() => detectRejection());
   const [active, setActive] = useState<string>('backtest');
+  // A pending cross-area deep-link: a sealed vintage to preselect in the New-backtest flow (QE-261).
+  // Set when the training monitor's "Backtest this vintage" is clicked; consumed when Backtests mounts.
+  const [backtestVintage, setBacktestVintage] = useState<string | undefined>(undefined);
+
+  // Manual nav clears any pending deep-link seed so a later plain visit to Backtests isn't re-seeded.
+  const navigate = (id: string) => {
+    setBacktestVintage(undefined);
+    setActive(id);
+  };
+
+  // Programmatic deep-link from Training → Backtests, carrying the sealed vintage id.
+  const openBacktestForVintage = (vintage: string) => {
+    setBacktestVintage(vintage);
+    setActive('backtest');
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -70,7 +87,7 @@ export function App() {
   return (
     <AppShell
       active={active}
-      onNav={setActive}
+      onNav={navigate}
       title={title}
       userEmail={me?.email}
       onSignOut={() => {
@@ -86,8 +103,10 @@ export function App() {
           description="Sealed vintages and the evolved genomes within them. The strategies browser is on the way."
           ticket="a later ticket"
         />
+      ) : active === 'training' ? (
+        <TrainingArea onBacktestVintage={openBacktestForVintage} />
       ) : (
-        <BacktestsArea />
+        <BacktestsArea initialVintage={backtestVintage} />
       )}
     </AppShell>
   );

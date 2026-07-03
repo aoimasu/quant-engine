@@ -70,6 +70,21 @@ fn create_body() -> Value {
     })
 }
 
+/// A create-run request body for a minimal valid training run (QE-261). The universe/store come from
+/// config (not flags), so only the window is required.
+fn create_train_body() -> Value {
+    json!({
+        "type": "train",
+        "params": {
+            "start": "2021-01-01",
+            "end": "2021-02-01",
+            "resolution": "1h",
+            "generations": 2,
+            "seed": 7
+        }
+    })
+}
+
 async fn read_json(resp: axum::response::Response) -> (StatusCode, Value) {
     let status = resp.status();
     let bytes = to_bytes(resp.into_body(), usize::MAX).await.expect("body");
@@ -335,6 +350,97 @@ async fn create_rejects_invalid_request_uniform_400() {
     // An entirely empty body ⇒ 400 (lenient parse → validation), not a serde 422.
     let (status, _) = post_run(&app, &json!({})).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let (lstatus, list) = get(&app, "/api/runs").await;
+    assert_eq!(lstatus, StatusCode::OK);
+    assert_eq!(list.as_array().unwrap().len(), 0, "no run created");
+}
+
+/// QE-261 Part A: a `type:"train"` run spawns the **train** job and the supervisor captures the QE-260
+/// rich progress (`gen`/`ensemble`/`gate`) + the sealed vintage id from the terminal `done` into
+/// `meta.json`, so `GET /api/runs/{id}` exposes them for the training monitor. Backtest runs are
+/// unregressed (covered by the other tests in this file, which continue to pass).
+#[tokio::test]
+async fn train_run_captures_rich_progress_and_vintage() {
+    let tmp = TempDir::new().unwrap();
+    let script = tmp.path().join("job_train.sh");
+    // A fake `qe train` job: emit the QE-260 stream (a `-inf`/`null` best-so-far on gen 1, then a
+    // finite one), write result.json, and finish with a `done` naming the sealed vintage.
+    write_script(
+        &script,
+        r#"#!/bin/sh
+run_dir=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --run-dir) run_dir="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+printf '{"t":"gen","pct":30,"stage":"search","generation":1,"generations":2,"coverage":3,"coverage_long":2,"coverage_short":1,"best_fitness":null}\n'
+printf '{"t":"gen","pct":70,"stage":"search","generation":2,"generations":2,"coverage":5,"coverage_long":3,"coverage_short":2,"best_fitness":1.23}\n'
+printf '{"t":"ensemble","pct":75,"stage":"ensemble","folds":4,"members":3,"score":0.42}\n'
+printf '{"t":"gate","pct":85,"stage":"gate","promoted":true,"failed":[],"in_sample_sharpe":1.5,"holdout_sharpe":1.1,"dsr":0.8,"spa_pvalue":0.03,"n_trials":12}\n'
+printf '{"ok":true}' > "$run_dir/result.json"
+printf '{"t":"done","result":"result.json","vintage":"vintage-abc123"}\n'
+exit 0
+"#,
+    );
+    let app = app_with_script(tmp.path(), &script, 2);
+
+    let (status, body) = post_run(&app, &create_train_body()).await;
+    assert_eq!(status, StatusCode::CREATED, "create returned {body}");
+    let id = body["id"].as_str().expect("id in response").to_owned();
+
+    let meta = poll_status(&app, &id, "succeeded", TIMEOUT).await;
+    assert_eq!(meta["type"], json!("train"));
+    assert_eq!(meta["artifacts"], json!(["result.json"]));
+
+    // The rich training progress was tailed into meta.json (latest of each kind).
+    let train = &meta["train"];
+    assert_eq!(train["generation"]["generation"], json!(2));
+    assert_eq!(train["generation"]["generations"], json!(2));
+    assert_eq!(train["generation"]["coverage"], json!(5));
+    assert_eq!(train["generation"]["coverage_long"], json!(3));
+    assert_eq!(train["generation"]["coverage_short"], json!(2));
+    assert_eq!(train["generation"]["best_fitness"], json!(1.23));
+    assert_eq!(train["ensemble"]["folds"], json!(4));
+    assert_eq!(train["ensemble"]["members"], json!(3));
+    assert_eq!(train["gate"]["promoted"], json!(true));
+    assert_eq!(train["gate"]["n_trials"], json!(12));
+    assert_eq!(train["gate"]["failed"], json!([]));
+    // The sealed vintage id from the terminal `done` is exposed for the deep-link.
+    assert_eq!(train["vintage"], json!("vintage-abc123"));
+
+    // The coarse progress bar reaches 100% on a succeeded train run (past the gate line's 85%).
+    assert_eq!(meta["progress"]["pct"], json!(100));
+    assert_eq!(meta["progress"]["stage"], json!("done"));
+
+    // The result endpoint serves the artefact the train job wrote.
+    let (rstatus, rbody) = get(&app, &format!("/api/runs/{id}/result")).await;
+    assert_eq!(rstatus, StatusCode::OK);
+    assert_eq!(rbody, json!({ "ok": true }));
+}
+
+/// QE-261: a `type:"train"` run with a missing window field is a uniform `400` (never a serde `422`),
+/// and no run is created — mirroring the backtest validation contract.
+#[tokio::test]
+async fn train_run_rejects_missing_window_400() {
+    let tmp = TempDir::new().unwrap();
+    let script = tmp.path().join("job_ok.sh");
+    write_script(&script, "#!/bin/sh\nexit 0\n");
+    let app = app_with_script(tmp.path(), &script, 2);
+
+    // `start` omitted ⇒ 400 naming the field.
+    let missing_start = json!({
+        "type": "train",
+        "params": { "end": "2021-02-01", "resolution": "1h" }
+    });
+    let (status, body) = post_run(&app, &missing_start).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "missing start: {body}");
+    assert!(
+        body["error"].as_str().unwrap_or_default().contains("start"),
+        "clear error naming the field: {body}"
+    );
 
     let (lstatus, list) = get(&app, "/api/runs").await;
     assert_eq!(lstatus, StatusCode::OK);
