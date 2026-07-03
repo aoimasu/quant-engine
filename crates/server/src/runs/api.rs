@@ -1,7 +1,9 @@
 //! Run lifecycle HTTP API (§6.2), mounted under `/api`:
 //! `POST /api/runs`, `GET /api/runs`, `GET /api/runs/{id}`, `GET /api/runs/{id}/result`.
 //!
-//! Routes are open in v1; QE-256 layers session auth over the whole `/api` nest without touching them.
+//! QE-256 layers session auth over the whole `/api` nest without touching these handlers: the routes
+//! are parameterised over [`crate::AppState`] and the handlers keep extracting `State<Arc<RunManager>>`
+//! (projected via `FromRef<AppState>`).
 
 use std::sync::Arc;
 
@@ -15,8 +17,9 @@ use serde_json::json;
 use super::manager::{CreateError, RunManager};
 use super::model::{CreateRunRequest, RunMeta};
 
-/// The run lifecycle routes, parameterised over the shared [`RunManager`] state.
-pub fn routes() -> Router<Arc<RunManager>> {
+/// The run lifecycle routes. Parameterised over [`crate::AppState`]; the handlers still extract
+/// `State<Arc<RunManager>>`, projected out of `AppState` via `FromRef`.
+pub fn routes() -> Router<crate::AppState> {
     Router::new()
         .route("/runs", post(create_run).get(list_runs))
         .route("/runs/{id}", get(get_run))

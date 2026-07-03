@@ -16,6 +16,13 @@ workspace = true
 name = "qe-server"
 path = "src/main.rs"
 
+[features]
+default = []
+# The real Google ID-token verifier (network). Default-off so the core auth *logic* — claim checks,
+# allowlist, cookie signing — plus CI's default build/test/deny stay offline and dependency-light;
+# the binary enables it for live Google sign-in. Mirrors QE-253 parking live network behind `http`.
+http = ["dep:ureq"]
+
 [dependencies]
 # Shared internal crate: structured startup logging (also the real internal edge the firewall sanity
 # checks). No `qe-runtime`/`qe-venue` — see the QE-132 firewall + QE-001 decoupling guards.
@@ -27,8 +34,18 @@ serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 thiserror.workspace = true
-# QE-255: opaque run ids (uuid v4) + atomic-write temp filenames.
+# QE-255: opaque run ids (uuid v4) + atomic-write temp filenames. QE-256 also uses v4 for the CSRF
+# `state` nonce and the ephemeral session secret.
 uuid.workspace = true
+# QE-256 auth: HMAC-SHA256 signed session cookie (`hmac` + `sha2`), URL-safe base64 cookie encoding,
+# and `url` for the Google authorization redirect.
+hmac.workspace = true
+sha2.workspace = true
+base64.workspace = true
+url.workspace = true
+# QE-256 real Google verifier (`http` feature only). native-tls (system TLS) mirrors QE-253 and
+# avoids ring's non-allowlisted licence; only compiled under `http`.
+ureq = { version = "2", default-features = false, features = ["native-tls"], optional = true }
 
 [dev-dependencies]
 tower.workspace = true

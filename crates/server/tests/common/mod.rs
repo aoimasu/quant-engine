@@ -1,0 +1,94 @@
+//! Shared test helpers (QE-256): a mock ID-token verifier, a test [`AppState`] builder, and a
+//! session-cookie minter that authenticates through the **same** production signing code
+//! (`qe_server::mint_session_cookie`) — so tests never fork a parallel signing implementation.
+#![allow(dead_code)] // Each integration-test binary uses a different subset of these helpers.
+
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use qe_server::auth::{
+    parse_allowlist, AuthConfig, AuthContext, GoogleClaims, IdTokenVerifier, VerifyError,
+    DEFAULT_AUTH_ENDPOINT, DEFAULT_SESSION_TTL_SECS, DEFAULT_TOKENINFO_ENDPOINT,
+    DEFAULT_TOKEN_ENDPOINT, SESSION_COOKIE_NAME,
+};
+use qe_server::{mint_session_cookie, AppState, RunManager};
+
+/// Fixed session HMAC key for tests.
+pub const SESSION_SECRET: &[u8] = b"integration-test-session-secret-0123456789";
+/// The OAuth client id tests expect as the ID-token `aud`.
+pub const CLIENT_ID: &str = "test-client-id.apps.googleusercontent.com";
+
+/// A verifier that returns a pre-set outcome regardless of the `code` — the injected seam for
+/// hermetic auth tests (no network, no real Google keys).
+pub struct MockVerifier {
+    /// `Some(claims)` ⇒ the verifier "succeeds" with these raw claims; `None` ⇒ it fails.
+    pub outcome: Option<GoogleClaims>,
+}
+
+impl IdTokenVerifier for MockVerifier {
+    fn verify(&self, _code: &str) -> Result<GoogleClaims, VerifyError> {
+        self.outcome
+            .clone()
+            .ok_or_else(|| VerifyError::Upstream("mock verifier: forced failure".to_owned()))
+    }
+}
+
+/// Epoch seconds, now.
+pub fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
+/// A well-formed, policy-passing claim set for `email` (correct `aud`/`iss`, verified, not expired).
+pub fn valid_claims(email: &str) -> GoogleClaims {
+    GoogleClaims {
+        email: email.to_owned(),
+        email_verified: true,
+        aud: CLIENT_ID.to_owned(),
+        iss: "https://accounts.google.com".to_owned(),
+        exp: now_secs() + 3600,
+    }
+}
+
+/// Build an [`AuthConfig`] with the fixed test secret, the given comma-separated allowlist, and the
+/// test client id.
+pub fn auth_config(allowlist: &str) -> AuthConfig {
+    AuthConfig {
+        client_id: CLIENT_ID.to_owned(),
+        client_secret: "test-secret".to_owned(),
+        redirect_uri: "https://app.test/api/auth/callback".to_owned(),
+        auth_endpoint: DEFAULT_AUTH_ENDPOINT.to_owned(),
+        token_endpoint: DEFAULT_TOKEN_ENDPOINT.to_owned(),
+        tokeninfo_endpoint: DEFAULT_TOKENINFO_ENDPOINT.to_owned(),
+        allowed_emails: parse_allowlist(allowlist),
+        session_secret: SESSION_SECRET.to_vec(),
+        session_ttl_secs: DEFAULT_SESSION_TTL_SECS,
+    }
+}
+
+/// Build an [`AuthContext`] from an allowlist + a mock verifier outcome.
+pub fn auth_context(allowlist: &str, verifier_outcome: Option<GoogleClaims>) -> Arc<AuthContext> {
+    Arc::new(AuthContext::new(
+        auth_config(allowlist),
+        Arc::new(MockVerifier {
+            outcome: verifier_outcome,
+        }),
+    ))
+}
+
+/// Assemble an [`AppState`] from a run manager + an auth context.
+pub fn app_state(manager: Arc<RunManager>, auth: Arc<AuthContext>) -> AppState {
+    AppState::new(manager, auth)
+}
+
+/// Mint a valid session cookie **value** for `email`, expiring an hour out, via the production signer.
+pub fn valid_session_token(email: &str) -> String {
+    mint_session_cookie(SESSION_SECRET, email, now_secs() + 3600)
+}
+
+/// A `Cookie` header value carrying a valid session for `email`.
+pub fn session_cookie_header(email: &str) -> String {
+    format!("{SESSION_COOKIE_NAME}={}", valid_session_token(email))
+}

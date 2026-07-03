@@ -16,13 +16,51 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use axum::extract::FromRef;
 use axum::{http::StatusCode, routing::get, Json, Router};
 use serde_json::json;
 use tower_http::services::{ServeDir, ServeFile};
 
+pub mod auth;
 pub mod runs;
 
+pub use auth::{
+    mint_session_cookie, AuthConfig, AuthContext, GoogleClaims, IdTokenVerifier, VerifyError,
+    SESSION_COOKIE_NAME,
+};
 pub use runs::{CliJobSpawner, JobSpawner, RunManager};
+
+/// Shared application state carried by the `/api` router.
+///
+/// A single state type lets QE-256 layer session auth over the whole `/api` nest while the QE-255 run
+/// handlers keep extracting `State<Arc<RunManager>>` unchanged — the [`FromRef`] impls below project
+/// [`AppState`] onto each sub-state.
+#[derive(Clone)]
+pub struct AppState {
+    /// The QE-255 run-lifecycle manager.
+    pub manager: Arc<RunManager>,
+    /// The QE-256 OAuth + session context.
+    pub auth: Arc<AuthContext>,
+}
+
+impl AppState {
+    /// Build the application state from its two halves.
+    pub fn new(manager: Arc<RunManager>, auth: Arc<AuthContext>) -> Self {
+        Self { manager, auth }
+    }
+}
+
+impl FromRef<AppState> for Arc<RunManager> {
+    fn from_ref(state: &AppState) -> Self {
+        Arc::clone(&state.manager)
+    }
+}
+
+impl FromRef<AppState> for Arc<AuthContext> {
+    fn from_ref(state: &AppState) -> Self {
+        Arc::clone(&state.auth)
+    }
+}
 
 /// Default bind address when `QE_SERVER_ADDR` is unset. Loopback-only so a fresh run never exposes
 /// the (unauthenticated, this ticket) server on a public interface.
@@ -180,17 +218,23 @@ async fn api_not_found() -> StatusCode {
 ///   `index.html` so client-side SPA routes still return the app shell. A missing dir/index yields a
 ///   graceful `404` (no panic), which is fine before QE-258 builds the real SPA.
 ///
-/// The `/api` sub-router carries the shared [`RunManager`] state (QE-255 run lifecycle); QE-256 will
-/// layer session auth over this same nest.
-pub fn build_router(static_dir: &Path, manager: Arc<RunManager>) -> Router {
+/// The `/api` sub-router carries the shared [`AppState`]. QE-256 session auth is applied to the
+/// **protected** subtree only (`/api/me` + the QE-255 `/api/runs*` routes) via [`auth::require_session`];
+/// `/api/health` and `/api/auth/*` stay public (you cannot hold a session before logging in). An
+/// unknown `/api/*` path still returns a reserved-namespace `404` (unauthenticated), unchanged from
+/// QE-254.
+pub fn build_router(static_dir: &Path, state: AppState) -> Router {
     let index = static_dir.join("index.html");
     let static_service = ServeDir::new(static_dir).fallback(ServeFile::new(index));
 
+    let protected = auth::protected_routes(Arc::clone(&state.auth));
+
     let api = Router::new()
         .route("/health", get(health))
-        .merge(runs::api::routes())
+        .merge(auth::public_routes())
+        .merge(protected)
         .fallback(api_not_found)
-        .with_state(manager);
+        .with_state(state);
 
     Router::new()
         .nest("/api", api)
