@@ -105,7 +105,10 @@ remains the separately-tracked follow-up from QE-251 — **not** expanded here.)
     `{"t":"error","msg":..}` on failure. Helpers `emit_gen/emit_ensemble/emit_gate/emit_train_done`.
 - **D3 — Budget + small defaults / flags.** `train` flags: `--run-dir`, `--json`, `--start/--end/
   --resolution`, and budget `--seed` (default `cfg.determinism.seed`), `--generations` (default 8),
-  `--population` (variation steps/generation, default 24), `--holdout` (bars, default 30), `--embargo`
+  `--population` (variation steps/generation, default 24), `--holdout` (bars, default **31** — a
+  backtest over `N` bars yields `N − 1` returns, so 31 holdout bars give **30 holdout returns**, meeting
+  G1's default `min_holdout_samples = 30`, so the holdout-samples criterion is satisfiable at the default
+  budget rather than always failing on an off-by-one), `--embargo`
   (bars, default 2). Small defaults keep a fixture run < 1s. Instrument = first configured universe
   symbol (no extra flag). Train `BacktestConfig` uses `min_trades = 1`, `windows = 2` so short fixture
   series produce finite fitness (documented small-budget config; the *sealed* genomes are still evolved

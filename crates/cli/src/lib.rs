@@ -365,8 +365,11 @@ where
 pub const DEFAULT_TRAIN_GENERATIONS: usize = 8;
 /// Default variation steps per direction per generation for `train`.
 pub const DEFAULT_TRAIN_POPULATION: usize = 24;
-/// Default number of final bars reserved as the untouched G1 holdout for `train`.
-pub const DEFAULT_TRAIN_HOLDOUT: usize = 30;
+/// Default number of final bars reserved as the untouched G1 holdout for `train`. A backtest over `N`
+/// bars yields `N − 1` returns, so 31 holdout bars give 30 holdout **returns** — meeting G1's default
+/// `min_holdout_samples = 30`, so the holdout-samples criterion is satisfiable at the default budget
+/// (30 holdout bars would give only 29 returns and could never pass it).
+pub const DEFAULT_TRAIN_HOLDOUT: usize = 31;
 /// Default embargo bars purged between the train window and the holdout for `train`.
 pub const DEFAULT_TRAIN_EMBARGO: usize = 2;
 

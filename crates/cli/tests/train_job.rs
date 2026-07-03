@@ -56,8 +56,10 @@ fn params(store_path: PathBuf, vintage_root: PathBuf, seed: u64) -> TrainParams 
         resolution: "1h".to_owned(),
         seed,
         generations: 4,
+        // 31 holdout bars → 30 holdout returns (returns = bars − 1), meeting G1's default
+        // `min_holdout_samples = 30` (matches the corrected `DEFAULT_TRAIN_HOLDOUT`).
         population: 16,
-        holdout: 30,
+        holdout: 31,
         embargo: 2,
         lineage: lineage(seed),
         profile: "train".to_owned(),
