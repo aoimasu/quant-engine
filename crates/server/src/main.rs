@@ -27,7 +27,8 @@ async fn main() -> ExitCode {
         }
     };
 
-    let router = build_router(&cfg.static_dir);
+    let manager = cfg.run_manager();
+    let router = build_router(&cfg.static_dir, manager);
 
     let listener = match tokio::net::TcpListener::bind(cfg.addr).await {
         Ok(listener) => listener,
@@ -40,6 +41,9 @@ async fn main() -> ExitCode {
     tracing::info!(
         addr = %cfg.addr,
         static_dir = %cfg.static_dir.display(),
+        data_dir = %cfg.data_dir.display(),
+        cli_bin = %cfg.cli_bin.display(),
+        max_concurrency = cfg.max_concurrency,
         "qe-server listening"
     );
 
