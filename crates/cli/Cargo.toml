@@ -30,6 +30,9 @@ qe-storage.workspace = true
 qe-ingest.workspace = true
 qe-wfo.workspace = true
 qe-ensemble.workspace = true
+qe-validation.workspace = true
+qe-gate.workspace = true
+qe-risk.workspace = true
 qe-venue.workspace = true
 qe-runtime.workspace = true
 qe-vintage.workspace = true
@@ -40,4 +43,3 @@ thiserror.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-qe-risk.workspace = true

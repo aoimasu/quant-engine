@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use qe_cli::jobs::backtest::{run_backtest, BacktestParams};
-use qe_cli::jobs::{emit_done, emit_error, emit_progress};
-use qe_cli::{parse_args, run_train, Command};
+use qe_cli::jobs::{emit_done, emit_error, emit_progress, emit_train_done, ProgressLine};
+use qe_cli::{parse_args, run_train, Command, TrainOptions};
 use qe_config::{Config, Profile};
 
 /// Code provenance folded into the vintage id. Set `QE_CODE_COMMIT` at build/run time (e.g. the git
@@ -34,16 +34,35 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             println!("quant-engine {}", env!("CARGO_PKG_VERSION"));
             Ok(ExitCode::SUCCESS)
         }
-        Command::Train { config, profile } => {
-            let cfg = Config::load(profile, &config)?;
-            let vintage = run_train(&cfg, &code_commit())?;
-            println!(
-                "produced vintage {} → {}",
-                vintage.id,
-                vintage.manifest_path.display()
-            );
-            Ok(ExitCode::SUCCESS)
-        }
+        Command::Train {
+            config,
+            profile,
+            run_dir,
+            json,
+            start,
+            end,
+            resolution,
+            seed,
+            generations,
+            population,
+            holdout,
+            embargo,
+        } => run_train_command(TrainCli {
+            config,
+            profile,
+            run_dir,
+            json,
+            opts: TrainOptions {
+                start,
+                end,
+                resolution,
+                seed,
+                generations,
+                population,
+                holdout,
+                embargo,
+            },
+        }),
         Command::Backtest {
             vintage,
             strategy,
@@ -147,6 +166,110 @@ fn run_backtest_command(cmd: BacktestCli) -> Result<ExitCode, Box<dyn std::error
             }
             Ok(ExitCode::FAILURE)
         }
+    }
+}
+
+/// The parsed `train` command, one-to-one with [`Command::Train`].
+struct TrainCli {
+    config: PathBuf,
+    profile: Profile,
+    run_dir: PathBuf,
+    json: bool,
+    opts: TrainOptions,
+}
+
+/// Dispatch `Command::Train` (QE-260): load config, run the search → ensemble → validation → G1 → seal
+/// pipeline, stream JSON-line progress to stdout, write `result.json` into `--run-dir`, and set the exit
+/// code. The terminal `{"t":"done",...}` names the sealed vintage id.
+fn run_train_command(cmd: TrainCli) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    let cfg = Config::load(cmd.profile, &cmd.config)?;
+
+    // Progress sink: JSON lines on stdout when `--json`, else a terse human line on stderr.
+    let json = cmd.json;
+    let mut emit = |line: ProgressLine| {
+        if json {
+            if let Ok(s) = serde_json::to_string(&line) {
+                println!("{s}");
+            }
+        } else {
+            eprintln!("{}", describe(&line));
+        }
+    };
+
+    match run_train(&cfg, &cmd.opts, &code_commit(), &mut emit) {
+        Ok(outcome) => {
+            std::fs::create_dir_all(&cmd.run_dir)?;
+            let out_path = cmd.run_dir.join("result.json");
+            let bytes = serde_json::to_vec_pretty(&outcome.result)?;
+            std::fs::write(&out_path, &bytes)?;
+            if json {
+                let mut out = io::stdout().lock();
+                emit_train_done(&mut out, "result.json", &outcome.vintage_id)?;
+                out.flush()?;
+            } else {
+                println!(
+                    "sealed vintage {} → {}",
+                    outcome.vintage_id,
+                    outcome.vintage_path.display()
+                );
+                println!("wrote {}", out_path.display());
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        Err(e) => {
+            if json {
+                let mut out = io::stdout().lock();
+                let _ = emit_error(&mut out, &e.to_string());
+                let _ = out.flush();
+            } else {
+                eprintln!("error: {e}");
+            }
+            Ok(ExitCode::FAILURE)
+        }
+    }
+}
+
+/// A terse human line for a train [`ProgressLine`] (the non-`--json` path).
+fn describe(line: &ProgressLine) -> String {
+    match line {
+        ProgressLine::Progress { pct, stage, msg } => format!("[{pct:>3}%] {stage}: {msg}"),
+        ProgressLine::Gen {
+            pct,
+            generation,
+            generations,
+            coverage,
+            best_fitness,
+            ..
+        } => format!(
+            "[{pct:>3}%] search: gen {generation}/{generations} coverage={coverage} \
+             best_fitness={best_fitness:.6}"
+        ),
+        ProgressLine::Ensemble {
+            pct,
+            folds,
+            members,
+            score,
+            ..
+        } => format!("[{pct:>3}%] ensemble: {members} members, {folds} folds, score={score:.6}"),
+        ProgressLine::Gate {
+            pct,
+            promoted,
+            failed,
+            ..
+        } => format!(
+            "[{pct:>3}%] gate: G1 {} (failed: {})",
+            if *promoted { "PASS" } else { "FAIL" },
+            if failed.is_empty() {
+                "none".to_owned()
+            } else {
+                failed.join(", ")
+            }
+        ),
+        ProgressLine::Done { result, vintage } => match vintage {
+            Some(v) => format!("done: {result} (vintage {v})"),
+            None => format!("done: {result}"),
+        },
+        ProgressLine::Error { msg } => format!("error: {msg}"),
     }
 }
 
