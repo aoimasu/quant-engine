@@ -7,30 +7,68 @@ moving to a platform later (e.g. Railway) is mechanical.
 ## Requirements
 
 - Rust `1.96.0` (pinned in `rust-toolchain.toml` — `rustup` installs it automatically).
+- Node (only to build the admin SPA in `web/`).
 
-## One-command local run
+## Runnable jobs (`qe-cli`)
 
-From a clean checkout, run the training pipeline and produce a **vintage**:
+The deterministic pipeline runs as three CLI jobs, each emitting **JSON-line progress** on stdout.
+
+**Train** — run the real search → ensemble → validation → **G1 gate**, and seal a **vintage**:
 
 ```sh
 cargo run -p qe-cli -- train --config config.example.toml
 ```
 
-This loads the config, resolves the point-in-time instrument universe, creates the configurable
-state directories, and writes a content-addressed vintage manifest:
+It resolves the point-in-time instrument universe, runs the MAP-Elites/WFO search, builds the
+ensemble, applies the G1 over-fit gate, and writes a content-addressed vintage to:
 
 ```
-data/artifacts/vintages/<vintage-id>/manifest.json
+data/artifacts/vintages/<vintage-id>.json
 ```
 
 The `<vintage-id>` is a SHA-256 over the run's lineage (config hash + seed + code commit), so the
-**same config + commit reproduces the same vintage** bit-for-bit.
+**same config + seed + commit reproduces the same vintage** bit-for-bit.
+
+**Backtest** — run a sealed vintage over a window into a deterministic `result.json`:
+
+```sh
+cargo run -p qe-cli -- backtest --vintage <vintage-id> \
+    --start 2021-01-01 --end 2024-12-31 --resolution 1h --run-dir /tmp/run --json
+# → /tmp/run/result.json (metrics, equity/drawdown curves, monthly heatmap, trades)
+```
+
+**Ingest** — populate the LMDB market store (real Binance decoders live behind the default-off
+`http` feature; the committed sample store lets backtests run fully offline):
+
+```sh
+cargo run -p qe-cli -- ingest --config config.example.toml --start … --end … --resolution 1h
+```
 
 Print the version:
 
 ```sh
 cargo run -p qe-cli
 ```
+
+## Admin UI (server + SPA)
+
+`qe-server` is an axum backend (a second composition root — reuses the training/shared crates,
+never the runtime) that triggers & supervises the CLI jobs and serves an authenticated React SPA to
+trigger, monitor, and review runs in a browser.
+
+```sh
+# 1) build the SPA
+cd web && npm ci && npm run build          # → web/dist
+
+# 2) run the server (serves web/dist at / and the API at /api)
+QE_SERVER_STATIC_DIR=web/dist \
+QE_ADMIN_ALLOWED_EMAILS=you@example.com \
+QE_GOOGLE_CLIENT_ID=… QE_GOOGLE_CLIENT_SECRET=… QE_GOOGLE_REDIRECT_URI=… QE_SESSION_SECRET=… \
+    cargo run -p qe-server
+```
+
+Sign in with Google (allowlisted email) → trigger/monitor/review backtest & training runs.
+All state is paper/offline; there is no live order submission.
 
 ## Configuration (12-factor)
 
@@ -66,11 +104,17 @@ State is written to the mounted `/app/data` volume; no platform-specific assumpt
 
 ## Workspace
 
-A Cargo workspace under `crates/*` (domain, config, storage, determinism, …). Run the gates:
+A Cargo workspace under `crates/*` (domain, config, storage, determinism, …, plus `server`) and a
+React SPA under `web/`. Run the gates:
 
 ```sh
+# Rust
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
+cargo test -p qe-architecture --test firewall --locked   # train/live decoupling guard
 cargo deny check
+
+# Frontend
+cd web && npm ci && npm run lint && npm run build && npm test
 ```
