@@ -87,35 +87,38 @@
   <h1>quant-engine — Current State &amp; Maintainer's Guide</h1>
   <p class="lead">A deterministic, information-firewalled crypto-perp quant trading platform in Rust.</p>
   <p class="muted">Entry point for developers maintaining the repo and for users evaluating it for investment.
-  Everything below was verified against the codebase, not assumed. Generated 2026-07-02 · branch <code>docs/refresh-current-state-p2</code>.</p>
+  Everything below was verified against the codebase, not assumed. Generated 2026-07-03 · reflects Phase&nbsp;2 (through G2) and <strong>Phase&nbsp;PreP3 complete</strong>.</p>
 
   <!-- ============================================================= -->
   <h2 class="section" id="tldr">1 · TL;DR</h2>
   <div class="card">
-    <p><strong>What this is.</strong> A 20-crate Cargo workspace that builds a full pipeline for discovering,
+    <p><strong>What this is.</strong> A 21-crate Cargo workspace (plus a <code>web/</code> React SPA) that builds a full pipeline for discovering,
     validating, and (eventually) live-trading systematic strategies on USDⓈ-M perpetual futures
     (dev universe: <code>BTCUSDT</code>, <code>ETHUSDT</code>). The design is organised around two hard rules
     enforced in CI: <em>everything is deterministic &amp; reproducible from a recorded vintage hash</em>, and
     <em>the strategy search can never see live or portfolio outcomes</em> (the "information firewall").</p>
-    <p><strong>Where it stands.</strong> <span class="pill done">69 / ~75 tickets complete.</span>
-    Phase 0 (foundations), Phase 1 (training → backtest validation, through the <strong>G1 gate</strong>), and
-    now <strong>Phase 2 (runtime → paper/sim), through the <span class="pill gate">G2</span> shadow/dry-run
-    gate</strong>, are fully implemented and tested. The full runtime loop — live data plumbing, shared
-    evaluator, deterministic cold-start bootstrap, in-process cutover, circuit breakers, netting, the Hedge
-    Planner, pre-trade risk, the out-of-band kill switch, the venue adapter + simulator, real-time
-    reconciliation, and the G2 shadow gate — all exist and pass tests. Only <strong>Phase 3</strong> (live
-    capital, attribution &amp; ops, through the independent G3 go/no-go) remains.</p>
-    <p><strong>The one thing to understand.</strong> The sophisticated machinery lives as
-    <em>libraries with deep test coverage</em>. The single shipped <em>binary</em> (<code>qe-cli</code>) currently
-    exposes only <code>version</code> and a <code>train</code> command that writes a provenance
-    <em>manifest</em> — it does not yet run the search/backtest or the live loop end-to-end. Connecting the
-    libraries into runnable pipelines is itself the next body of work (see §8).</p>
+    <p><strong>Where it stands.</strong> <span class="pill done">80 tickets complete.</span>
+    Phase 0 (foundations), Phase 1 (training → backtest validation, through the <strong>G1 gate</strong>),
+    <strong>Phase 2 (runtime → paper/sim), through the <span class="pill gate">G2</span> shadow/dry-run
+    gate</strong>, and <strong>Phase PreP3 (admin UI for training &amp; backtesting)</strong> are fully
+    implemented and tested. The full runtime loop and the admin platform — CLI jobs, an axum server with
+    Google-OAuth auth, and a React SPA — all exist and pass tests. Only <strong>Phase 3</strong> (live
+    capital, attribution &amp; ops, through the independent G3 go/no-go) remains, plus a short list of
+    PreP3 hardening follow-ups (§8).</p>
+    <p><strong>The one thing to understand.</strong> The pipeline is now <em>genuinely runnable</em>:
+    <code>qe-cli</code> exposes <code>train</code> (real MAP-Elites search → ensemble → G1 → sealed vintage),
+    <code>backtest</code> (a sealed vintage over a window → deterministic result), and <code>ingest</code>; a
+    second binary <code>qe-server</code> triggers/supervises those jobs and serves an authenticated SPA to
+    trigger, monitor, and review runs in a browser. Everything is still <strong>paper/offline</strong>: there is
+    no live order submission anywhere (the order path terminates in a kill-gated simulator; live HTTP/wss sit
+    behind a default-off <code>http</code> feature).</p>
   </div>
 
   <!-- ============================================================= -->
   <h2 class="section" id="now">2 · What it does today</h2>
 
-  <p>There is exactly one executable, <code>qe-cli</code>, with two commands:</p>
+  <p>Two executables ship today: <code>qe-cli</code> (the deterministic pipeline jobs) and <code>qe-server</code>
+  (the admin backend that supervises those jobs and serves the SPA).</p>
   <table>
     <tr><th>Command</th><th>What it actually does today</th></tr>
     <tr>
@@ -124,76 +127,88 @@
     </tr>
     <tr>
       <td class="mono">qe-cli train<br>&nbsp;&nbsp;--config &lt;file&gt;</td>
-      <td>Loads a TOML config → resolves the <strong>point-in-time universe</strong> (respects listing/delisting
-      dates, no survivorship bias) → creates the storage directories → computes a deterministic content-hash
-      <strong>lineage</strong> → writes a <strong>vintage manifest</strong>
-      (<span class="mono">&lt;artifacts_dir&gt;/vintages/&lt;id&gt;/manifest.json</span>) recording the id, profile,
-      config/seed lineage, and universe roster.</td>
+      <td>Runs the <strong>real training pipeline</strong>: MAP-Elites/WFO search → discrete-DE ensemble →
+      DSR/SPA validation → the <strong>G1 gate</strong> → <strong>seals a content-hashed vintage</strong> under
+      the artifacts dir. Emits JSON-line progress (generation, MAP-Elites archive coverage, CV folds,
+      best-so-far, G1 pass/fail). <strong>Deterministic for a fixed seed</strong> (same seed ⇒ same vintage id).</td>
+    </tr>
+    <tr>
+      <td class="mono">qe-cli backtest<br>&nbsp;&nbsp;--vintage &lt;id&gt; --start --end<br>&nbsp;&nbsp;--resolution … --run-dir …</td>
+      <td>Loads + verifies a sealed vintage, builds decision bars via the shared feature pipeline, runs each
+      chromosome through the backtester, weight-aggregates to ensemble returns, and writes a deterministic
+      <strong><code>result.json</code></strong> (CAGR/Sharpe/Sortino/max-DD/win-rate/profit-factor, equity &amp;
+      drawdown curves, monthly heatmap, per-trade rows). JSON-line progress ends with <code>done</code>.</td>
+    </tr>
+    <tr>
+      <td class="mono">qe-cli ingest<br>&nbsp;&nbsp;--config --start --end --resolution</td>
+      <td>Populates the LMDB market store from an injectable historical source (real Binance decoders stay behind
+      the default-off <code>http</code> feature). Also exposes the read-only <strong>coverage</strong> query the
+      admin UI's Market-data view uses.</td>
+    </tr>
+    <tr>
+      <td class="mono">qe-server</td>
+      <td>axum + tokio backend (a second composition root — reuses the training/shared crates, <strong>never
+      <code>qe-runtime</code></strong>). Google-OAuth login gated by <code>QE_ADMIN_ALLOWED_EMAILS</code> +
+      signed cookie; a file-based <strong>run store</strong> (<code>data/runs/&lt;id&gt;/…</code>) that spawns &amp;
+      supervises <code>qe-cli</code> backtest/train subprocesses; <code>/api</code> for runs, vintages, and
+      market-data coverage; and serves the built React SPA at <code>/</code> (same origin).</td>
     </tr>
   </table>
 
-  <div class="callout warn">
-    <strong>Important — <code>train</code> is a provenance skeleton, not yet a trainer.</strong>
-    It does <em>not</em> ingest market data, run indicators, evolve strategies, or build an ensemble. The
-    manifest's <code>input_snapshot_id</code> is intentionally empty. The real training stack (ingest, the
-    indicator catalogue, the walk-forward search, the ensemble, the G1 validation gate) is <strong>built and
-    passing tests</strong> but is not yet wired behind this command.
-  </div>
+  <p>The <strong>React SPA</strong> (<code>web/</code>, Vite + TypeScript, the ported Claude Design system) gives
+  an authenticated browser UI: Login, Backtests (list / new / result with live progress + the full result
+  contract), a Training monitor (generations, archive-coverage grid, CV folds, best-so-far → G1 verdict → link
+  to the sealed vintage's backtest), and read-only Market-data coverage. Trade/Risk surfaces are present but
+  disabled (Phase 3).</p>
 
-  <h3>Capabilities that exist as tested libraries (not yet behind a command)</h3>
-  <div class="grid2">
-    <div class="card">
-      <h4>Training side (Phase&nbsp;1 — complete)</h4>
-      <ul>
-        <li>Binance public-dumps downloader + REST month-to-date backfill, with data-integrity reconciliation</li>
-        <li>Fusion / normalisation → LMDB market store</li>
-        <li>Multi-resolution bar reconstruction (5m → 30m/4h), batch &amp; streaming-identical</li>
-        <li>~20+ quantised indicator catalogue → feature vectors → synthetic store</li>
-        <li>Execution-friction &amp; funding model (VIP0 fees, real funding series, slippage)</li>
-        <li>QD/MAP-Elites strategy search, Thompson parent selection, purged/embargoed CV, robustness gates</li>
-        <li>Discrete-DE ensemble with correlation/capacity/regime constraints → calibrated <strong>vintage artefact</strong></li>
-        <li>Stress / worst-case-loss, statistical robustness (DSR/SPA), and the <strong>G1 holdout gate</strong></li>
-      </ul>
-    </div>
-    <div class="card">
-      <h4>Runtime side (Phase&nbsp;2 — complete, through G2)</h4>
-      <ul>
-        <li>Venue-aware REST client: weighted rate-limit back-off, retry budget, ephemeral closed-window cache</li>
-        <li>wss Market- &amp; Realtime-tier streams + user-data stream + tier-partitioned connection registry</li>
-        <li>Live kline source (REST-prime + wss-stitch), live factor join, mark-EMA tick loop</li>
-        <li><strong>Evaluator session</strong> (one object, replay &amp; live, no state copy) + deterministic
-          <strong>cold-start bootstrap</strong> + in-process <strong>cutover</strong> with restart parity</li>
-        <li>Circuit-breaker layer, position netting, the <strong>Hedge Planner</strong> (absolute target model),
-          and pre-trade risk (clamp/reject governor)</li>
-        <li><strong>Venue adapter + position keeper + paper simulator</strong>, an out-of-band <strong>kill
-          switch</strong> at the adapter, gRPC-style planner↔edge transport, and read-only vintage load + rollover</li>
-        <li>Real-time <strong>reconciliation divergence alarm</strong> (debounced, can trip the kill) and the
-          <strong>G2 shadow / dry-run gate</strong>: would-be orders reconciled vs the simulator, nothing submitted</li>
-      </ul>
-    </div>
-  </div>
-  <p class="muted">These are exercised through <code>cargo test</code> (578 tests + 1 ignored, 57 suites, all green).
-  There is still <strong>no live order submission anywhere</strong> — the order path terminates in a
-  kill-gated <em>paper simulator</em>, and the live HTTP/wss transports sit behind a default-off
-  <code>http</code> feature flag.</p>
+  <h3>The full runtime loop exists as tested libraries (Phase&nbsp;2, through G2)</h3>
+  <p class="muted">Beyond the runnable jobs above, the entire live/paper runtime is built and tested but is
+  exercised through <code>cargo test</code>, not yet behind an operator command:</p>
+  <ul class="muted">
+    <li>Venue-aware REST client + wss Market/Realtime/user-data streams (behind the default-off <code>http</code> feature)</li>
+    <li>Live kline source (REST-prime + wss-stitch), factor join, mark-EMA loop; the shared <strong>evaluator
+      session</strong> (replay &amp; live, no state copy), deterministic <strong>cold-start bootstrap</strong> +
+      in-process <strong>cutover</strong> with restart parity</li>
+    <li>Circuit breakers, position netting, the <strong>Hedge Planner</strong>, pre-trade risk, the out-of-band
+      <strong>kill switch</strong>, the venue adapter + position keeper + <strong>paper simulator</strong>,
+      planner↔edge transport, vintage load + rollover</li>
+    <li>Real-time <strong>reconciliation divergence alarm</strong> and the <strong>G2 shadow/dry-run gate</strong>:
+      would-be orders reconciled vs the simulator, nothing submitted</li>
+  </ul>
+  <p class="muted">Test baseline: <strong>668 Rust tests</strong> (+2 ignored) across the workspace, plus
+  <strong>40 frontend tests</strong> (Vitest/RTL), all green; firewall + decoupling guards green. There is still
+  <strong>no live order submission anywhere</strong> — the order path terminates in a kill-gated paper simulator.</p>
 
   <!-- ============================================================= -->
   <h2 class="section" id="run">3 · How to run it</h2>
 
   <h3>Prerequisites</h3>
-  <p>The Rust toolchain pinned by <code>rust-toolchain.toml</code> (<code>cargo</code> on <code>PATH</code>).
-  No database, no API key, no network needed for what runs today.</p>
+  <p>The Rust toolchain pinned by <code>rust-toolchain.toml</code> (<code>cargo</code> on <code>PATH</code>) for
+  the CLI/server; Node (for building the SPA). No database, no API key, no network needed to run the offline
+  jobs against the committed sample store.</p>
 
-  <h3>Run the binary</h3>
-  <pre><code># print version (the bare invocation also prints version)
-cargo run -p qe-cli -- version
-
-# run train against the bundled example config
+  <h3>Run the pipeline (CLI)</h3>
+  <pre><code># train the real pipeline → seals a content-hashed vintage (deterministic per seed)
 cargo run -p qe-cli -- train --config config.example.toml
-#   → produced vintage &lt;64-hex-id&gt; → data/artifacts/vintages/&lt;id&gt;/manifest.json
+#   → JSON-line progress (generations → G1) → data/artifacts/vintages/&lt;id&gt;/
 
-# inspect the output
-cat data/artifacts/vintages/*/manifest.json</code></pre>
+# backtest a sealed vintage over a window → deterministic result.json
+cargo run -p qe-cli -- backtest --vintage &lt;id&gt; --start 2021-01-01 --end 2024-12-31 \
+    --resolution 1h --run-dir /tmp/run --json
+
+# populate the LMDB market store (real network decoders behind the default-off `http` feature)
+cargo run -p qe-cli -- ingest --config config.example.toml --start … --end … --resolution 1h</code></pre>
+
+  <h3>Run the admin UI (server + SPA)</h3>
+  <pre><code># 1) build the SPA
+cd web &amp;&amp; npm ci &amp;&amp; npm run build      # → web/dist
+
+# 2) run the server (serves web/dist at / and the API at /api)
+QE_SERVER_STATIC_DIR=web/dist \
+QE_ADMIN_ALLOWED_EMAILS=you@example.com \
+QE_GOOGLE_CLIENT_ID=… QE_GOOGLE_CLIENT_SECRET=… QE_GOOGLE_REDIRECT_URI=… QE_SESSION_SECRET=… \
+    cargo run -p qe-server
+#   → sign in with Google (allowlisted) → trigger/monitor/review backtest &amp; training runs</code></pre>
 
   <h3>What you provide</h3>
   <p>Only a config file. <code>config.example.toml</code> works as-is. Every field is overridable by a
@@ -207,34 +222,37 @@ cat data/artifacts/vintages/*/manifest.json</code></pre>
   <table>
     <tr><th>Scenario</th><th>Inputs needed</th><th>Where</th></tr>
     <tr>
-      <td><span class="pill done">today</span> <code>train</code></td>
-      <td>Just the config file. Runs fully offline.</td>
+      <td><span class="pill done">today</span> <code>train</code> / <code>backtest</code> (offline)</td>
+      <td>The config + the committed sample store fixture. Runs fully offline &amp; deterministically.</td>
       <td>Nothing external — no market data, no keys.</td>
     </tr>
     <tr>
-      <td><span class="pill todo">when wired</span> full training</td>
+      <td><span class="pill done">today</span> admin UI</td>
+      <td>A Google OAuth client (id/secret/redirect), a session secret, and an email allowlist.</td>
+      <td>A Google Cloud OAuth 2.0 client; the SPA is built from <code>web/</code> and served by the server.</td>
+    </tr>
+    <tr>
+      <td><span class="pill todo">http feature</span> real ingest</td>
       <td>Historical klines + funding + open-interest + mark/premium, point-in-time from each listing date.</td>
       <td>Binance public data dumps + USDⓈ-M Futures REST (<span class="mono">/fapi/v1/klines</span>,
       <span class="mono">/fapi/v1/fundingRate</span>, <span class="mono">/futures/data/openInterestHist</span>,
-      <span class="mono">/fapi/v1/premiumIndexKlines</span>) — public, no key for historical reads.</td>
+      <span class="mono">/fapi/v1/premiumIndexKlines</span>) — public, no key. Decoders exist behind the
+      default-off <code>http</code> feature.</td>
     </tr>
     <tr>
-      <td><span class="pill todo">when wired</span> live / paper</td>
-      <td>The same REST historicals to bootstrap, then live wss streams; venue keys only for the (still-future) live order path.</td>
-      <td>Binance Futures wss — the market, realtime, and user-data stream decoders now exist
-      (<span class="tag">QE-202/203/204</span>) behind the default-off <code>http</code> feature; only a live
-      <em>order-submission</em> transport (Phase 3) remains.</td>
+      <td><span class="pill todo">Phase 3</span> live / paper loop</td>
+      <td>REST historicals to bootstrap, then live wss; venue keys only for the (still-future) live order path.</td>
+      <td>Binance Futures wss — market/realtime/user-data decoders exist
+      (<span class="tag">QE-202/203/204</span>) behind <code>http</code>; only a live <em>order-submission</em>
+      transport (Phase 3) remains.</td>
     </tr>
   </table>
-  <div class="callout warn">
-    <strong>Stale docs to ignore.</strong> <code>README.md</code> references a <code>Dockerfile</code> and
-    <code>docker build</code> — <em>no Dockerfile exists in the repo yet</em>, so that section is aspirational.
-    The <code>cargo run … train</code> line is accurate but produces the manifest described above, not a backtest.
-  </div>
+  <p class="muted">A <code>Dockerfile</code> is present and builds the same <code>qe</code> binary (dev/prod
+  parity, state on a mounted <code>/app/data</code> volume).</p>
 
   <!-- ============================================================= -->
   <h2 class="section" id="arch">4 · Architecture</h2>
-  <p>The workspace is 20 crates. The organising idea is a <strong>shared spine</strong>
+  <p>The workspace is 21 crates (+ a <code>web/</code> SPA). The organising idea is a <strong>shared spine</strong>
   (<code>qe-domain</code> + <code>qe-signal</code>) that both the offline <em>training</em> world and the online
   <em>runtime</em> world depend on — and <em>nothing else</em> crosses between them. That separation is not a
   convention; it is checked by tests (see §6).</p>
@@ -262,6 +280,13 @@ cat data/artifacts/vintages/*/manifest.json</code></pre>
       <td class="mono">venue · runtime</td>
       <td><code>venue</code> = REST/wss connectivity; <code>runtime</code> = live kline source, factor join,
       evaluator session, bootstrap pipeline (and the future risk/order loop).</td></tr>
+    <tr><td><strong>Admin backend</strong><br>(2nd composition root)</td>
+      <td class="mono">cli · server</td>
+      <td><code>cli</code> = the runnable <code>train</code>/<code>backtest</code>/<code>ingest</code> jobs (the
+      composition root that may touch both worlds); <code>server</code> (<code>qe-server</code>) = axum+tokio,
+      OAuth, run store + subprocess supervision, <code>/api</code> + static SPA. Async is isolated here;
+      <code>qe-server</code> <strong>never</strong> depends on <code>qe-runtime</code>/<code>qe-venue</code>
+      (checked by the firewall/decoupling tests).</td></tr>
     <tr><td><strong>Validation &amp; reporting</strong></td>
       <td class="mono">validation · gate · report</td>
       <td>Statistical robustness suite, the phased quality <strong>gates</strong> (G1…), and validation reports.</td></tr>
@@ -499,6 +524,7 @@ cat data/artifacts/vintages/*/manifest.json</code></pre>
     <tr><td><strong>P0</strong></td><td>Foundations</td><td>Workspace, config, storage, shared types, time/risk contracts compile &amp; are tested.</td><td><span class="pill done">complete · 13/13</span></td></tr>
     <tr><td><strong>P1</strong></td><td>Training → backtest validation</td><td><span class="pill gate">G1</span> a vintage passes net-of-cost, purged/embargoed, statistically-deflated validation on an untouched holdout.</td><td><span class="pill done">complete · 34/34 incl. G1</span></td></tr>
     <tr><td><strong>P2</strong></td><td>Runtime → paper/sim</td><td><span class="pill gate">G2</span> full loop runs in shadow/dry-run against live data, no order submission, reconciled vs simulator.</td><td><span class="pill done">complete · 22/22 incl. G2</span></td></tr>
+    <tr><td><strong>PreP3</strong></td><td>Admin UI for training &amp; backtesting</td><td>Trigger / monitor / review backtest &amp; training runs from an authenticated browser UI (built before live).</td><td><span class="pill done">complete · 11/11 (QE-251–261)</span></td></tr>
     <tr><td><strong>P3</strong></td><td>Live, attribution &amp; ops</td><td><span class="pill gate">G3</span> independent go/no-go sign-off; staged capital ramp under enforced caps.</td><td><span class="pill todo">not started · 0/11</span></td></tr>
   </table>
 
@@ -549,6 +575,22 @@ cat data/artifacts/vintages/*/manifest.json</code></pre>
     <tr><td class="tag">QE-222</td><td>GATE G2: live shadow / dry-run</td><td><span class="pill done">G2 passed</span></td></tr>
   </table>
 
+  <h3>Phase PreP3 — Admin UI for training &amp; backtesting <span class="pill done">complete</span></h3>
+  <table>
+    <tr><th>Ticket</th><th>What</th><th>Status</th></tr>
+    <tr><td class="tag">QE-252</td><td>Backtester trade-level recording (TradeFill)</td><td><span class="pill done">done</span></td></tr>
+    <tr><td class="tag">QE-251</td><td><code>qe-cli backtest</code> job → deterministic result.json + progress</td><td><span class="pill done">done</span></td></tr>
+    <tr><td class="tag">QE-253</td><td><code>qe-cli ingest</code> scaffold + coverage query</td><td><span class="pill done">done</span></td></tr>
+    <tr><td class="tag">QE-254</td><td><code>qe-server</code> crate (axum+tokio, static SPA, firewall guard)</td><td><span class="pill done">done</span></td></tr>
+    <tr><td class="tag">QE-255</td><td>Run store + lifecycle API + subprocess supervision</td><td><span class="pill done">done</span></td></tr>
+    <tr><td class="tag">QE-256</td><td>Google OAuth + email allowlist + signed session</td><td><span class="pill done">done</span></td></tr>
+    <tr><td class="tag">QE-257</td><td>Vintages + market-data coverage read APIs</td><td><span class="pill done">done</span></td></tr>
+    <tr><td class="tag">QE-258</td><td>Frontend scaffold + design-system port + Login</td><td><span class="pill done">done</span></td></tr>
+    <tr><td class="tag">QE-259</td><td>Backtest screens wired to the API</td><td><span class="pill done">done</span></td></tr>
+    <tr><td class="tag">QE-260</td><td>Runnable <code>qe-cli train</code> search job + rich progress</td><td><span class="pill done">done</span></td></tr>
+    <tr><td class="tag">QE-261</td><td>Training-monitor UI screen</td><td><span class="pill done">done</span></td></tr>
+  </table>
+
   <h3>Phase 3 — Live, attribution &amp; ops <span class="pill todo">not started</span></h3>
   <table>
     <tr><th>Ticket</th><th>What</th></tr>
@@ -569,91 +611,66 @@ cat data/artifacts/vintages/*/manifest.json</code></pre>
   <h2 class="section" id="future">8 · What's left to do</h2>
 
   <div class="callout ok">
-    <p style="margin:0"><strong>Phase 2 is complete.</strong> The cold-start → live cutover (<span class="tag">QE-208–211</span>),
-    the full risk &amp; order path (<span class="tag">QE-212–218</span>: breakers, netting, the Hedge Planner,
-    pre-trade risk, the out-of-band kill switch, and the venue adapter + position keeper + <em>paper
-    simulator</em>), vintage load + rollover (<span class="tag">QE-219</span>), restart parity
-    (<span class="tag">QE-220</span>), the reconciliation divergence alarm (<span class="tag">QE-221</span>),
-    and the <strong><span class="tag">QE-222</span> G2 shadow/dry-run gate</strong> have all landed and passed
-    review. The order port now has a body — it terminates in a kill-gated paper simulator, and the G2 gate
-    proves the loop produces would-be orders that reconcile with the simulator with nothing submitted.</p>
+    <p style="margin:0"><strong>Phases 2 and PreP3 are complete.</strong> The full paper/sim runtime loop (through
+    the <span class="tag">QE-222</span> G2 shadow gate) and the admin platform (<span class="tag">QE-251–261</span>:
+    runnable <code>backtest</code>/<code>train</code>/<code>ingest</code> jobs, the <code>qe-server</code> backend
+    with OAuth + run supervision, and the React SPA) have all landed and passed review. What remains is a short
+    list of <strong>PreP3 hardening follow-ups</strong> and then <strong>Phase 3</strong> (live capital).</p>
   </div>
 
-  <h3>Phase PreP3 — Admin UI for training &amp; backtesting <span class="pill wip">planned · QE-251–261</span></h3>
-  <p>An authenticated browser UI to <strong>trigger, monitor, and review</strong> training and backtesting
-  runs, built <em>before</em> Phase 3. Design source: the Claude Design <em>"Quant Engine Design System"</em>
-  (dark-first, violet accent, Space Grotesk / Hanken / JetBrains Mono). Because the pipeline is not yet wired
-  into runnable commands and the core has no async/HTTP layer, this is a <strong>stack of sequenced
-  sub-projects</strong>, not one. Spec: <code>docs/superpowers/specs/2026-07-02-admin-ui-training-backtest-design.md</code>;
-  decisions: <code>docs/architecture/admin-ui-decisions.md</code>; v1 plan:
-  <code>docs/superpowers/plans/2026-07-03-admin-ui-v1-cli-jobs.md</code>; backlog: <strong>Phase PreP3</strong>
-  (<code>QE-251</code>…<code>QE-261</code>). Numbering: PreP3 has no free hundreds slot between P2 (2xx) and P3
-  (3xx), so it uses the 25x band adjacent to the P2 work it extends.</p>
+  <h3>Near-term — PreP3 hardening follow-ups <span class="pill wip">QE-262–266</span></h3>
+  <p>Surfaced by the PreP3 code reviews (recorded in <code>docs/mds/reviewed/</code>). <strong>None blocks
+  anything</strong> — PreP3 shipped green. Priority: <strong>P1</strong> = correctness (do before trusting
+  training output); <strong>P2</strong> = before wider exposure / heavier load; <strong>P3</strong> = opportunistic.</p>
+  <table>
+    <tr><th>Ticket</th><th>What &amp; why</th><th>Priority</th></tr>
+    <tr><td class="tag">QE-262</td><td><strong>Persist catalogue version/states in the vintage; assert on load.</strong>
+      Today <code>train</code> and <code>backtest</code> both use the single default catalogue, and
+      <code>Genome::is_valid</code> only bounds-checks indices — a reordered/version-bumped catalogue would score
+      genomes against the wrong schema <em>silently</em>. Seal a catalogue fingerprint and fail loudly on drift.</td>
+      <td><span class="pill gate">P1 · correctness</span></td></tr>
+    <tr><td class="tag">QE-263</td><td><strong>Run-store startup reconciler.</strong> A server restart leaves in-flight
+      runs wedged at <code>running</code>/<code>queued</code> forever; reconcile orphans to a terminal state on boot.</td>
+      <td><span class="pill todo">P2</span></td></tr>
+    <tr><td class="tag">QE-264</td><td><strong>Enrich the read APIs for the UI.</strong> Expose a per-vintage symbol
+      roster on <code>/api/vintages</code> (so the trigger form's universe is vintage-scoped) and a metrics summary
+      in <code>RunMeta</code> (so the Backtests list can show a metrics column).</td>
+      <td><span class="pill todo">P2</span></td></tr>
+    <tr><td class="tag">QE-265</td><td><strong>Auth hardening.</strong> Add OIDC <code>nonce</code> binding and replace
+      the Google-<code>tokeninfo</code> delegation with local JWKS/RS256 verification — before any wider/less-trusted exposure.</td>
+      <td><span class="pill todo">P2 · security</span></td></tr>
+    <tr><td class="tag">QE-266</td><td><strong>Non-blocking I/O + supervision nits.</strong> Move run-store file I/O off
+      the async runtime (<code>tokio::fs</code>/<code>spawn_blocking</code>); classify a <code>done</code>-without-<code>result.json</code>
+      job as <code>failed</code>.</td>
+      <td><span class="pill todo">P3</span></td></tr>
+  </table>
+  <p class="muted"><strong>One repo-admin item</strong> (can't be set from a PR): make the frontend CI job
+  (<code>.github/workflows/frontend.yml</code> "build &amp; test") a <strong>required</strong> status check on
+  <code>main</code>, so the SPA build is protected like the Rust gates.</p>
 
-  <div class="callout">
-    <strong>Key decisions (accepted).</strong>
-    <table>
-      <tr><th>#</th><th>Decision</th><th>Why</th></tr>
-      <tr><td class="tag">D1</td><td>Backtest = run an existing sealed <strong>vintage</strong> over a window (not parametric config)</td><td>Strategies are evolved genomes in a vintage; the backtester runs genomes, not hand-typed params. Editable config = <em>evaluation</em> knobs (vintage, window, universe, costs); genome params render read-only.</td></tr>
-      <tr><td class="tag">D2</td><td>Backtest first; <strong>training monitor</strong> is a later spec</td><td>Backtest is fast/deterministic/self-contained with an existing screen; training is long, data-heavy, unwired, unscreened. Build the platform against the cheap job first.</td></tr>
-      <tr><td class="tag">D3</td><td>Assume <strong>pre-ingested</strong> data; add a minimal <code>qe-cli ingest</code>; UI market-data view read-only</td><td>Keep the backtest pure (local LMDB store, no network in the hot path). Ingestion isn't wired yet, so a minimal command populates the store once.</td></tr>
-      <tr><td class="tag">D4a</td><td>New <code>qe-server</code> crate (<strong>axum + tokio</strong>), a second composition root</td><td>All-Rust, reuses engine crates; async isolated to this crate. Depends only on training-side + shared crates; <strong>never <code>qe-runtime</code></strong> in v1. Passes the firewall/decoupling guards.</td></tr>
-      <tr><td class="tag">D4b</td><td>Execution = server <strong>supervises <code>qe-cli</code> subprocesses</strong> (JSON-line progress, artifacts to the run dir)</td><td>A heavy run can't destabilise the server; the deterministic core stays an independently-runnable CLI; crash isolation is free.</td></tr>
-      <tr><td class="tag">D4c</td><td>Run store = <strong>file-based</strong> (<code>data/runs/&lt;id&gt;/…</code>)</td><td>Matches the existing file layout (LMDB, JSON manifests, <code>data/artifacts/</code>); no new DB dependency.</td></tr>
-      <tr><td class="tag">D4d</td><td><strong>Google OAuth</strong> (redirect) → verify ID token → <code>QE_ADMIN_ALLOWED_EMAILS</code> allowlist → signed cookie; SPA + <code>/api</code> same-origin</td><td>Standard and secure for an internal admin tool; same-origin avoids CORS; single deploy.</td></tr>
-    </table>
-  </div>
+  <h3>Then — Phase 3: live, attribution &amp; ops <span class="pill todo">not started · QE-301–311</span></h3>
+  <p>The Strategy Allocation Journal, reconciliation against venue trade history, attribution outputs, the operator
+  cockpit (observability + authenticated manual controls), monitoring/alerting SLAs, incident runbooks, and
+  single-venue concentration caps — culminating in <strong><span class="tag">QE-308 (G3)</span></strong>
+  independent go/no-go and a <strong><span class="tag">QE-309</span></strong> staged, capped capital ramp.
+  <strong>This is where real order submission and real capital first appear</strong>; nothing before it leaves
+  the paper simulator. The live Trade/Positions/Orders/Risk UI surfaces (disabled placeholders in the SPA today)
+  also belong here — they need <code>qe-runtime</code>, which <code>qe-server</code> must not link.</p>
 
-  <div class="figure">
-    <div class="ascii">qe-cli ingest    → populates the LMDB market store (one-time, public data, no key)
-qe-cli backtest &lt;vintage&gt; --window --universe --costs --json
-     │  JSON-line progress on stdout + result artifacts → run dir
-     │  (spawned &amp; supervised by)
-qe-server (axum + tokio · 2nd composition root)
-     │  /api : trigger runs · run status/results · market-data coverage · auth
-     │  run store: data/runs/&lt;id&gt;/{meta.json, result.json, stdout.log}
-     │  auth: Google OAuth + QE_ADMIN_ALLOWED_EMAILS + signed cookie
-     │  serves the built SPA at /  (same origin as /api)
-     ▼
-React SPA (ported design system)
-     Login · Backtests (list) · Backtest result · Market-data coverage
-     (Training monitor + live Trade/Risk surfaces = later specs)</div>
-    <div class="figcap">v1 (the backtest vertical). Delivery order: (1) runnable CLI jobs → (2) <code>qe-server</code> + auth → (3) React SPA → (4) training monitor. Live Trade/Positions/Orders/Risk surfaces need <code>qe-runtime</code> and remain Phase-3.</div>
-  </div>
-
-  <h3>Next — Phase 3: live, attribution &amp; ops</h3>
-  <p>The remaining work is Phase 3 (<span class="tag">QE-301–311</span>): the Strategy Allocation Journal,
-  reconciliation against venue trade history, attribution outputs, the operator cockpit (observability +
-  authenticated manual controls), monitoring/alerting SLAs, incident runbooks, and single-venue concentration
-  caps — culminating in <strong><span class="tag">QE-308 (G3)</span></strong> independent go/no-go and a
-  <strong><span class="tag">QE-309</span></strong> staged, capped capital ramp. <strong>This is where real
-  order submission and real capital first appear</strong>; nothing before it leaves the paper simulator.</p>
-
-  <h3>Cross-cutting gaps a maintainer should pick up</h3>
+  <h3>Deferred / low-priority</h3>
   <ul>
-    <li><strong>Wire the libraries into runnable commands.</strong> The largest gap between perception and
-      reality: <code>qe-cli train</code> writes a manifest but does not yet run ingest → search → ensemble → G1.
-      A real <code>train</code> / <code>backtest</code> / <code>bootstrap</code> subcommand surface is needed to
-      make the (already tested) pipeline observable end-to-end.</li>
-    <li><strong>Add the missing <code>Dockerfile</code></strong> the README promises (deployment-agnostic
-      packaging, QE-013's intent), or correct the README.</li>
     <li><strong>Deferred analytics:</strong> Parquet export + DuckDB (<span class="tag">QE-135</span>) and the
       signal viewer (<span class="tag">QE-136</span>) for inspecting features/strategies.</li>
-    <li><strong>Bookkeeping convention (now established):</strong> <code>docs/mds/work.md</code> is a transient
-      scratchpad for the PR under review only; every merged ticket's approved review record is archived to
-      <code>docs/mds/reviewed/&lt;ticket&gt;.md</code> (all 69 completed tickets, QE-001→QE-222, have records
-      there) and <code>work.md</code> is cleared. Because <code>main</code> is branch-protected, archive
-      commits ride the next ticket's PR through CI.</li>
   </ul>
 
   <h3>For someone evaluating this to invest</h3>
   <div class="callout danger">
-    <p style="margin-top:0"><strong>This system cannot trade with real capital today.</strong> Phase 2 is now
+    <p style="margin-top:0"><strong>This system cannot trade with real capital today.</strong> Phase 2 is
     complete through the <strong>G2 shadow/dry-run gate</strong> — the full runtime loop runs against live data
     and produces would-be orders reconciled against a simulator — but the order path still terminates in a
-    <em>paper simulator</em>: there is no live broker submission, and the training pipeline is not yet runnable
-    end-to-end from the CLI. Phase 3 must still complete through the independent <strong>G3 go/no-go</strong>
-    with a staged, capped capital ramp before any real capital is involved.</p>
+    <em>paper simulator</em>: there is no live broker submission. The training/backtest pipeline is now runnable
+    end-to-end (CLI jobs + an authenticated admin UI), but Phase 3 must still complete through the independent
+    <strong>G3 go/no-go</strong> with a staged, capped capital ramp before any real capital is involved.</p>
     <p style="margin-bottom:0">What <em>is</em> strong and verifiable: a disciplined, deterministic,
     information-firewalled design with deep test coverage, a friction-true backtest (fees + real funding +
     slippage so no strategy is ranked on returns that won't exist live), and statistical over-fit gates
@@ -662,11 +679,11 @@ React SPA (ported design system)
   </div>
 
   <div class="foot">
-    Generated from the repository on 2026-07-02. Source of truth: <code>docs/backlog.md</code> (roadmap),
-    <code>docs/mds/reviewed/</code> (completed-ticket records), <code>crates/*/Cargo.toml</code> (dependency
-    graph), and <code>crates/cli/src/</code> (runnable surface). Test baseline: 578 tests (+1 ignored) across
-    57 suites, green; firewall + decoupling guards green. Re-verify against the code before relying on any
-    single claim.
+    Generated from the repository on 2026-07-03. Source of truth: <code>docs/backlog.md</code> (roadmap),
+    <code>docs/mds/reviewed/</code> (completed-ticket records, QE-001→QE-261), <code>crates/*/Cargo.toml</code>
+    (dependency graph), <code>crates/cli/src/</code> + <code>crates/server/src/</code> + <code>web/</code>
+    (runnable surface). Test baseline: 668 Rust tests (+2 ignored) + 40 frontend tests, green; firewall +
+    decoupling guards green. Re-verify against the code before relying on any single claim.
   </div>
 </main>
 </div>
