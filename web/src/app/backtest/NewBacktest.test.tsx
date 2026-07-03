@@ -89,6 +89,17 @@ describe('NewBacktest', () => {
     expect(onCreated).not.toHaveBeenCalled();
   });
 
+  it('shows the v1 single-instrument universe hint', async () => {
+    vi.stubGlobal(
+      'fetch',
+      mockApi(() => json({ id: 'x' }, 201)),
+    );
+    render(<NewBacktest onCreated={() => {}} onCancel={() => {}} />);
+    await waitFor(() => expect(screen.getByLabelText('Vintage')).toHaveValue('v-2024-q4'));
+    // The first selected symbol (BTCUSDT, alpha-sorted) is named in the hint.
+    expect(screen.getByText(/v1 backtests the first selected symbol \(BTCUSDT\)/i)).toBeInTheDocument();
+  });
+
   it('blocks submit with a client-side validation message when the window is missing', async () => {
     const onCreated = vi.fn();
     const fetchMock = mockApi(() => json({ id: 'x' }, 201));

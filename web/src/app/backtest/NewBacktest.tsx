@@ -20,6 +20,7 @@ const CSS = `
 .qe-new__uni { display: flex; gap: 6px; flex-wrap: wrap; }
 .qe-new__chip { cursor: pointer; }
 .qe-new__chip--off { opacity: 0.45; }
+.qe-new__hint { font-size: var(--fs-caption); color: var(--text-muted); margin-top: 2px; }
 .qe-new__actions { display: flex; justify-content: flex-end; gap: 10px; }
 `;
 
@@ -196,24 +197,31 @@ export function NewBacktest({ onCreated, onCancel }: NewBacktestProps) {
                 No symbols in the market-data store. Ingest data first.
               </div>
             ) : (
-              <div className="qe-new__uni" role="group" aria-label="Universe symbols">
-                {symbols.map((s) => {
-                  const on = selected.has(s);
-                  return (
-                    <Tag
-                      key={s}
-                      mono
-                      className={`qe-new__chip ${on ? '' : 'qe-new__chip--off'}`}
-                      role="checkbox"
-                      aria-checked={on}
-                      aria-label={s}
-                      onClick={() => toggleSymbol(s)}
-                    >
-                      {s}
-                    </Tag>
-                  );
-                })}
-              </div>
+              <>
+                <div className="qe-new__uni" role="group" aria-label="Universe symbols">
+                  {symbols.map((s) => {
+                    const on = selected.has(s);
+                    return (
+                      <Tag
+                        key={s}
+                        mono
+                        className={`qe-new__chip ${on ? '' : 'qe-new__chip--off'}`}
+                        role="checkbox"
+                        aria-checked={on}
+                        aria-label={s}
+                        onClick={() => toggleSymbol(s)}
+                      >
+                        {s}
+                      </Tag>
+                    );
+                  })}
+                </div>
+                {/* Multi-select kept (matches the kit's universe-as-tags idiom), but the v1 engine
+                    simulates only the first selected symbol — hint so users aren't surprised. */}
+                <span className="qe-new__hint">
+                  v1 backtests the first selected symbol ({symbols.find((s) => selected.has(s)) ?? '—'}).
+                </span>
+              </>
             )}
           </div>
         </div>

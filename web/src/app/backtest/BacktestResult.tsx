@@ -43,6 +43,9 @@ const MONTHS = ['J', 'F', 'M', 'A', 'M', 'J', 'J', 'A', 'S', 'O', 'N', 'D'];
 /** Poll cadence while a run is queued/running (ms). */
 const POLL_MS = 2000;
 
+/** Consecutive poll failures tolerated before giving up with a fatal error (resilience). */
+const MAX_POLL_FAILURES = 4;
+
 const MINUS = '−'; // − typographic minus
 
 function pct(v: number, signed: boolean): string {
@@ -158,6 +161,7 @@ export function BacktestResult({ runId, onBack, onReRun, pollMs = POLL_MS }: Bac
   const [meta, setMeta] = useState<RunMeta | null>(null);
   const [result, setResult] = useState<ResultContract | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [retrying, setRetrying] = useState(false);
   const [tab, setTab] = useState<'overview' | 'trades' | 'config'>('overview');
   const [rerunning, setRerunning] = useState(false);
   const [rerunError, setRerunError] = useState<string | null>(null);
@@ -169,10 +173,14 @@ export function BacktestResult({ runId, onBack, onReRun, pollMs = POLL_MS }: Bac
     setMeta(null);
     setResult(null);
     setError(null);
+    setRetrying(false);
     setTab('overview');
 
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    // Consecutive poll failures (network/fetch). Reset only on a *fully* clean tick, so a run stuck
+    // erroring — e.g. a succeeded run whose result endpoint keeps failing — still hits the cap.
+    let failures = 0;
 
     const tick = async () => {
       try {
@@ -181,20 +189,34 @@ export function BacktestResult({ runId, onBack, onReRun, pollMs = POLL_MS }: Bac
         setMeta(m);
         if (m.status === 'succeeded') {
           if (!resultFetched.current) {
-            resultFetched.current = true;
             const r = await getRunResult(runId);
-            if (!cancelled) setResult(r);
+            if (cancelled) return;
+            resultFetched.current = true;
+            setResult(r);
           }
+          failures = 0;
+          setRetrying(false);
           return; // terminal — stop polling
         }
         if (m.status === 'failed') {
-          if (!cancelled) setError(m.error ?? 'The backtest run failed.');
+          setError(m.error ?? 'The backtest run failed.');
           return; // terminal
         }
-        // queued | running — keep polling
+        // queued | running — a clean poll: reset the failure streak and keep polling.
+        failures = 0;
+        setRetrying(false);
         timer = setTimeout(tick, pollMs);
       } catch (e) {
-        if (!cancelled) setError(e instanceof Error ? e.message : 'Failed to load the run.');
+        if (cancelled) return;
+        // Resilience: a transient fetch error must not freeze the progress view. Keep polling up to a
+        // bounded streak, surfacing a non-fatal "retrying" note; only give up (fatal) past the cap.
+        failures += 1;
+        if (failures > MAX_POLL_FAILURES) {
+          setError(e instanceof Error ? e.message : 'Failed to load the run.');
+          return;
+        }
+        setRetrying(true);
+        timer = setTimeout(tick, pollMs);
       }
     };
 
@@ -303,6 +325,12 @@ export function BacktestResult({ runId, onBack, onReRun, pollMs = POLL_MS }: Bac
           {rerunError && (
             <Callout variant="danger" title="Re-run failed">
               {rerunError}
+            </Callout>
+          )}
+
+          {retrying && !error && (
+            <Callout variant="warn" title="Connection issue">
+              Couldn’t reach the server — retrying…
             </Callout>
           )}
 

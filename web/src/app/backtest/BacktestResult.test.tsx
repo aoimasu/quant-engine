@@ -195,4 +195,32 @@ describe('BacktestResult', () => {
     expect(await screen.findByText('+41.2%')).toBeInTheDocument();
     await waitFor(() => expect(screen.queryByRole('progressbar')).not.toBeInTheDocument());
   });
+
+  it('keeps polling through a transient fetch error and still reaches the result', async () => {
+    // While `phase==='error'` every poll 500s → the non-fatal "retrying" note shows and polling
+    // continues (never terminates). Flipping to `succeeded` lets the next poll recover and render.
+    let phase: 'error' | 'done' = 'error';
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        if (url.endsWith('/api/runs/run-1/result')) return json(RESULT);
+        if (url.endsWith('/api/runs/run-1')) {
+          return phase === 'error' ? new Response(null, { status: 500 }) : json(meta('succeeded'));
+        }
+        return new Response(null, { status: 404 });
+      }),
+    );
+
+    render(<BacktestResult runId="run-1" onBack={() => {}} onReRun={() => {}} pollMs={20} />);
+
+    // The transient error surfaces as a non-fatal retry note (no fatal error banner).
+    expect(await screen.findByText(/retrying/i)).toBeInTheDocument();
+    expect(screen.queryByText(/backtest failed/i)).not.toBeInTheDocument();
+
+    // Recovery: the run reports succeeded → the result renders and the retry note clears.
+    phase = 'done';
+    expect(await screen.findByText('+41.2%')).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByText(/retrying/i)).not.toBeInTheDocument());
+  });
 });
