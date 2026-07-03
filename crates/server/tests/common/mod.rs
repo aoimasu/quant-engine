@@ -3,7 +3,7 @@
 //! (`qe_server::mint_session_cookie`) — so tests never fork a parallel signing implementation.
 #![allow(dead_code)] // Each integration-test binary uses a different subset of these helpers.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -81,27 +81,23 @@ pub fn auth_context(allowlist: &str, verifier_outcome: Option<GoogleClaims>) -> 
     ))
 }
 
-/// Monotonic counter giving each throwaway read-state store a unique path (opening the same LMDB path
-/// twice concurrently is UB — see [`MarketStore::open`]).
-static READ_STATE_SEQ: AtomicU64 = AtomicU64::new(0);
-
-/// A throwaway [`ReadState`] over a fresh, empty market store + an empty (non-existent) artifacts dir,
-/// for tests that don't exercise the QE-257 read endpoints (auth / runs). Each call gets a unique
-/// temp path so concurrent tests never double-open one store.
-pub fn empty_read_state() -> Arc<ReadState> {
-    let seq = READ_STATE_SEQ.fetch_add(1, Ordering::Relaxed);
-    let base =
-        std::env::temp_dir().join(format!("qe-server-test-read-{}-{seq}", std::process::id()));
-    let market = base.join("market");
+/// A throwaway [`ReadState`] (empty market store + empty artifacts dir) rooted **under `base`** — a
+/// directory the caller already owns (typically the test's [`tempfile::TempDir`]). Keeping the store
+/// under a caller-owned dir means it is cleaned up when that dir is dropped, so no temp dir leaks, and
+/// distinct callers never collide (each passes its own unique base ⇒ no double-open of one LMDB path).
+/// For tests that don't exercise the QE-257 read endpoints (auth / runs / http).
+pub fn empty_read_state_under(base: &Path) -> Arc<ReadState> {
+    let market = base.join("read-market");
     std::fs::create_dir_all(&market).expect("create market dir");
     let store = Arc::new(MarketStore::open(&market, DEFAULT_MAP_SIZE).expect("open market store"));
-    let vintages = VintageRepository::new(base.join("artifacts"));
+    let vintages = VintageRepository::new(base.join("read-artifacts"));
     Arc::new(ReadState::new(vintages, store))
 }
 
-/// Assemble an [`AppState`] from a run manager + an auth context, with a throwaway empty read state.
-pub fn app_state(manager: Arc<RunManager>, auth: Arc<AuthContext>) -> AppState {
-    AppState::new(manager, auth, empty_read_state())
+/// Assemble an [`AppState`] from a run manager + an auth context, with a throwaway empty read state
+/// rooted under `base` (see [`empty_read_state_under`]).
+pub fn app_state_under(manager: Arc<RunManager>, auth: Arc<AuthContext>, base: &Path) -> AppState {
+    AppState::new(manager, auth, empty_read_state_under(base))
 }
 
 /// Assemble an [`AppState`] with an explicit [`ReadState`] — for the QE-257 read-endpoint tests.
