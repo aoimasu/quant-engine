@@ -138,6 +138,36 @@ impl MarketStore {
         )
     }
 
+    /// Distinct instruments that have at least one stored bar, in **ascending key order**.
+    ///
+    /// The market store has no separate instrument index, so this iterates the `bars` DB keys and
+    /// recovers each symbol (the bytes before the first `0x00` delimiter — see [`crate::key`]).
+    /// Keys iterate in lexicographic (= symbol-grouped, ascending) order, so a running-last dedupe
+    /// yields the distinct instruments deterministically. Any key whose symbol prefix is not a valid
+    /// [`InstrumentId`] is skipped defensively (the writer never produces one). Bar values are not
+    /// decoded (the data type is remapped to raw bytes), so this stays a cheap key-only scan.
+    ///
+    /// # Errors
+    /// [`StorageError`] on an LMDB failure.
+    pub fn bar_instruments(&self) -> Result<Vec<InstrumentId>, StorageError> {
+        let rtxn = self.env.read_txn()?;
+        let mut out: Vec<InstrumentId> = Vec::new();
+        for item in self.bars.remap_data_type::<Bytes>().iter(&rtxn)? {
+            let (key, _) = item?;
+            let end = key.iter().position(|&b| b == 0).unwrap_or(key.len());
+            let Ok(symbol) = std::str::from_utf8(&key[..end]) else {
+                continue;
+            };
+            let Ok(instrument) = InstrumentId::new(symbol) else {
+                continue;
+            };
+            if out.last() != Some(&instrument) {
+                out.push(instrument);
+            }
+        }
+        Ok(out)
+    }
+
     // ---- funding (keyed by instrument + time) -----------------------------------------------
 
     /// Insert funding-rate samples (one write transaction).

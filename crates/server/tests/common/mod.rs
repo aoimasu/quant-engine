@@ -3,6 +3,7 @@
 //! (`qe_server::mint_session_cookie`) — so tests never fork a parallel signing implementation.
 #![allow(dead_code)] // Each integration-test binary uses a different subset of these helpers.
 
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -11,7 +12,9 @@ use qe_server::auth::{
     DEFAULT_AUTH_ENDPOINT, DEFAULT_SESSION_TTL_SECS, DEFAULT_TOKENINFO_ENDPOINT,
     DEFAULT_TOKEN_ENDPOINT, SESSION_COOKIE_NAME,
 };
-use qe_server::{mint_session_cookie, AppState, RunManager};
+use qe_server::{mint_session_cookie, AppState, ReadState, RunManager};
+use qe_storage::{MarketStore, DEFAULT_MAP_SIZE};
+use qe_vintage::VintageRepository;
 
 /// Fixed session HMAC key for tests.
 pub const SESSION_SECRET: &[u8] = b"integration-test-session-secret-0123456789";
@@ -78,9 +81,32 @@ pub fn auth_context(allowlist: &str, verifier_outcome: Option<GoogleClaims>) -> 
     ))
 }
 
-/// Assemble an [`AppState`] from a run manager + an auth context.
-pub fn app_state(manager: Arc<RunManager>, auth: Arc<AuthContext>) -> AppState {
-    AppState::new(manager, auth)
+/// A throwaway [`ReadState`] (empty market store + empty artifacts dir) rooted **under `base`** — a
+/// directory the caller already owns (typically the test's [`tempfile::TempDir`]). Keeping the store
+/// under a caller-owned dir means it is cleaned up when that dir is dropped, so no temp dir leaks, and
+/// distinct callers never collide (each passes its own unique base ⇒ no double-open of one LMDB path).
+/// For tests that don't exercise the QE-257 read endpoints (auth / runs / http).
+pub fn empty_read_state_under(base: &Path) -> Arc<ReadState> {
+    let market = base.join("read-market");
+    std::fs::create_dir_all(&market).expect("create market dir");
+    let store = Arc::new(MarketStore::open(&market, DEFAULT_MAP_SIZE).expect("open market store"));
+    let vintages = VintageRepository::new(base.join("read-artifacts"));
+    Arc::new(ReadState::new(vintages, store))
+}
+
+/// Assemble an [`AppState`] from a run manager + an auth context, with a throwaway empty read state
+/// rooted under `base` (see [`empty_read_state_under`]).
+pub fn app_state_under(manager: Arc<RunManager>, auth: Arc<AuthContext>, base: &Path) -> AppState {
+    AppState::new(manager, auth, empty_read_state_under(base))
+}
+
+/// Assemble an [`AppState`] with an explicit [`ReadState`] — for the QE-257 read-endpoint tests.
+pub fn app_state_with_read(
+    manager: Arc<RunManager>,
+    auth: Arc<AuthContext>,
+    read: Arc<ReadState>,
+) -> AppState {
+    AppState::new(manager, auth, read)
 }
 
 /// Mint a valid session cookie **value** for `email`, expiring an hour out, via the production signer.

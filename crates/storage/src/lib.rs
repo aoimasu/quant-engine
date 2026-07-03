@@ -6,12 +6,14 @@
 //! - QE-011: [`SyntheticStore`] — derived artefacts (indicator-state cache + multi-resolution bars),
 //!   each tagged with its source lineage so stale entries are detected and evictable.
 
+pub mod coverage;
 mod engine;
 pub mod key;
 pub mod records;
 pub mod store;
 pub mod synthetic;
 
+pub use coverage::{coverage, coverage_all, CoverageRow};
 pub use records::{FuturesMetrics, PremiumSample};
 pub use store::{MarketStore, DEFAULT_MAP_SIZE};
 pub use synthetic::{IndicatorKey, SyntheticStore, SYNTHETIC_SCHEMA_VERSION};

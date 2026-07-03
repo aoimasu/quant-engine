@@ -1787,7 +1787,9 @@ dependencies = [
  "axum",
  "base64",
  "hmac",
+ "qe-storage",
  "qe-telemetry",
+ "qe-vintage",
  "serde",
  "serde_json",
  "sha2",
@@ -1821,6 +1823,7 @@ dependencies = [
  "qe-domain",
  "rust_decimal",
  "serde",
+ "serde_json",
  "tempfile",
  "thiserror",
 ]

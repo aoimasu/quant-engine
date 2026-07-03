@@ -50,7 +50,10 @@ fn app_with_script(data_dir: &Path, script: &Path, max_concurrency: usize) -> Ro
     // the one the test's `Cookie` header is signed with (both from `common`).
     let auth = common::auth_context(TEST_EMAIL, None);
     // The static dir is irrelevant here (no `/` requests); an absent path is fine.
-    build_router(&data_dir.join("static"), common::app_state(manager, auth))
+    build_router(
+        &data_dir.join("static"),
+        common::app_state_under(manager, auth, data_dir),
+    )
 }
 
 /// A create-run request body for a minimal valid backtest.

@@ -13,22 +13,26 @@ use axum::Router;
 use qe_server::auth::GoogleClaims;
 use qe_server::{build_router, CliJobSpawner, RunManager};
 use serde_json::Value;
+use tempfile::TempDir;
 use tower::ServiceExt;
 
 mod common;
 
 /// Build the app with a given allowlist + mocked verifier outcome. The run manager is present but the
-/// auth tests never spawn a job.
-fn app(allowlist: &str, verifier_outcome: Option<GoogleClaims>) -> Router {
-    let runs_dir = std::env::temp_dir().join("qe-server-auth-tests-unused-runs");
+/// auth tests never spawn a job. Returns the owning [`TempDir`] alongside the router: all throwaway
+/// state (the runs dir + the read-state store) lives under it, so it is cleaned up when the caller
+/// drops the guard — nothing leaks into the temp dir across the suite.
+fn app(allowlist: &str, verifier_outcome: Option<GoogleClaims>) -> (Router, TempDir) {
+    let tmp = tempfile::tempdir().expect("create temp dir");
     let spawner = Arc::new(CliJobSpawner::new(PathBuf::from("qe")));
-    let manager = Arc::new(RunManager::new(runs_dir, spawner, 2));
+    let manager = Arc::new(RunManager::new(tmp.path().join("runs"), spawner, 2));
     let auth = common::auth_context(allowlist, verifier_outcome);
     // Static dir irrelevant (no `/` requests here).
-    build_router(
-        &std::env::temp_dir().join("qe-auth-static"),
-        common::app_state(manager, auth),
-    )
+    let router = build_router(
+        &tmp.path().join("static"),
+        common::app_state_under(manager, auth, tmp.path()),
+    );
+    (router, tmp)
 }
 
 async fn send(app: &Router, req: Request<Body>) -> axum::response::Response {
@@ -77,7 +81,7 @@ fn session_cookie_from(resp: &axum::response::Response) -> Option<String> {
 
 #[tokio::test]
 async fn no_session_is_401_on_me_and_on_a_protected_run_route() {
-    let app = app("admin@example.com", None);
+    let (app, _tmp) = app("admin@example.com", None);
 
     let me = send(&app, get("/api/me")).await;
     assert_eq!(me.status(), StatusCode::UNAUTHORIZED);
@@ -93,7 +97,7 @@ async fn no_session_is_401_on_me_and_on_a_protected_run_route() {
 #[tokio::test]
 async fn allowlisted_login_sets_a_session_and_me_returns_the_email() {
     let email = "admin@example.com";
-    let app = app(email, Some(common::valid_claims(email)));
+    let (app, _tmp) = app(email, Some(common::valid_claims(email)));
 
     let resp = send(&app, callback("auth-code", "state-1")).await;
     assert_eq!(
@@ -111,7 +115,7 @@ async fn allowlisted_login_sets_a_session_and_me_returns_the_email() {
 #[tokio::test]
 async fn valid_login_not_on_allowlist_is_403() {
     // A genuine Google login (verifier succeeds, claims pass policy) but the email isn't allowlisted.
-    let app = app(
+    let (app, _tmp) = app(
         "admin@example.com",
         Some(common::valid_claims("intruder@example.com")),
     );
@@ -127,7 +131,7 @@ async fn valid_login_not_on_allowlist_is_403() {
 
 #[tokio::test]
 async fn tampered_session_cookie_is_401() {
-    let app = app("admin@example.com", None);
+    let (app, _tmp) = app("admin@example.com", None);
 
     // A structurally-plausible but unsigned/forged token.
     let forged = "qe_session=djF8YWRtaW5AZXhhbXBsZS5jb218OTk5OTk5OTk5OQ.not-a-valid-mac";
@@ -146,7 +150,7 @@ async fn tampered_session_cookie_is_401() {
 async fn wrong_aud_token_is_rejected() {
     let mut claims = common::valid_claims("admin@example.com");
     claims.aud = "some-other-client".to_owned();
-    let app = app("admin@example.com", Some(claims));
+    let (app, _tmp) = app("admin@example.com", Some(claims));
     let resp = send(&app, callback("auth-code", "state-1")).await;
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     assert!(session_cookie_from(&resp).is_none());
@@ -156,7 +160,7 @@ async fn wrong_aud_token_is_rejected() {
 async fn wrong_iss_token_is_rejected() {
     let mut claims = common::valid_claims("admin@example.com");
     claims.iss = "https://evil.example.com".to_owned();
-    let app = app("admin@example.com", Some(claims));
+    let (app, _tmp) = app("admin@example.com", Some(claims));
     let resp = send(&app, callback("auth-code", "state-1")).await;
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
@@ -165,7 +169,7 @@ async fn wrong_iss_token_is_rejected() {
 async fn expired_token_is_rejected() {
     let mut claims = common::valid_claims("admin@example.com");
     claims.exp = 1; // long in the past
-    let app = app("admin@example.com", Some(claims));
+    let (app, _tmp) = app("admin@example.com", Some(claims));
     let resp = send(&app, callback("auth-code", "state-1")).await;
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
@@ -174,7 +178,7 @@ async fn expired_token_is_rejected() {
 async fn unverified_email_token_is_rejected() {
     let mut claims = common::valid_claims("admin@example.com");
     claims.email_verified = false;
-    let app = app("admin@example.com", Some(claims));
+    let (app, _tmp) = app("admin@example.com", Some(claims));
     let resp = send(&app, callback("auth-code", "state-1")).await;
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
@@ -182,14 +186,14 @@ async fn unverified_email_token_is_rejected() {
 #[tokio::test]
 async fn verifier_failure_is_rejected() {
     // Verifier returns an error (e.g. token exchange failed) ⇒ not signed in.
-    let app = app("admin@example.com", None);
+    let (app, _tmp) = app("admin@example.com", None);
     let resp = send(&app, callback("auth-code", "state-1")).await;
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
 async fn csrf_state_mismatch_is_rejected() {
-    let app = app(
+    let (app, _tmp) = app(
         "admin@example.com",
         Some(common::valid_claims("admin@example.com")),
     );
@@ -216,7 +220,7 @@ async fn csrf_state_mismatch_is_rejected() {
 
 #[tokio::test]
 async fn missing_code_is_rejected() {
-    let app = app(
+    let (app, _tmp) = app(
         "admin@example.com",
         Some(common::valid_claims("admin@example.com")),
     );
@@ -232,7 +236,7 @@ async fn missing_code_is_rejected() {
 
 #[tokio::test]
 async fn login_redirects_to_google_with_state_cookie() {
-    let app = app("admin@example.com", None);
+    let (app, _tmp) = app("admin@example.com", None);
     let resp = send(&app, get("/api/auth/login")).await;
     assert_eq!(resp.status(), StatusCode::FOUND);
 
@@ -257,7 +261,7 @@ async fn login_redirects_to_google_with_state_cookie() {
 
 #[tokio::test]
 async fn health_stays_public() {
-    let app = app("admin@example.com", None);
+    let (app, _tmp) = app("admin@example.com", None);
     let resp = send(&app, get("/api/health")).await;
     assert_eq!(resp.status(), StatusCode::OK);
 }

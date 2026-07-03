@@ -199,6 +199,38 @@ impl VintageRepository {
         let file = std::fs::File::open(self.path_for(vintage_id))?;
         Vintage::load(file)
     }
+
+    /// List every sealed vintage under `root`, **ascending by `vintage_id`** (deterministic order).
+    ///
+    /// Each `*.json` file is loaded through [`Vintage::load`] (so the content hash is verified). Files
+    /// that don't parse/verify as a vintage are **skipped** — the artifacts dir may hold unrelated
+    /// files — so a stray file never fails the whole listing. A missing `root` yields an empty list
+    /// (nothing has been sealed yet), not an error.
+    ///
+    /// # Errors
+    /// [`VintageError::Io`] on a filesystem error reading the directory (other than "not found").
+    pub fn list(&self) -> Result<Vec<Vintage>, VintageError> {
+        let entries = match std::fs::read_dir(&self.root) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(VintageError::Io(e)),
+        };
+        let mut vintages = Vec::new();
+        for entry in entries {
+            let path = entry?.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            // Skip anything that doesn't open + verify as a vintage (unrelated artefact / corrupt file).
+            if let Ok(file) = std::fs::File::open(&path) {
+                if let Ok(vintage) = Vintage::load(file) {
+                    vintages.push(vintage);
+                }
+            }
+        }
+        vintages.sort_by(|a, b| a.content.vintage_id.cmp(&b.content.vintage_id));
+        Ok(vintages)
+    }
 }
 
 /// Errors raised while sealing / writing / loading a vintage.
@@ -413,6 +445,41 @@ mod tests {
         other.format_version = VINTAGE_FORMAT_VERSION + 1;
         let bumped = Vintage::seal(other).unwrap();
         assert_ne!(bumped.content_hash, base.content_hash);
+    }
+
+    #[test]
+    fn repository_lists_sealed_vintages_sorted_skipping_strays() {
+        let dir = std::env::temp_dir().join(format!("qe-vintage-list-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let repo = VintageRepository::new(&dir);
+
+        // A missing dir lists as empty (nothing sealed yet).
+        assert!(repo.list().unwrap().is_empty());
+
+        // Seal two vintages with distinct ids and write them (out of alphabetical order).
+        let mut c2 = content();
+        c2.vintage_id = "zzz-late".to_string();
+        let mut c1 = content();
+        c1.vintage_id = "aaa-early".to_string();
+        repo.write(&Vintage::seal(c2).unwrap()).unwrap();
+        repo.write(&Vintage::seal(c1).unwrap()).unwrap();
+
+        // A stray non-vintage `.json` and a non-json file are both ignored.
+        std::fs::write(dir.join("not-a-vintage.json"), b"{\"nope\":true}").unwrap();
+        std::fs::write(dir.join("README.txt"), b"ignore me").unwrap();
+
+        let listed = repo.list().unwrap();
+        let ids: Vec<&str> = listed
+            .iter()
+            .map(|v| v.content.vintage_id.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["aaa-early", "zzz-late"],
+            "ascending by id, strays skipped"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

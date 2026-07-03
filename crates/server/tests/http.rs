@@ -2,6 +2,7 @@
 //! `tower::ServiceExt::oneshot` (no real network bind) to assert the health endpoint and static-index
 //! serving behave, and that the reserved `/api` namespace returns `404` for unknown routes.
 
+use std::path::Path;
 use std::sync::Arc;
 
 use axum::body::Body;
@@ -21,18 +22,19 @@ fn temp_static_dir() -> tempfile::TempDir {
     dir
 }
 
-/// A [`RunManager`] for the health/static tests. These never create a run, so the runs dir is never
-/// written and the spawner binary (`qe`) is never invoked — an unused placeholder path is fine.
-fn test_manager() -> Arc<RunManager> {
-    let runs_dir = std::env::temp_dir().join("qe-server-http-tests-unused-runs");
+/// A [`RunManager`] for the health/static tests, rooted under `base` (a caller-owned temp dir) so
+/// nothing leaks. These never create a run, so the runs dir is never written and the spawner binary
+/// (`qe`) is never invoked.
+fn test_manager(base: &Path) -> Arc<RunManager> {
     let spawner = Arc::new(CliJobSpawner::new(std::path::PathBuf::from("qe")));
-    Arc::new(RunManager::new(runs_dir, spawner, 2))
+    Arc::new(RunManager::new(base.join("runs"), spawner, 2))
 }
 
-/// An [`AppState`] for the QE-254 public-route tests. These only hit `/api/health`, `/`, and unknown
+/// An [`AppState`] for the QE-254 public-route tests, with all throwaway state rooted under `base`
+/// (the test's temp dir) so it is cleaned up on drop. These only hit `/api/health`, `/`, and unknown
 /// paths — all public — so the auth context (allowlist/verifier) is never exercised.
-fn test_state() -> AppState {
-    common::app_state(test_manager(), common::auth_context("", None))
+fn test_state(base: &Path) -> AppState {
+    common::app_state_under(test_manager(base), common::auth_context("", None), base)
 }
 
 async fn body_string(response: axum::response::Response) -> String {
@@ -45,7 +47,7 @@ async fn body_string(response: axum::response::Response) -> String {
 #[tokio::test]
 async fn health_endpoint_returns_ok_json() {
     let dir = temp_static_dir();
-    let app = build_router(dir.path(), test_state());
+    let app = build_router(dir.path(), test_state(dir.path()));
 
     let response = app
         .oneshot(
@@ -66,7 +68,7 @@ async fn health_endpoint_returns_ok_json() {
 #[tokio::test]
 async fn root_serves_static_index() {
     let dir = temp_static_dir();
-    let app = build_router(dir.path(), test_state());
+    let app = build_router(dir.path(), test_state(dir.path()));
 
     let response = app
         .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
@@ -83,7 +85,7 @@ async fn unknown_client_route_falls_back_to_index() {
     // SPA client-side routing: a deep link the server has no file for still returns the app shell,
     // not a 404 — so the browser can hydrate and route client-side.
     let dir = temp_static_dir();
-    let app = build_router(dir.path(), test_state());
+    let app = build_router(dir.path(), test_state(dir.path()));
 
     let response = app
         .oneshot(
@@ -112,7 +114,7 @@ async fn missing_static_dir_degrades_to_404_not_panic() {
         "the static dir must be absent for this test"
     );
 
-    let app = build_router(&absent, test_state());
+    let app = build_router(&absent, test_state(dir.path()));
 
     let response = app
         .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
@@ -127,7 +129,7 @@ async fn unknown_api_route_is_reserved_404() {
     // `/api` is a reserved JSON namespace: an unknown `/api/*` path must NOT be swallowed by the SPA
     // fallback — it returns 404 so later tickets can add real routes without ambiguity.
     let dir = temp_static_dir();
-    let app = build_router(dir.path(), test_state());
+    let app = build_router(dir.path(), test_state(dir.path()));
 
     let response = app
         .oneshot(

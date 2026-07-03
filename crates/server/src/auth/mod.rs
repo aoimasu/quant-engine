@@ -356,11 +356,13 @@ pub async fn require_session(
     }
 }
 
-/// Assemble the protected sub-router (`/me` + the QE-255 runs routes) behind [`require_session`].
+/// Assemble the protected sub-router (`/me` + the QE-255 runs routes + the QE-257 read APIs) behind
+/// [`require_session`].
 pub fn protected_routes(auth: Arc<AuthContext>) -> Router<AppState> {
     Router::new()
         .route("/me", get(me))
         .merge(crate::runs::api::routes())
+        .merge(crate::read::routes())
         .route_layer(axum::middleware::from_fn_with_state(auth, require_session))
 }
 

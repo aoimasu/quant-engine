@@ -10,7 +10,10 @@ use rust_decimal::Decimal;
 use qe_domain::{
     Bar, FundingRate, FundingRateSample, InstrumentId, Price, Qty, Resolution, Timestamp,
 };
-use qe_storage::{FuturesMetrics, MarketStore, PremiumSample, StorageError, SCHEMA_VERSION};
+use qe_storage::{
+    coverage, coverage_all, CoverageRow, FuturesMetrics, MarketStore, PremiumSample, StorageError,
+    SCHEMA_VERSION,
+};
 
 const MAP_SIZE: usize = 10 * 1024 * 1024;
 
@@ -40,6 +43,94 @@ fn bar(res: Resolution, secs: i64, base: i64) -> Bar {
         1,
     )
     .unwrap()
+}
+
+/// QE-257: `bar_instruments()` enumerates each stored instrument **exactly once, ascending**, across
+/// contiguous multi-bar / multi-resolution key runs (the running-last dedupe the single-instrument
+/// fixture never exercises), and `coverage()` / `coverage_all()` build correct per-(instrument,
+/// resolution) rows on top of it.
+#[test]
+fn bar_instruments_dedupes_and_coverage_reports_all_instruments() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = open(dir.path());
+
+    let btc = inst("BTCUSDT");
+    let eth = inst("ETHUSDT");
+
+    // Insert ETH *before* BTC (reverse of sorted order) to prove the enumeration sorts, and give BTC
+    // two resolutions + multiple bars so its keys form a long contiguous run that must dedupe to one.
+    store
+        .put_bars(
+            &eth,
+            &[bar(Resolution::M5, 100, 50), bar(Resolution::M5, 200, 60)],
+        )
+        .unwrap();
+    store
+        .put_bars(
+            &btc,
+            &[
+                bar(Resolution::M5, 100, 100),
+                bar(Resolution::M5, 200, 110),
+                bar(Resolution::M5, 300, 120),
+            ],
+        )
+        .unwrap();
+    store
+        .put_bars(
+            &btc,
+            &[
+                bar(Resolution::H1, 3600, 200),
+                bar(Resolution::H1, 7200, 210),
+            ],
+        )
+        .unwrap();
+
+    // Each distinct instrument appears exactly once, ascending — no double-count (BTC has 5 bars over
+    // 2 resolutions), no omission.
+    assert_eq!(
+        store.bar_instruments().unwrap(),
+        vec![btc.clone(), eth.clone()],
+        "distinct instruments, ascending, deduped"
+    );
+
+    let m5 = Resolution::M5.as_str().to_owned();
+    let h1 = Resolution::H1.as_str().to_owned();
+    let btc_m5 = CoverageRow {
+        symbol: "BTCUSDT".to_owned(),
+        resolution: m5.clone(),
+        from: 100_000, // secs → open_time millis
+        to: 300_000,
+        bars: 3,
+    };
+    let btc_h1 = CoverageRow {
+        symbol: "BTCUSDT".to_owned(),
+        resolution: h1,
+        from: 3_600_000,
+        to: 7_200_000,
+        bars: 2,
+    };
+    let eth_m5 = CoverageRow {
+        symbol: "ETHUSDT".to_owned(),
+        resolution: m5,
+        from: 100_000,
+        to: 200_000,
+        bars: 2,
+    };
+
+    // `coverage_all` enumerates instruments ascending, then Resolution::ALL ascending (M5 before H1).
+    assert_eq!(
+        coverage_all(&store).unwrap(),
+        vec![btc_m5.clone(), btc_h1.clone(), eth_m5.clone()],
+        "coverage_all rows: instruments ascending, resolutions ascending"
+    );
+
+    // `coverage` honours the caller's instrument order (ETH first here) — distinct from the sorted
+    // enumeration above, proving the two paths differ only by instrument ordering.
+    assert_eq!(
+        coverage(&store, &[eth, btc]).unwrap(),
+        vec![eth_m5, btc_m5, btc_h1],
+        "coverage rows follow the caller-supplied instrument order"
+    );
 }
 
 #[test]

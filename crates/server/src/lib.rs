@@ -18,10 +18,13 @@ use std::sync::Arc;
 
 use axum::extract::FromRef;
 use axum::{http::StatusCode, routing::get, Json, Router};
+use qe_storage::{MarketStore, StorageError, DEFAULT_MAP_SIZE};
+use qe_vintage::VintageRepository;
 use serde_json::json;
 use tower_http::services::{ServeDir, ServeFile};
 
 pub mod auth;
+pub mod read;
 pub mod runs;
 
 pub use auth::{
@@ -41,12 +44,18 @@ pub struct AppState {
     pub manager: Arc<RunManager>,
     /// The QE-256 OAuth + session context.
     pub auth: Arc<AuthContext>,
+    /// The QE-257 read-API state (sealed-vintage repo + opened market store).
+    pub read: Arc<ReadState>,
 }
 
 impl AppState {
-    /// Build the application state from its two halves.
-    pub fn new(manager: Arc<RunManager>, auth: Arc<AuthContext>) -> Self {
-        Self { manager, auth }
+    /// Build the application state from its three halves.
+    pub fn new(manager: Arc<RunManager>, auth: Arc<AuthContext>, read: Arc<ReadState>) -> Self {
+        Self {
+            manager,
+            auth,
+            read,
+        }
     }
 }
 
@@ -59,6 +68,35 @@ impl FromRef<AppState> for Arc<RunManager> {
 impl FromRef<AppState> for Arc<AuthContext> {
     fn from_ref(state: &AppState) -> Self {
         Arc::clone(&state.auth)
+    }
+}
+
+impl FromRef<AppState> for Arc<ReadState> {
+    fn from_ref(state: &AppState) -> Self {
+        Arc::clone(&state.read)
+    }
+}
+
+/// State backing the QE-257 read APIs: the sealed-vintage repository (a cheap path wrapper) and the
+/// **once-opened** market store.
+///
+/// The market store is opened a single time at startup and shared by `Arc`, never per request:
+/// [`MarketStore::open`] documents that opening the same path more than once concurrently in a process
+/// is undefined behaviour, so a per-request open under concurrent load would be unsound.
+pub struct ReadState {
+    /// The sealed-vintage repository rooted at the configured artifacts dir.
+    pub vintages: VintageRepository,
+    /// The opened market store the coverage endpoint scans.
+    pub market_store: Arc<MarketStore>,
+}
+
+impl ReadState {
+    /// Build read state from a vintage repository + an opened market store.
+    pub fn new(vintages: VintageRepository, market_store: Arc<MarketStore>) -> Self {
+        Self {
+            vintages,
+            market_store,
+        }
     }
 }
 
@@ -86,6 +124,17 @@ pub const DEFAULT_DATA_DIR: &str = "data";
 /// Default bound on concurrently-running subprocesses when `QE_SERVER_MAX_CONCURRENCY` is unset.
 pub const DEFAULT_MAX_CONCURRENCY: usize = 2;
 
+/// Default sealed-vintage artifacts directory when `QE_SERVER_ARTIFACTS_DIR` is unset. A **relative**
+/// default (CWD-relative, never hard-coded absolute), matching the repo `data/` layout
+/// (`qe-config` `storage.artifacts_dir = data/artifacts`). The `/api/vintages` endpoint reads the
+/// `<id>.json` sealed vintages under this dir via [`VintageRepository`].
+pub const DEFAULT_ARTIFACTS_DIR: &str = "data/artifacts";
+
+/// Default market-store directory when `QE_SERVER_MARKET_DIR` is unset. A **relative** default,
+/// matching `qe-config` `storage.market_dir = data/lmdb/market`. The `/api/market-data/coverage`
+/// endpoint scans the [`MarketStore`] opened here.
+pub const DEFAULT_MARKET_DIR: &str = "data/lmdb/market";
+
 /// Environment variable naming the bind address (12-factor, `QE_`-prefixed like `qe-config`).
 pub const ENV_ADDR: &str = "QE_SERVER_ADDR";
 
@@ -97,6 +146,12 @@ pub const ENV_DATA_DIR: &str = "QE_SERVER_DATA_DIR";
 
 /// Environment variable naming the max number of concurrently-running run subprocesses.
 pub const ENV_MAX_CONCURRENCY: &str = "QE_SERVER_MAX_CONCURRENCY";
+
+/// Environment variable naming the sealed-vintage artifacts directory.
+pub const ENV_ARTIFACTS_DIR: &str = "QE_SERVER_ARTIFACTS_DIR";
+
+/// Environment variable naming the market-store directory.
+pub const ENV_MARKET_DIR: &str = "QE_SERVER_MARKET_DIR";
 
 /// Server transport configuration (bind address + static-assets dir).
 ///
@@ -114,6 +169,10 @@ pub struct ServerConfig {
     pub cli_bin: PathBuf,
     /// Max number of concurrently-running run subprocesses (excess runs stay `queued`).
     pub max_concurrency: usize,
+    /// Sealed-vintage artifacts dir the `/api/vintages` endpoint lists (QE-257).
+    pub artifacts_dir: PathBuf,
+    /// Market-store dir the `/api/market-data/coverage` endpoint scans (QE-257).
+    pub market_dir: PathBuf,
 }
 
 impl Default for ServerConfig {
@@ -126,6 +185,8 @@ impl Default for ServerConfig {
             data_dir: PathBuf::from(DEFAULT_DATA_DIR),
             cli_bin: runs::resolve_cli_bin(),
             max_concurrency: DEFAULT_MAX_CONCURRENCY,
+            artifacts_dir: PathBuf::from(DEFAULT_ARTIFACTS_DIR),
+            market_dir: PathBuf::from(DEFAULT_MARKET_DIR),
         }
     }
 }
@@ -181,7 +242,24 @@ impl ServerConfig {
                 .ok_or_else(|| ConfigError::BadConcurrency { value: raw.clone() })?;
             cfg.max_concurrency = n;
         }
+        if let Ok(dir) = std::env::var(ENV_ARTIFACTS_DIR) {
+            cfg.artifacts_dir = PathBuf::from(dir);
+        }
+        if let Ok(dir) = std::env::var(ENV_MARKET_DIR) {
+            cfg.market_dir = PathBuf::from(dir);
+        }
         Ok(cfg)
+    }
+
+    /// Build the QE-257 [`ReadState`]: a [`VintageRepository`] rooted at `artifacts_dir` and the
+    /// market store opened **once** at `market_dir` (see [`ReadState`] for why a single open).
+    ///
+    /// # Errors
+    /// [`StorageError`] if the market store cannot be opened (I/O, LMDB, or a schema mismatch).
+    pub fn read_state(&self) -> Result<Arc<ReadState>, StorageError> {
+        let market_store = Arc::new(MarketStore::open(&self.market_dir, DEFAULT_MAP_SIZE)?);
+        let vintages = VintageRepository::new(self.artifacts_dir.clone());
+        Ok(Arc::new(ReadState::new(vintages, market_store)))
     }
 
     /// Build the [`RunManager`] for this config: a [`CliJobSpawner`] over `cli_bin`, a run store at
@@ -286,11 +364,15 @@ mod tests {
             let _s = EnvGuard::clear(ENV_STATIC_DIR);
             let _d = EnvGuard::clear(ENV_DATA_DIR);
             let _c = EnvGuard::clear(ENV_MAX_CONCURRENCY);
+            let _ar = EnvGuard::clear(ENV_ARTIFACTS_DIR);
+            let _mk = EnvGuard::clear(ENV_MARKET_DIR);
             let cfg = ServerConfig::from_env().expect("defaults resolve");
             assert_eq!(cfg.addr.to_string(), DEFAULT_ADDR);
             assert_eq!(cfg.static_dir, PathBuf::from(DEFAULT_STATIC_DIR));
             assert_eq!(cfg.data_dir, PathBuf::from(DEFAULT_DATA_DIR));
             assert_eq!(cfg.max_concurrency, DEFAULT_MAX_CONCURRENCY);
+            assert_eq!(cfg.artifacts_dir, PathBuf::from(DEFAULT_ARTIFACTS_DIR));
+            assert_eq!(cfg.market_dir, PathBuf::from(DEFAULT_MARKET_DIR));
         }
 
         // Env overrides every knob.
@@ -299,11 +381,15 @@ mod tests {
             let _s = EnvGuard::set(ENV_STATIC_DIR, "/srv/spa");
             let _d = EnvGuard::set(ENV_DATA_DIR, "/srv/state");
             let _c = EnvGuard::set(ENV_MAX_CONCURRENCY, "5");
+            let _ar = EnvGuard::set(ENV_ARTIFACTS_DIR, "/srv/artifacts");
+            let _mk = EnvGuard::set(ENV_MARKET_DIR, "/srv/market");
             let cfg = ServerConfig::from_env().expect("overrides resolve");
             assert_eq!(cfg.addr.to_string(), "0.0.0.0:9099");
             assert_eq!(cfg.static_dir, PathBuf::from("/srv/spa"));
             assert_eq!(cfg.data_dir, PathBuf::from("/srv/state"));
             assert_eq!(cfg.max_concurrency, 5);
+            assert_eq!(cfg.artifacts_dir, PathBuf::from("/srv/artifacts"));
+            assert_eq!(cfg.market_dir, PathBuf::from("/srv/market"));
         }
 
         // A set-but-unparseable address is a hard error.

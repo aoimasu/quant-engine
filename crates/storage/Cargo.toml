@@ -19,3 +19,5 @@ thiserror.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# The coverage-row serde-shape test (relocated from `qe-cli`, QE-257).
+serde_json.workspace = true
