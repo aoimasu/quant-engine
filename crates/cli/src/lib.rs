@@ -187,6 +187,20 @@ pub enum Command {
         /// Emit JSON-line progress on stdout.
         json: bool,
     },
+    /// Ingest market data into the store from the configured source (QE-253).
+    ///
+    /// Real network decoders live behind the default-off `http` feature; the window is bounded by
+    /// `--start`/`--end` at `--resolution`, and the store path + universe come from `--config`.
+    Ingest {
+        /// Config file path (supplies the store path + universe).
+        config: PathBuf,
+        /// Inclusive window start (`YYYY-MM-DD`).
+        start: String,
+        /// Exclusive window end (`YYYY-MM-DD`).
+        end: String,
+        /// Bar resolution to ingest (`1h`, `5m`, …).
+        resolution: String,
+    },
 }
 
 /// Parse CLI arguments (excluding `argv[0]`).
@@ -283,6 +297,27 @@ where
                 slippage_model,
                 run_dir,
                 json,
+            })
+        }
+        "ingest" => {
+            let mut config = PathBuf::from("config.toml");
+            let mut start = String::new();
+            let mut end = String::new();
+            let mut resolution = String::new();
+            while let Some(flag) = it.next() {
+                match flag.as_str() {
+                    "--config" => config = PathBuf::from(value(&mut it, "--config")?),
+                    "--start" => start = value(&mut it, "--start")?,
+                    "--end" => end = value(&mut it, "--end")?,
+                    "--resolution" => resolution = value(&mut it, "--resolution")?,
+                    other => return Err(CliError::Usage(format!("unknown flag `{other}`"))),
+                }
+            }
+            Ok(Command::Ingest {
+                config,
+                start,
+                end,
+                resolution,
             })
         }
         other => Err(CliError::Usage(format!("unknown command `{other}`"))),
@@ -438,6 +473,49 @@ mod tests {
     fn backtest_requires_vintage() {
         assert!(matches!(
             parse_args(["backtest", "--start", "2021-01-01"]),
+            Err(CliError::Usage(_))
+        ));
+    }
+
+    #[test]
+    fn ingest_parses_flags_and_defaults() {
+        let cmd = parse_args([
+            "ingest",
+            "--config",
+            "my.toml",
+            "--start",
+            "2021-01-01",
+            "--end",
+            "2021-02-01",
+            "--resolution",
+            "1h",
+        ])
+        .unwrap();
+        assert_eq!(
+            cmd,
+            Command::Ingest {
+                config: PathBuf::from("my.toml"),
+                start: "2021-01-01".into(),
+                end: "2021-02-01".into(),
+                resolution: "1h".into(),
+            }
+        );
+        // Bare `ingest` defaults the config path and leaves the window empty.
+        assert_eq!(
+            parse_args(["ingest"]).unwrap(),
+            Command::Ingest {
+                config: PathBuf::from("config.toml"),
+                start: String::new(),
+                end: String::new(),
+                resolution: String::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn ingest_rejects_unknown_flag() {
+        assert!(matches!(
+            parse_args(["ingest", "--nope"]),
             Err(CliError::Usage(_))
         ));
     }

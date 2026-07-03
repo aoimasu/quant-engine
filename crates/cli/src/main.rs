@@ -4,7 +4,7 @@
 //! All logic lives in the library so it stays testable (QE-013).
 
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use qe_cli::jobs::backtest::{run_backtest, BacktestParams};
@@ -67,6 +67,12 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             run_dir,
             json,
         }),
+        Command::Ingest {
+            config,
+            start,
+            end,
+            resolution,
+        } => run_ingest_command(&config, &start, &end, &resolution),
     }
 }
 
@@ -142,4 +148,34 @@ fn run_backtest_command(cmd: BacktestCli) -> Result<ExitCode, Box<dyn std::error
             Ok(ExitCode::FAILURE)
         }
     }
+}
+
+/// Dispatch `Command::Ingest`: stream a terminal JSON-line outcome on stdout and set the exit code.
+///
+/// Real market-data decoders live behind the default-off `http` feature (out of scope for QE-253):
+/// this binary ships the fully-wired command plus the in-memory-tested [`run_ingest`] job
+/// (`qe_cli::jobs::ingest`), but no live `HistoricalSource`, so it reports the missing source as a
+/// terminal `{"t":"error"}` line and exits non-zero. Constructing a real source under `http` and
+/// calling `run_ingest` here is the future-work seam.
+fn run_ingest_command(
+    _config: &Path,
+    start: &str,
+    end: &str,
+    resolution: &str,
+) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    let detail = format!("window {start}..{end} at {resolution}");
+    #[cfg(feature = "http")]
+    let msg = format!(
+        "ingest ({detail}): the `http` market-data decoders are not yet implemented \
+         — QE-253 ships the scaffold + in-memory-tested run_ingest; real ingestion is future work"
+    );
+    #[cfg(not(feature = "http"))]
+    let msg = format!(
+        "ingest ({detail}): real market-data ingestion requires the `http` feature \
+         (out of scope for QE-253 — run_ingest is exercised with an in-memory source in tests)"
+    );
+    let mut out = io::stdout().lock();
+    emit_error(&mut out, &msg)?;
+    out.flush()?;
+    Ok(ExitCode::FAILURE)
 }

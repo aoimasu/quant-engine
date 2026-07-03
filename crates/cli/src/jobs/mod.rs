@@ -5,6 +5,7 @@
 pub mod backtest;
 pub mod datetime;
 pub mod features;
+pub mod ingest;
 pub mod metrics;
 pub mod result;
 
@@ -139,6 +140,11 @@ pub enum RunError {
     /// The vintage carried no chromosomes.
     #[error("vintage has no chromosomes")]
     EmptyVintage,
+
+    /// A historical-source fetch/decode failure during ingest (the injectable `HistoricalSource`
+    /// seam surfaced an error).
+    #[error("ingest source failure: {0}")]
+    Ingest(String),
 
     /// A storage-layer failure.
     #[error(transparent)]

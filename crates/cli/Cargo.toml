@@ -10,6 +10,11 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Default-off: the real Binance market-data decoders / live `HistoricalSource` for `qe ingest` live
+# behind this feature (QE-253 ships only the scaffold + in-memory-tested job). Future work fills it in.
+http = []
+
 # The user-facing binary is `qe` (the package/lib is `qe-cli`/`qe_cli`); the Dockerfile and docs
 # invoke `qe`.
 [[bin]]
