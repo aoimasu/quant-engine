@@ -1,10 +1,13 @@
 import {
+  ArrowLeft,
   Circle,
   Database,
   FlaskConical,
   GitBranch,
   LayoutDashboard,
   ListChecks,
+  Play,
+  Plus,
   Search,
   Shield,
   Terminal,
@@ -30,12 +33,15 @@ export interface IconProps extends Omit<LucideProps, 'ref'> {
 }
 
 const REGISTRY: Record<string, LucideIcon> = {
+  'arrow-left': ArrowLeft,
   circle: Circle,
   database: Database,
   'flask-conical': FlaskConical,
   'git-branch': GitBranch,
   'layout-dashboard': LayoutDashboard,
   'list-checks': ListChecks,
+  play: Play,
+  plus: Plus,
   search: Search,
   shield: Shield,
   terminal: Terminal,

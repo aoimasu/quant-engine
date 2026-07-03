@@ -11,6 +11,11 @@ function mockMe(status: number, body?: unknown) {
         headers: { 'Content-Type': 'application/json' },
       });
     }
+    // The authed shell mounts the Backtests area, which lists runs — answer with an empty list so
+    // the session-gate assertions here aren't perturbed by the screen's own data fetch.
+    if (url.endsWith('/api/runs') || url.endsWith('/api/market-data/coverage')) {
+      return new Response('[]', { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }
     return new Response(null, { status: 404 });
   });
 }

@@ -2,28 +2,17 @@ import { useEffect, useState } from 'react';
 import { AppShell } from '../design';
 import { Login } from './Login';
 import { Placeholder } from './Placeholder';
+import { BacktestsArea } from './backtest/BacktestsArea';
+import { MarketData } from './MarketData';
 import { fetchMe, logout, detectRejection, type Me } from '../api/session';
 
 type Status = 'loading' | 'unauth' | 'auth';
 
-/** Research destinations active in v1 (spec §7.2). Screens land in QE-259. */
-const RESEARCH_SCREENS: Record<string, { title: string; icon: string; description: string }> = {
-  strategies: {
-    title: 'Strategies',
-    icon: 'git-branch',
-    description: 'Sealed vintages and the evolved genomes within them. The strategies browser is on the way.',
-  },
-  backtest: {
-    title: 'Backtests',
-    icon: 'flask-conical',
-    description:
-      'Trigger a backtest of a sealed vintage over a window, watch progress, and review the full result.',
-  },
-  data: {
-    title: 'Market data',
-    icon: 'database',
-    description: 'Read-only coverage of the local market-data store — symbols and the date ranges present.',
-  },
+/** Human titles for each Research destination (spec §7.2). */
+const SCREEN_TITLES: Record<string, string> = {
+  strategies: 'Strategies',
+  backtest: 'Backtests',
+  data: 'Market data',
 };
 
 export function App() {
@@ -77,23 +66,29 @@ export function App() {
     return <Login rejected={rejected} />;
   }
 
-  const screen = RESEARCH_SCREENS[active] ?? RESEARCH_SCREENS.backtest;
+  const title = SCREEN_TITLES[active] ?? SCREEN_TITLES.backtest;
   return (
     <AppShell
       active={active}
       onNav={setActive}
-      title={screen.title}
+      title={title}
       userEmail={me?.email}
       onSignOut={() => {
         void logout();
       }}
     >
-      <Placeholder
-        icon={screen.icon}
-        title={screen.title}
-        description={screen.description}
-        ticket="QE-259"
-      />
+      {active === 'data' ? (
+        <MarketData />
+      ) : active === 'strategies' ? (
+        <Placeholder
+          icon="git-branch"
+          title="Strategies"
+          description="Sealed vintages and the evolved genomes within them. The strategies browser is on the way."
+          ticket="a later ticket"
+        />
+      ) : (
+        <BacktestsArea />
+      )}
     </AppShell>
   );
 }
