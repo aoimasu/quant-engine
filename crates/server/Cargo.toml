@@ -27,6 +27,8 @@ serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 thiserror.workspace = true
+# QE-255: opaque run ids (uuid v4) + atomic-write temp filenames.
+uuid.workspace = true
 
 [dev-dependencies]
 tower.workspace = true

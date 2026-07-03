@@ -14,10 +14,15 @@
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use axum::{http::StatusCode, routing::get, Json, Router};
 use serde_json::json;
 use tower_http::services::{ServeDir, ServeFile};
+
+pub mod runs;
+
+pub use runs::{CliJobSpawner, JobSpawner, RunManager};
 
 /// Default bind address when `QE_SERVER_ADDR` is unset. Loopback-only so a fresh run never exposes
 /// the (unauthenticated, this ticket) server on a public interface.
@@ -33,11 +38,27 @@ pub const DEFAULT_ADDR: &str = "127.0.0.1:8080";
 /// resolved, static serving degrades to `404` rather than panicking (see [`build_router`]).
 pub const DEFAULT_STATIC_DIR: &str = "crates/server/static";
 
+/// Default state directory when `QE_SERVER_DATA_DIR` is unset. The run store lives at
+/// `<data_dir>/runs`. A **relative** default (`data`, CWD-relative — never hard-coded absolute),
+/// consistent with the repo's `data/` layout (`qe-config` `storage.market_dir = data/lmdb/market`,
+/// `artifacts_dir = data/artifacts`). Spec §6.4 names this `QE_DATA_DIR`; we keep the crate-local
+/// `QE_SERVER_` prefix for consistency with the QE-254 env vars.
+pub const DEFAULT_DATA_DIR: &str = "data";
+
+/// Default bound on concurrently-running subprocesses when `QE_SERVER_MAX_CONCURRENCY` is unset.
+pub const DEFAULT_MAX_CONCURRENCY: usize = 2;
+
 /// Environment variable naming the bind address (12-factor, `QE_`-prefixed like `qe-config`).
 pub const ENV_ADDR: &str = "QE_SERVER_ADDR";
 
 /// Environment variable naming the static-assets directory.
 pub const ENV_STATIC_DIR: &str = "QE_SERVER_STATIC_DIR";
+
+/// Environment variable naming the state directory (holds the `runs/` store).
+pub const ENV_DATA_DIR: &str = "QE_SERVER_DATA_DIR";
+
+/// Environment variable naming the max number of concurrently-running run subprocesses.
+pub const ENV_MAX_CONCURRENCY: &str = "QE_SERVER_MAX_CONCURRENCY";
 
 /// Server transport configuration (bind address + static-assets dir).
 ///
@@ -49,6 +70,12 @@ pub struct ServerConfig {
     pub addr: SocketAddr,
     /// Directory of built SPA static assets served at `/`.
     pub static_dir: PathBuf,
+    /// State directory; the run store lives at `<data_dir>/runs`.
+    pub data_dir: PathBuf,
+    /// Path to the `qe-cli` (`qe`) binary the server spawns for backtest runs.
+    pub cli_bin: PathBuf,
+    /// Max number of concurrently-running run subprocesses (excess runs stay `queued`).
+    pub max_concurrency: usize,
 }
 
 impl Default for ServerConfig {
@@ -58,6 +85,9 @@ impl Default for ServerConfig {
                 .parse()
                 .expect("DEFAULT_ADDR is a valid socket address"),
             static_dir: PathBuf::from(DEFAULT_STATIC_DIR),
+            data_dir: PathBuf::from(DEFAULT_DATA_DIR),
+            cli_bin: runs::resolve_cli_bin(),
+            max_concurrency: DEFAULT_MAX_CONCURRENCY,
         }
     }
 }
@@ -72,6 +102,12 @@ pub enum ConfigError {
         value: String,
         /// Parser message.
         message: String,
+    },
+    /// `QE_SERVER_MAX_CONCURRENCY` was set but is not a positive integer.
+    #[error("invalid QE_SERVER_MAX_CONCURRENCY=`{value}`: expected a positive integer")]
+    BadConcurrency {
+        /// The offending value.
+        value: String,
     },
 }
 
@@ -93,7 +129,32 @@ impl ServerConfig {
         if let Ok(dir) = std::env::var(ENV_STATIC_DIR) {
             cfg.static_dir = PathBuf::from(dir);
         }
+        if let Ok(dir) = std::env::var(ENV_DATA_DIR) {
+            cfg.data_dir = PathBuf::from(dir);
+        }
+        if let Ok(bin) = std::env::var(runs::spawn::ENV_CLI_BIN) {
+            cfg.cli_bin = PathBuf::from(bin);
+        }
+        if let Ok(raw) = std::env::var(ENV_MAX_CONCURRENCY) {
+            let n: usize = raw
+                .parse()
+                .ok()
+                .filter(|&n| n >= 1)
+                .ok_or_else(|| ConfigError::BadConcurrency { value: raw.clone() })?;
+            cfg.max_concurrency = n;
+        }
         Ok(cfg)
+    }
+
+    /// Build the [`RunManager`] for this config: a [`CliJobSpawner`] over `cli_bin`, a run store at
+    /// `<data_dir>/runs`, and the configured worker-pool bound.
+    pub fn run_manager(&self) -> Arc<RunManager> {
+        let spawner = Arc::new(CliJobSpawner::new(self.cli_bin.clone()));
+        Arc::new(RunManager::new(
+            self.data_dir.join("runs"),
+            spawner,
+            self.max_concurrency,
+        ))
     }
 }
 
@@ -118,13 +179,18 @@ async fn api_not_found() -> StatusCode {
 /// - everything else is served from `static_dir` via `ServeDir`, with a per-request fallback to
 ///   `index.html` so client-side SPA routes still return the app shell. A missing dir/index yields a
 ///   graceful `404` (no panic), which is fine before QE-258 builds the real SPA.
-pub fn build_router(static_dir: &Path) -> Router {
+///
+/// The `/api` sub-router carries the shared [`RunManager`] state (QE-255 run lifecycle); QE-256 will
+/// layer session auth over this same nest.
+pub fn build_router(static_dir: &Path, manager: Arc<RunManager>) -> Router {
     let index = static_dir.join("index.html");
     let static_service = ServeDir::new(static_dir).fallback(ServeFile::new(index));
 
     let api = Router::new()
         .route("/health", get(health))
-        .fallback(api_not_found);
+        .merge(runs::api::routes())
+        .fallback(api_not_found)
+        .with_state(manager);
 
     Router::new()
         .nest("/api", api)
@@ -174,18 +240,26 @@ mod tests {
         {
             let _a = EnvGuard::clear(ENV_ADDR);
             let _s = EnvGuard::clear(ENV_STATIC_DIR);
+            let _d = EnvGuard::clear(ENV_DATA_DIR);
+            let _c = EnvGuard::clear(ENV_MAX_CONCURRENCY);
             let cfg = ServerConfig::from_env().expect("defaults resolve");
             assert_eq!(cfg.addr.to_string(), DEFAULT_ADDR);
             assert_eq!(cfg.static_dir, PathBuf::from(DEFAULT_STATIC_DIR));
+            assert_eq!(cfg.data_dir, PathBuf::from(DEFAULT_DATA_DIR));
+            assert_eq!(cfg.max_concurrency, DEFAULT_MAX_CONCURRENCY);
         }
 
-        // Env overrides both knobs.
+        // Env overrides every knob.
         {
             let _a = EnvGuard::set(ENV_ADDR, "0.0.0.0:9099");
             let _s = EnvGuard::set(ENV_STATIC_DIR, "/srv/spa");
+            let _d = EnvGuard::set(ENV_DATA_DIR, "/srv/state");
+            let _c = EnvGuard::set(ENV_MAX_CONCURRENCY, "5");
             let cfg = ServerConfig::from_env().expect("overrides resolve");
             assert_eq!(cfg.addr.to_string(), "0.0.0.0:9099");
             assert_eq!(cfg.static_dir, PathBuf::from("/srv/spa"));
+            assert_eq!(cfg.data_dir, PathBuf::from("/srv/state"));
+            assert_eq!(cfg.max_concurrency, 5);
         }
 
         // A set-but-unparseable address is a hard error.
@@ -193,6 +267,17 @@ mod tests {
             let _a = EnvGuard::set(ENV_ADDR, "not-an-addr");
             let err = ServerConfig::from_env().expect_err("invalid addr must error");
             assert!(matches!(err, ConfigError::BadAddr { .. }), "got {err:?}");
+        }
+
+        // A set-but-invalid (zero / non-numeric) concurrency is a hard error.
+        {
+            let _a = EnvGuard::clear(ENV_ADDR);
+            let _c = EnvGuard::set(ENV_MAX_CONCURRENCY, "0");
+            let err = ServerConfig::from_env().expect_err("zero concurrency must error");
+            assert!(
+                matches!(err, ConfigError::BadConcurrency { .. }),
+                "got {err:?}"
+            );
         }
     }
 }
