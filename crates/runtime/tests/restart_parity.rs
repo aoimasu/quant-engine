@@ -11,6 +11,8 @@
 //! regressed to a trailing window (the exact bug this guards), the true-max reference would diverge and this
 //! test would fail.
 
+#![allow(clippy::unwrap_used)] // integration test: whole file is test-only code (QE-267)
+
 use qe_determinism::Lineage;
 use qe_domain::{Bar, Price, Qty, Resolution, Timestamp};
 use qe_risk::{CalibrationProfile, Fraction};

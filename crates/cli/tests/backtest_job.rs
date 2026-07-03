@@ -8,6 +8,8 @@
 //! `cargo test -p qe-cli --test backtest_job regenerate_fixtures -- --ignored --exact`
 //! (run once, eyeball the golden, commit). The sample store is reused by QE-253.
 
+#![allow(clippy::unwrap_used)] // integration test: whole file is test-only code (QE-267)
+
 use std::path::{Path, PathBuf};
 
 use qe_cli::jobs::backtest::{run_backtest, BacktestParams};

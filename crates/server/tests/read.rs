@@ -9,6 +9,8 @@
 //!   fixture is never mutated by the store's schema-init write txn);
 //! - `sample_vintage.json` — one sealed vintage (`vintage_id = "sample_vintage"`), read in place.
 
+#![allow(clippy::unwrap_used)] // integration test: whole file is test-only code (QE-267)
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 

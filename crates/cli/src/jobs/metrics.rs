@@ -55,7 +55,7 @@ pub fn cagr(equity: &[f64], years: f64) -> f64 {
     if years <= 0.0 || equity.len() < 2 {
         return 0.0;
     }
-    let last = *equity.last().unwrap();
+    let last = *equity.last().expect("equity.len() >= 2 verified above");
     if last <= 0.0 {
         return 0.0;
     }

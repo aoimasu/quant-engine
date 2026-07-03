@@ -2,6 +2,8 @@
 //! them checksum-verified, and prove a re-run fetches nothing already present + verified (AC #1);
 //! plus schema-drift detection across months.
 
+#![allow(clippy::unwrap_used)] // integration test: whole file is test-only code (QE-267)
+
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io::{Cursor, Write};

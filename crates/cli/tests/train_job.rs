@@ -10,6 +10,8 @@
 //!  3. two runs with the **same seed** produce the **same vintage id and content hash** (deterministic),
 //!     and a different seed produces a different vintage id.
 
+#![allow(clippy::unwrap_used)] // integration test: whole file is test-only code (QE-267)
+
 use std::path::{Path, PathBuf};
 
 use qe_cli::jobs::backtest::{run_backtest, BacktestParams};

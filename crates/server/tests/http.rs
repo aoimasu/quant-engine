@@ -2,6 +2,8 @@
 //! `tower::ServiceExt::oneshot` (no real network bind) to assert the health endpoint and static-index
 //! serving behave, and that the reserved `/api` namespace returns `404` for unknown routes.
 
+#![allow(clippy::unwrap_used)] // integration test: whole file is test-only code (QE-267)
+
 use std::path::Path;
 use std::sync::Arc;
 

@@ -93,6 +93,10 @@ unsafe_code = "deny"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
+# QE-267: enforce the no-bare-`unwrap` convention as a compile-time invariant on the production panic
+# path. `unwrap_used` is a clippy `restriction` lint (not in `all`); `allow-unwrap-in-tests = true` in
+# `clippy.toml` exempts `#[cfg(test)]` modules. `expect_used` is deliberately left off (see QE-268).
+unwrap_used = "deny"
 
 [profile.release]
 lto = "thin"

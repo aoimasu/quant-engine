@@ -5,6 +5,8 @@
 //! coverage rows. `ingest_populates_store_from_in_memory_source` drives [`run_ingest`] with an
 //! in-memory [`HistoricalSource`] and confirms the bars land in a fresh store.
 
+#![allow(clippy::unwrap_used)] // integration test: whole file is test-only code (QE-267)
+
 use std::path::{Path, PathBuf};
 
 use qe_cli::jobs::ingest::{coverage, run_ingest, CoverageRow, IngestParams};

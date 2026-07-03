@@ -1,6 +1,8 @@
 //! QE-108 acceptance: assemble per-bar feature vectors, cache the complete ones into the synthetic
 //! store, and prove the round-trip + lineage staleness + reproducibility.
 
+#![allow(clippy::unwrap_used)] // integration test: whole file is test-only code (QE-267)
+
 use rust_decimal::Decimal;
 
 use qe_domain::{Bar, InstrumentId, Price, Qty, Resolution, Timestamp};
