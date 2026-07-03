@@ -91,6 +91,7 @@ fn runtime_is_decoupled_from_training() {
         "qe-ensemble",
         "qe-signal",
         "qe-domain",
+        "qe-server",
     ] {
         assert!(graph.contains_key(required), "missing crate {required}");
     }
@@ -102,4 +103,10 @@ fn runtime_is_decoupled_from_training() {
     // training crates must not reach runtime
     assert_no_dependency(&graph, "qe-wfo", "qe-runtime");
     assert_no_dependency(&graph, "qe-ensemble", "qe-runtime");
+
+    // QE-254 / ADR D4a: `qe-server` is a second composition root (admin-UI backend). It reuses the
+    // training-side + shared crates but must stay off the live trading path — no transitive edge to
+    // `qe-runtime`/`qe-venue` — so its async runtime never links the live venue side.
+    assert_no_dependency(&graph, "qe-server", "qe-runtime");
+    assert_no_dependency(&graph, "qe-server", "qe-venue");
 }
