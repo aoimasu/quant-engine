@@ -538,6 +538,92 @@ mod tests {
         assert!((t.return_frac - expected).abs() < 1e-12);
     }
 
+    /// A short-only genome: enter short when feature 0's state is high `[3,4]`; exit after `hold` bars.
+    /// The `short_entry` bank mirrors `long_genome`'s long bank, with the long bank disabled.
+    fn short_genome(hold: u16, size_bps: u16) -> Genome {
+        let mut short = [Clause {
+            enabled: false,
+            feature: 0,
+            lo: 0,
+            hi: 0,
+        }; CLAUSES_PER_SET];
+        short[0] = Clause {
+            enabled: true,
+            feature: 0,
+            lo: 3,
+            hi: 4,
+        };
+        let disabled = RuleSet {
+            clauses: [Clause {
+                enabled: false,
+                feature: 0,
+                lo: 0,
+                hi: 0,
+            }; CLAUSES_PER_SET],
+            min_satisfied: 1,
+        };
+        Genome {
+            version: REP_VERSION,
+            long_entry: disabled,
+            short_entry: RuleSet {
+                clauses: short,
+                min_satisfied: 1,
+            },
+            exit: ExitParams {
+                max_holding_bars: hold,
+                exit_on_opposite: false,
+            },
+            risk: RiskParams { size_bps },
+        }
+    }
+
+    /// The falling-price mirror of [`single_entry_uptrend`]: feature-0 is high only on bar 0 (so only
+    /// bar 0's decision enters) and price drifts **down**, so a single short round-trip profits gross.
+    fn single_entry_downtrend(schema: &FeatureSchema, n: usize) -> Vec<Bar> {
+        (0..n)
+            .map(|i| {
+                let state0 = if i == 0 { 4 } else { 0 };
+                let price = Decimal::from(200 - i as i64); // −1 per bar → a short trade profits gross
+                bar(schema, i as i64 * 60_000, price, state0)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn single_winning_short_round_trip_records_one_trade() {
+        let s = schema();
+        let bars = single_entry_downtrend(&s, 8);
+        let g = short_genome(2, 5_000); // exit 2 bars after entry
+        let cfg = BacktestConfig {
+            min_trades: 1,
+            windows: 2,
+            ..BacktestConfig::default()
+        };
+
+        let (res, fills) = backtest_with_trades(&g, &bars, &cfg);
+
+        // Exactly one entry ⇒ the aggregate counter and the recorded fills agree.
+        assert_eq!(
+            res.trades, 1,
+            "the engineered series must enter exactly once"
+        );
+        assert_eq!(fills.len(), 1, "one closed round-trip ⇒ one TradeFill");
+
+        let t = fills[0];
+        assert_eq!(t.side, Direction::Short);
+        assert!(t.entry_idx < t.exit_idx, "exit must be after entry");
+        // Falling price: the short exits below where it entered.
+        assert!(t.exit_px > Decimal::ZERO && t.exit_px < t.entry_px);
+        assert!(
+            t.return_frac > 0.0,
+            "a short on a falling series is a winner (return_frac > 0), got {}",
+            t.return_frac
+        );
+        // return_frac is the signed gross price return of the short round-trip: (entry − exit) / entry.
+        let expected = ((t.entry_px - t.exit_px) / t.entry_px).to_f64().unwrap();
+        assert!((t.return_frac - expected).abs() < 1e-12);
+    }
+
     #[test]
     fn backtest_delegates_to_with_trades() {
         let s = schema();
