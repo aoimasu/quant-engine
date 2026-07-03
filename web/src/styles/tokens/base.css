@@ -1,0 +1,71 @@
+/* ------------------------------------------------------------------
+   Quant Engine — Base / reset
+   Applied globally by consumers. Sets the dark canvas, base type,
+   sensible resets, and tabular numerals on data elements by default.
+   Ported verbatim from the Claude Design "Quant Engine Design System".
+------------------------------------------------------------------ */
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  background: var(--bg-app);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: var(--fs-body);
+  line-height: var(--lh-normal);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+h1, h2, h3, h4, h5 {
+  font-family: var(--font-display);
+  font-weight: var(--fw-semibold);
+  letter-spacing: var(--ls-tight);
+  line-height: var(--lh-tight);
+  margin: 0;
+  color: var(--text-primary);
+}
+
+p { margin: 0; }
+
+a {
+  color: var(--text-link);
+  text-decoration: none;
+}
+a:hover { text-decoration: underline; }
+
+code, kbd, pre, samp { font-family: var(--font-mono); }
+
+/* Numeric data defaults to tabular mono when tagged data-num */
+[data-num] {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1, "zero" 1;
+}
+
+::selection { background: var(--accent-fill-soft); }
+
+/* Custom scrollbar — thin, dark */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--ink-600) transparent;
+}
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-thumb {
+  background: var(--ink-600);
+  border-radius: var(--radius-full);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+*::-webkit-scrollbar-thumb:hover { background: var(--ink-500); }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    transition-duration: 0.001ms !important;
+  }
+}

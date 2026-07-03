@@ -1,0 +1,37 @@
+/* ------------------------------------------------------------------
+   Quant Engine — Spacing & layout tokens
+   4px base grid. Dense by default (this is a data product), with
+   named steps for the common gaps.
+   Ported verbatim from the Claude Design "Quant Engine Design System".
+------------------------------------------------------------------ */
+
+:root {
+  --space-0: 0;
+  --space-px: 1px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+  --space-16: 64px;
+  --space-20: 80px;
+  --space-24: 96px;
+
+  /* Semantic spacing */
+  --gap-inline: var(--space-2);     /* icon ↔ label */
+  --pad-control: var(--space-3);    /* buttons/inputs inner */
+  --pad-card: var(--space-5);       /* card padding */
+  --pad-cell: var(--space-3);       /* table cell */
+  --gap-stack: var(--space-4);      /* vertical rhythm */
+  --gap-section: var(--space-12);   /* major sections */
+
+  /* Layout dimensions */
+  --sidebar-w: 248px;
+  --topbar-h: 52px;
+  --content-max: 1280px;
+  --panel-min: 320px;
+}

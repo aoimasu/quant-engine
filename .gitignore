@@ -2,3 +2,10 @@
 **/*.rs.bk
 Cargo.lock.bak
 .DS_Store
+
+# Frontend (web/) — Node toolchain
+web/node_modules/
+web/dist/
+web/coverage/
+web/*.local
+web/.vite/
