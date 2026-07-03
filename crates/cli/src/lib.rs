@@ -1,9 +1,11 @@
 //! quant-engine CLI library — the composition root for the runnable pipelines.
 //!
-//! QE-013 wires the **training-run skeleton**: load config (QE-002), resolve the point-in-time
-//! universe (QE-012), ensure the configurable state directories exist, and emit a content-addressed
-//! **vintage manifest** built from a real [`qe_determinism::Lineage`] (QE-006). The training *stages*
-//! (QE-101+) hang off [`run_train`]; this already produces a resolvable vintage from real inputs.
+//! QE-260 wires the **real training-search job**: load config (QE-002), resolve the point-in-time
+//! universe (QE-012), ensure the configurable state directories exist, build a real
+//! [`qe_determinism::Lineage`] (QE-006), and run the MAP-Elites search → ensemble → validation → G1 gate
+//! → **seal a vintage** pipeline ([`jobs::train`]). This module keeps the config/universe/lineage/dir
+//! responsibilities and delegates the deterministic pipeline to the job (mirroring how the backtest
+//! command builds `BacktestParams`).
 //!
 //! The logic lives here (not in `main.rs`) so it is unit- and integration-testable.
 
@@ -13,12 +15,11 @@ pub mod jobs;
 
 use qe_config::Config;
 use qe_determinism::Lineage;
-use qe_domain::VintageHash;
-use serde::Serialize;
 use thiserror::Error;
 
-/// The vintage-manifest schema version. Bump on an incompatible manifest-shape change.
-pub const VINTAGE_MANIFEST_SCHEMA: u32 = 1;
+use jobs::train::{run_train_job, TrainParams};
+pub use jobs::train::{TrainOutcome, TrainResultDoc};
+use jobs::{ProgressLine, RunError};
 
 /// Errors from a CLI run.
 #[derive(Debug, Error)]
@@ -31,15 +32,11 @@ pub enum CliError {
     #[error(transparent)]
     Config(#[from] qe_config::ConfigError),
 
-    /// Lineage hashing failure.
-    #[error(transparent)]
-    Lineage(#[from] qe_determinism::LineageError),
+    /// The config carried no instruments to train over.
+    #[error("config has no instruments to train over")]
+    EmptyUniverse,
 
-    /// The lineage id was not a valid vintage hash (should never happen — it's a SHA-256).
-    #[error("invalid vintage hash: {0}")]
-    Vintage(qe_domain::DomainError),
-
-    /// Filesystem error creating a state directory or writing the manifest.
+    /// Filesystem error creating a state directory.
     #[error("io error at {path}: {source}")]
     Io {
         /// The path being operated on.
@@ -48,48 +45,58 @@ pub enum CliError {
         source: std::io::Error,
     },
 
-    /// The manifest could not be serialised.
-    #[error("failed to serialise vintage manifest: {0}")]
-    Serialize(String),
+    /// A training-job runtime failure (surfaced as the terminal `{"t":"error"}` line + non-zero exit).
+    #[error(transparent)]
+    Run(#[from] RunError),
 }
 
-/// A produced vintage: its content-addressed id and the manifest path on disk.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Vintage {
-    /// The vintage id — a 64-hex SHA-256 over the lineage (the artefact primary key).
-    pub id: VintageHash,
-    /// Where the manifest was written (`<artifacts_dir>/vintages/<id>/manifest.json`).
-    pub manifest_path: PathBuf,
+/// The tunable inputs to a training run, parsed from the `train` command flags. The window + budget the
+/// [`run_train`] job needs on top of the config-derived store/universe/lineage.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TrainOptions {
+    /// Inclusive window start (`YYYY-MM-DD`).
+    pub start: String,
+    /// Exclusive window end (`YYYY-MM-DD`).
+    pub end: String,
+    /// Bar resolution (`1h`, …).
+    pub resolution: String,
+    /// Master search seed override; `None` uses the config seed (`determinism.seed`).
+    pub seed: Option<u64>,
+    /// MAP-Elites search generations (small-budget default).
+    pub generations: usize,
+    /// Variation steps per direction per generation.
+    pub population: usize,
+    /// Number of final bars reserved as the untouched G1 holdout.
+    pub holdout: usize,
+    /// Embargo bars purged between the train window and the holdout.
+    pub embargo: usize,
 }
 
-/// One instrument's point-in-time window, as recorded in the manifest.
-#[derive(Debug, Clone, Serialize)]
-struct InstrumentRecord {
-    instrument: String,
-    listed_ms: i64,
-    delisted_ms: Option<i64>,
-}
-
-/// The on-disk vintage manifest — content-addressed, reproducible (no wall-clock).
-#[derive(Debug, Clone, Serialize)]
-struct VintageManifest {
-    schema: u32,
-    vintage_id: String,
-    profile: String,
-    lineage: Lineage,
-    /// The full universe roster, including delisted symbols (no survivorship drop).
-    universe: Vec<InstrumentRecord>,
-}
-
-/// Run the training pipeline for `cfg`, producing a vintage manifest under the configured
-/// artefacts directory. `code_commit` is the build's code provenance (folded into the vintage id),
-/// passed in so the result is deterministic and testable.
+/// Run the training-search pipeline for `cfg`, sealing a vintage under the configured artefacts
+/// directory and streaming structured [`ProgressLine`]s through `emit`. `code_commit` is the build's
+/// code provenance (folded into the lineage / vintage id), passed in so the result is deterministic and
+/// testable.
+///
+/// Keeps the config/universe/lineage/dir responsibilities of the old QE-013 skeleton, then delegates the
+/// real search → ensemble → validation → G1 → seal pipeline to [`jobs::train::run_train_job`].
 ///
 /// # Errors
-/// [`CliError`] on config/universe validation, directory creation, lineage hashing, or manifest IO.
-pub fn run_train(cfg: &Config, code_commit: &str) -> Result<Vintage, CliError> {
-    // 1. Resolve the point-in-time universe (validates listing/delisting windows).
-    let universe = cfg.universe()?;
+/// [`CliError`] on config/universe validation, an empty instrument list, directory creation, or a
+/// training-job runtime failure ([`RunError`]).
+pub fn run_train(
+    cfg: &Config,
+    opts: &TrainOptions,
+    code_commit: &str,
+    emit: &mut dyn FnMut(ProgressLine),
+) -> Result<TrainOutcome, CliError> {
+    // 1. Resolve + validate the point-in-time universe (listing/delisting windows). v1 trains over the
+    //    first configured instrument (single-instrument, mirroring the QE-251 backtest job).
+    let _universe = cfg.universe()?;
+    let instrument = cfg
+        .instruments
+        .first()
+        .cloned()
+        .ok_or(CliError::EmptyUniverse)?;
 
     // 2. Ensure every *configurable* persistent-state directory exists. All paths come from config;
     //    none are absolute or hard-coded here.
@@ -101,50 +108,36 @@ pub fn run_train(cfg: &Config, code_commit: &str) -> Result<Vintage, CliError> {
         create_dir(dir)?;
     }
 
-    // 3. Build the vintage lineage from real inputs (config hash + seed). No input snapshot yet
-    //    (the ingest stages are P1), so the snapshot id is empty.
-    let lineage = Lineage::from_config(cfg, "", code_commit, vec![cfg.determinism.seed])?;
-    let id = VintageHash::new(lineage.id()?).map_err(CliError::Vintage)?;
+    // 3. Build the vintage lineage from real inputs (config hash + seed + commit). No input snapshot yet
+    //    (the ingest stages are P1), so the snapshot id is empty. The seed is the search master seed, so
+    //    the sealed vintage id (= lineage id) is deterministic for a fixed seed.
+    let seed = opts.seed.unwrap_or(cfg.determinism.seed);
+    let lineage = Lineage::from_config(cfg, "", code_commit, vec![seed])?;
 
-    // 4. Write the manifest to <artifacts_dir>/vintages/<id>/manifest.json.
-    let manifest = VintageManifest {
-        schema: VINTAGE_MANIFEST_SCHEMA,
-        vintage_id: id.as_str().to_owned(),
-        profile: cfg.profile.as_str().to_owned(),
+    // 4. Build the job params from config + options and run the pipeline.
+    let params = TrainParams {
+        store_path: PathBuf::from(&cfg.storage.market_dir),
+        map_size: qe_storage::DEFAULT_MAP_SIZE,
+        vintage_root: PathBuf::from(&cfg.storage.artifacts_dir).join("vintages"),
+        instrument,
+        start: opts.start.clone(),
+        end: opts.end.clone(),
+        resolution: opts.resolution.clone(),
+        seed,
+        generations: opts.generations,
+        population: opts.population,
+        holdout: opts.holdout,
+        embargo: opts.embargo,
         lineage,
-        universe: universe
-            .all_known()
-            .iter()
-            .map(|l| InstrumentRecord {
-                instrument: l.instrument().as_str().to_owned(),
-                listed_ms: l.listed().millis(),
-                delisted_ms: l.delisted().map(|d| d.millis()),
-            })
-            .collect(),
+        profile: cfg.profile.as_str().to_owned(),
     };
 
-    let vintage_dir = Path::new(&cfg.storage.artifacts_dir)
-        .join("vintages")
-        .join(id.as_str());
-    create_dir(&vintage_dir)?;
-    let manifest_path = vintage_dir.join("manifest.json");
-    let bytes =
-        serde_json::to_vec_pretty(&manifest).map_err(|e| CliError::Serialize(e.to_string()))?;
-    write_file(&manifest_path, &bytes)?;
-
-    Ok(Vintage { id, manifest_path })
+    Ok(run_train_job(&params, emit)?)
 }
 
 fn create_dir(path: impl AsRef<Path>) -> Result<(), CliError> {
     let path = path.as_ref();
     std::fs::create_dir_all(path).map_err(|source| CliError::Io {
-        path: path.display().to_string(),
-        source,
-    })
-}
-
-fn write_file(path: &Path, bytes: &[u8]) -> Result<(), CliError> {
-    std::fs::write(path, bytes).map_err(|source| CliError::Io {
         path: path.display().to_string(),
         source,
     })
@@ -157,12 +150,33 @@ fn write_file(path: &Path, bytes: &[u8]) -> Result<(), CliError> {
 pub enum Command {
     /// Print the version and exit (the bare invocation).
     Version,
-    /// Run the training pipeline.
+    /// Run the training-search pipeline (QE-260): MAP-Elites search → ensemble → validation → G1 gate →
+    /// seal a vintage.
     Train {
         /// Config file path.
         config: PathBuf,
         /// Operating profile.
         profile: qe_config::Profile,
+        /// Run directory the job writes `result.json` into.
+        run_dir: PathBuf,
+        /// Emit JSON-line progress on stdout.
+        json: bool,
+        /// Inclusive training window start (`YYYY-MM-DD`).
+        start: String,
+        /// Exclusive training window end (`YYYY-MM-DD`).
+        end: String,
+        /// Bar resolution (`1h`, …).
+        resolution: String,
+        /// Master search seed override (`None` ⇒ the config seed).
+        seed: Option<u64>,
+        /// MAP-Elites search generations.
+        generations: usize,
+        /// Variation steps per direction per generation.
+        population: usize,
+        /// Final bars reserved as the untouched G1 holdout.
+        holdout: usize,
+        /// Embargo bars purged between the train window and the holdout.
+        embargo: usize,
     },
     /// Backtest a sealed vintage over a window (QE-251).
     Backtest {
@@ -223,26 +237,49 @@ where
         "train" => {
             let mut config = PathBuf::from("config.toml");
             let mut profile = qe_config::Profile::Train;
+            let mut run_dir = PathBuf::new();
+            let mut json = false;
+            let mut start = String::new();
+            let mut end = String::new();
+            let mut resolution = "1h".to_owned();
+            let mut seed: Option<u64> = None;
+            let mut generations = DEFAULT_TRAIN_GENERATIONS;
+            let mut population = DEFAULT_TRAIN_POPULATION;
+            let mut holdout = DEFAULT_TRAIN_HOLDOUT;
+            let mut embargo = DEFAULT_TRAIN_EMBARGO;
             while let Some(flag) = it.next() {
                 match flag.as_str() {
-                    "--config" => {
-                        let v = it
-                            .next()
-                            .ok_or_else(|| CliError::Usage("--config needs a value".to_owned()))?;
-                        config = PathBuf::from(v);
-                    }
-                    "--profile" => {
-                        let v = it
-                            .next()
-                            .ok_or_else(|| CliError::Usage("--profile needs a value".to_owned()))?;
-                        profile = parse_profile(&v)?;
-                    }
+                    "--config" => config = PathBuf::from(value(&mut it, "--config")?),
+                    "--profile" => profile = parse_profile(&value(&mut it, "--profile")?)?,
+                    "--run-dir" => run_dir = PathBuf::from(value(&mut it, "--run-dir")?),
+                    "--json" => json = true,
+                    "--start" => start = value(&mut it, "--start")?,
+                    "--end" => end = value(&mut it, "--end")?,
+                    "--resolution" => resolution = value(&mut it, "--resolution")?,
+                    "--seed" => seed = Some(parse_usize_flag(&mut it, "--seed")? as u64),
+                    "--generations" => generations = parse_usize_flag(&mut it, "--generations")?,
+                    "--population" => population = parse_usize_flag(&mut it, "--population")?,
+                    "--holdout" => holdout = parse_usize_flag(&mut it, "--holdout")?,
+                    "--embargo" => embargo = parse_usize_flag(&mut it, "--embargo")?,
                     other => {
                         return Err(CliError::Usage(format!("unknown flag `{other}`")));
                     }
                 }
             }
-            Ok(Command::Train { config, profile })
+            Ok(Command::Train {
+                config,
+                profile,
+                run_dir,
+                json,
+                start,
+                end,
+                resolution,
+                seed,
+                generations,
+                population,
+                holdout,
+                embargo,
+            })
         }
         "backtest" => {
             let mut vintage: Option<String> = None;
@@ -324,6 +361,18 @@ where
     }
 }
 
+/// Default MAP-Elites search generations for `train` (small budget — a fixture run is sub-second).
+pub const DEFAULT_TRAIN_GENERATIONS: usize = 8;
+/// Default variation steps per direction per generation for `train`.
+pub const DEFAULT_TRAIN_POPULATION: usize = 24;
+/// Default number of final bars reserved as the untouched G1 holdout for `train`. A backtest over `N`
+/// bars yields `N − 1` returns, so 31 holdout bars give 30 holdout **returns** — meeting G1's default
+/// `min_holdout_samples = 30`, so the holdout-samples criterion is satisfiable at the default budget
+/// (30 holdout bars would give only 29 returns and could never pass it).
+pub const DEFAULT_TRAIN_HOLDOUT: usize = 31;
+/// Default embargo bars purged between the train window and the holdout for `train`.
+pub const DEFAULT_TRAIN_EMBARGO: usize = 2;
+
 /// Pull the value that must follow a flag, or a `Usage` error naming the flag.
 fn value<I>(it: &mut I, flag: &str) -> Result<String, CliError>
 where
@@ -331,6 +380,16 @@ where
 {
     it.next()
         .ok_or_else(|| CliError::Usage(format!("{flag} needs a value")))
+}
+
+/// Pull and parse a non-negative integer flag value (`--generations`, `--seed`, …).
+fn parse_usize_flag<I>(it: &mut I, flag: &str) -> Result<usize, CliError>
+where
+    I: Iterator<Item = String>,
+{
+    let v = value(it, flag)?;
+    v.parse()
+        .map_err(|_| CliError::Usage(format!("{flag} expects a non-negative integer, got `{v}`")))
 }
 
 fn parse_profile(s: &str) -> Result<qe_config::Profile, CliError> {
@@ -356,20 +415,68 @@ mod tests {
 
     #[test]
     fn train_parses_flags_and_defaults() {
+        // Bare `train`: config + budget defaults, empty window (supplied at runtime), `1h` resolution.
         let cmd = parse_args(["train"]).unwrap();
         assert_eq!(
             cmd,
             Command::Train {
                 config: PathBuf::from("config.toml"),
                 profile: qe_config::Profile::Train,
+                run_dir: PathBuf::new(),
+                json: false,
+                start: String::new(),
+                end: String::new(),
+                resolution: "1h".to_owned(),
+                seed: None,
+                generations: DEFAULT_TRAIN_GENERATIONS,
+                population: DEFAULT_TRAIN_POPULATION,
+                holdout: DEFAULT_TRAIN_HOLDOUT,
+                embargo: DEFAULT_TRAIN_EMBARGO,
             }
         );
-        let cmd = parse_args(["train", "--config", "my.toml", "--profile", "runtime-sim"]).unwrap();
+        // Every flag overridden.
+        let cmd = parse_args([
+            "train",
+            "--config",
+            "my.toml",
+            "--profile",
+            "runtime-sim",
+            "--run-dir",
+            "/tmp/r",
+            "--json",
+            "--start",
+            "2021-01-01",
+            "--end",
+            "2021-01-10",
+            "--resolution",
+            "5m",
+            "--seed",
+            "7",
+            "--generations",
+            "3",
+            "--population",
+            "10",
+            "--holdout",
+            "12",
+            "--embargo",
+            "1",
+        ])
+        .unwrap();
         assert_eq!(
             cmd,
             Command::Train {
                 config: PathBuf::from("my.toml"),
                 profile: qe_config::Profile::RuntimeSim,
+                run_dir: PathBuf::from("/tmp/r"),
+                json: true,
+                start: "2021-01-01".to_owned(),
+                end: "2021-01-10".to_owned(),
+                resolution: "5m".to_owned(),
+                seed: Some(7),
+                generations: 3,
+                population: 10,
+                holdout: 12,
+                embargo: 1,
             }
         );
     }
