@@ -7,11 +7,19 @@
 //! bar `close` price and funding into decision bars.
 //!
 //! **Schema sourcing (design note, decision 1).** The vintage does *not* persist the catalogue config
-//! (`CatalogueConfig.states`) — neither `VintageContent`, `CalibrationProfile`, nor `Genome` records it.
-//! The schema is therefore built from [`CatalogueConfig::default`] (the canonical catalogue,
-//! `CATALOGUE_VERSION`) — the same schema training evolves against — and compatibility is enforced by
-//! asserting every chromosome is valid against it ([`check_schema`]); any mismatch is a loud
-//! [`RunError::SchemaMismatch`], never a silent mis-decode.
+//! (`CatalogueConfig.states` / `CATALOGUE_VERSION`) — neither `VintageContent`, `CalibrationProfile`,
+//! nor `Genome` records it. The schema is therefore built from [`CatalogueConfig::default`] (the
+//! canonical catalogue at the current `CATALOGUE_VERSION`) — the same schema training evolves against —
+//! and [`check_schema`] asserts every chromosome is valid against it.
+//!
+//! **Scope of the guard (important — not a full drift check).** [`Genome::is_valid`] only *bounds-checks*
+//! each clause: feature index `< schema.len()` and state bounds `< num_states`. So the resulting
+//! [`RunError::SchemaMismatch`] catches only **out-of-range** drift (a genome addressing a feature/state
+//! this build's catalogue no longer has). It does **not** detect *identity* drift that keeps the same
+//! width and `num_states` — e.g. a catalogue **reorder** (clause indices silently mean a different
+//! indicator) or a `CATALOGUE_VERSION` bump with the same shape. Those are undetectable today because
+//! the vintage persists neither `CATALOGUE_VERSION` nor `states`; pinning them in the artefact so an
+//! exact schema match can be verified is a recommended follow-up (tracked separately).
 
 use std::collections::BTreeMap;
 

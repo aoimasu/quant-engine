@@ -35,10 +35,12 @@ Result-contract field names follow `docs/superpowers/specs/2026-07-02-admin-ui-t
    (feature indices `< schema.len()`, state bounds `< num_states`). Any mismatch ⇒ `RunError::SchemaMismatch`.
    This is the strongest compatibility check the persisted artefact allows.
 2. **Cost mapping.** `taker_fee_bps` → `FeeSchedule.taker = Decimal(taker_fee_bps)/10_000` (maker left at the
-   VIP0 default; the backtester fills as taker). `slippage_model` string is **recorded verbatim** in
-   `costs.slippage_model`; the engine uses its configured `SlippageModel` (linear spread+impact). The
-   `"square-root-impact"` label is the contract's cost tag, not a re-parametrisation of the friction model —
-   documented so the label↔engine relationship is explicit, not silently dropped.
+   VIP0 default; the backtester fills as taker). `slippage_model` is a **nominal label**: the string is
+   **recorded verbatim** in `costs.slippage_model` (it captures the *requested* model), but the engine
+   applies its default *linear* `SlippageModel` (spread + size-impact) regardless — so e.g.
+   `"square-root-impact"` is a contract tag, **not** necessarily the friction the v1 engine actually applied.
+   Documented so the label↔engine relationship is explicit, not silently dropped; wiring the label through
+   to a real square-root-impact friction model is a future enhancement.
 3. **Single-instrument ensemble (v1).** `backtest()` runs one genome over one bar series. v1 backtests the
    ensemble over the **first symbol in `--universe`** (errors if empty): every chromosome runs over that
    instrument's decision bars and per-bar returns are weight-aggregated by the vintage `weights`
@@ -81,5 +83,12 @@ IEEE double on arm64 — no x87 extended precision), serialised via serde_json/r
 
 - **LMDB fixture portability** — mitigated by small map_size + 64-bit LE on both targets + tempdir copy.
 - **Golden brittleness** — any metric formula change re-bakes the golden; acceptable (it *is* the contract lock).
-- **Schema drift** — if `CATALOGUE_VERSION`/catalogue set changes, old vintages fail `is_valid` ⇒ `SchemaMismatch`
-  (loud, not silent) — the correct behaviour.
+- **Schema drift (partial guard — not fully caught).** `check_schema` uses `Genome::is_valid`, which only
+  *bounds-checks* clause feature indices (`< schema.len()`) and state values (`< num_states`). So
+  `SchemaMismatch` fires only on **out-of-range** drift (a genome addressing a feature/state the current
+  catalogue no longer has). It does **not** detect *identity* drift that preserves width and `num_states` —
+  a catalogue **reorder** (a clause index silently rebinds to a different indicator) or a `CATALOGUE_VERSION`
+  bump of the same shape. These are undetectable today because the vintage persists neither
+  `CATALOGUE_VERSION` nor `states`. **Recommended follow-up (tracked separately):** pin `CATALOGUE_VERSION` +
+  `states` (or the full `FeatureSchema` fingerprint) in the vintage artefact so an exact schema-identity
+  match can be verified at load, upgrading the guard from bounds-only to full drift detection.

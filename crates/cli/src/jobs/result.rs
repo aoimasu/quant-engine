@@ -68,7 +68,10 @@ pub struct Universe {
 pub struct Costs {
     /// Taker fee in basis points.
     pub taker_fee_bps: f64,
-    /// Slippage-model label.
+    /// **Nominal** slippage-model label: records the *requested* model verbatim (e.g.
+    /// `"square-root-impact"`). It is not necessarily the friction the v1 engine applied — the
+    /// backtester runs its default *linear* `FrictionConfig` (spread + size-impact); this string is a
+    /// contract tag, not a re-parametrisation of the engine (see the design note, decision 2).
     pub slippage_model: String,
 }
 

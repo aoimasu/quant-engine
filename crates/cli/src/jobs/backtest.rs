@@ -76,7 +76,10 @@ pub fn run_backtest(
         parse_ymd_to_millis(&params.end).ok_or_else(|| RunError::BadDate(params.end.clone()))?,
     );
 
-    // Canonicalise every requested symbol; v1 backtests the first.
+    // Canonicalise every requested symbol. NOTE (v1 single-instrument limitation): only `symbols[0]`
+    // (`primary`) is actually simulated below — the whole `symbols` list is recorded so
+    // `universe.count` reflects the *requested* universe, not the *simulated* one. Multi-instrument
+    // portfolio aggregation is out of scope for v1 (design note, decision 3).
     let symbols: Vec<InstrumentId> = params
         .universe
         .iter()
