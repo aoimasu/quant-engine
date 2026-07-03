@@ -13,6 +13,9 @@
 //! The per-vintage `DrawdownCap` (→ `Halt`) is **not** a per-order pre-trade check — it is the QE-212 breaker
 //! + QE-216 kill path — so it is not enforced here. Out of scope: out-of-band kill (QE-216).
 
+// Order-emission path (QE-268): reject `unwrap`/`expect`/`panic` — a panic here is a live-trading fault.
+#![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
 use rust_decimal::Decimal;
 
 use qe_domain::Notional;

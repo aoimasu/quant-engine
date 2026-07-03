@@ -13,6 +13,9 @@
 //!   [`Order`] through its lifecycle with an immediate fill, and emits the [`Fill`] event the keeper absorbs —
 //!   the full loop with **no real orders**.
 
+// Order-emission path (QE-268): reject `unwrap`/`expect`/`panic` — a panic here is a live-trading fault.
+#![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
 use rust_decimal::Decimal;
 
 use qe_domain::{Direction, InstrumentId, Notional, Price, Qty, Side};
@@ -86,8 +89,8 @@ impl Order {
         if self.is_terminal() {
             return;
         }
-        self.filled =
-            Qty::new(self.filled.get() + q.get()).expect("cumulative fill is non-negative");
+        // Sum of two non-negative quantities is non-negative — a total `Qty + Qty`, no re-validation.
+        self.filled = self.filled + q;
         self.state = if self.filled.get() >= self.qty.get() {
             OrderState::Filled
         } else {
@@ -133,14 +136,15 @@ pub fn plan_delta(target: Notional, current_qty: Decimal, mark: Price) -> Option
     if delta.is_zero() {
         return None;
     }
-    let (side, mag) = if delta.is_sign_negative() {
-        (Side::Sell, -delta)
+    let side = if delta.is_sign_negative() {
+        Side::Sell
     } else {
-        (Side::Buy, delta)
+        Side::Buy
     };
     Some(OrderIntent {
         side,
-        qty: Qty::new(mag).expect("delta magnitude is non-negative"),
+        // The order magnitude is `|delta|` — a total, always-non-negative `Qty`.
+        qty: Qty::abs_of(delta),
     })
 }
 
@@ -339,15 +343,9 @@ impl VenueSimulator {
         let (direction, qty) = if self.signed_qty.is_zero() {
             (None, Qty::ZERO)
         } else if self.signed_qty.is_sign_negative() {
-            (
-                Some(Direction::Short),
-                Qty::new(-self.signed_qty).expect("magnitude is non-negative"),
-            )
+            (Some(Direction::Short), Qty::abs_of(self.signed_qty))
         } else {
-            (
-                Some(Direction::Long),
-                Qty::new(self.signed_qty).expect("magnitude is non-negative"),
-            )
+            (Some(Direction::Long), Qty::abs_of(self.signed_qty))
         };
         PositionReport {
             instrument: self.instrument.clone(),

@@ -12,6 +12,9 @@
 //! That is the reviewer's requirement: a deterministic, out-of-band halt at the order-submission layer that
 //! works even with the cockpit/planner down.
 
+// Order-emission path (QE-268): reject `unwrap`/`expect`/`panic` — a panic here is a live-trading fault.
+#![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
 use rust_decimal::Decimal;
 
 use qe_domain::{Price, Qty, Side};
@@ -47,14 +50,15 @@ fn flatten_intent(current_qty: Decimal) -> Option<OrderIntent> {
     if current_qty.is_zero() {
         return None;
     }
-    let (side, mag) = if current_qty.is_sign_negative() {
-        (Side::Buy, -current_qty)
+    let side = if current_qty.is_sign_negative() {
+        Side::Buy
     } else {
-        (Side::Sell, current_qty)
+        Side::Sell
     };
     Some(OrderIntent {
         side,
-        qty: Qty::new(mag).expect("flatten magnitude is non-negative"),
+        // The closing size is `|current_qty|` — a total, always-non-negative `Qty`.
+        qty: Qty::abs_of(current_qty),
     })
 }
 

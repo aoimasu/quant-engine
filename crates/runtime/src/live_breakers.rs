@@ -15,6 +15,9 @@
 //! the identical breaker + latched-gate mechanism keyed by those scopes, deferred until their aggregate
 //! equity streams and the strategy→scope map exist (QE-213 / vintage metadata).
 
+// Order-emission path (QE-268): reject `unwrap`/`expect`/`panic` — a panic here is a live-trading fault.
+#![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
 use rust_decimal::Decimal;
 
 use qe_risk::{BreakerThresholds, BreakerTier, CalibrationProfile, CircuitBreaker, Fraction};
@@ -25,14 +28,14 @@ use crate::evaluator::ChromosomeDecision;
 /// A threshold set to 1.0, so a tier only fires at a full 100% drawdown (total wipeout) — effectively
 /// never. Used to disable the ensemble breaker's slow/med tiers (it is fast-drop only).
 fn never_fires() -> Fraction {
-    Fraction::new(Decimal::ONE).expect("1.0 is a valid fraction")
+    Fraction::ONE
 }
 
 /// A zero-threshold breaker for an uncalibrated strategy. Note this is *defence in depth* only:
 /// [`BreakerLayer::from_calibration`] also **explicitly pre-gates** any uncalibrated strategy, so the
 /// fail-safe does not rely on the breaker's tier thresholds (which could change) to gate it.
 fn fires_immediately() -> BreakerThresholds {
-    let zero = Fraction::new(Decimal::ZERO).expect("0.0 is a valid fraction");
+    let zero = Fraction::ZERO;
     BreakerThresholds {
         slow_dd: zero,
         med_dd: zero,
