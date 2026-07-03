@@ -31,6 +31,16 @@ async fn main() -> ExitCode {
 
     let manager = cfg.run_manager();
 
+    // QE-257 read APIs: open the market store once and build the sealed-vintage repository. A failure
+    // to open the store is fatal (mirrors the bind-failure path) — the read endpoints could not serve.
+    let read = match cfg.read_state() {
+        Ok(read) => read,
+        Err(e) => {
+            tracing::error!(error = %e, market_dir = %cfg.market_dir.display(), "failed to open market store");
+            return ExitCode::FAILURE;
+        }
+    };
+
     // QE-256 auth: resolve OAuth + session config, then wire the ID-token verifier. The real Google
     // verifier is only available under the `http` feature; otherwise a disabled verifier keeps the
     // server bootable (health/static work) but login cannot complete.
@@ -48,7 +58,7 @@ async fn main() -> ExitCode {
     }
     let auth = Arc::new(AuthContext::new(auth_config, verifier));
 
-    let state = AppState::new(manager, auth);
+    let state = AppState::new(manager, auth, read);
     let router = build_router(&cfg.static_dir, state);
 
     let listener = match tokio::net::TcpListener::bind(cfg.addr).await {

@@ -27,6 +27,11 @@ http = ["dep:ureq"]
 # Shared internal crate: structured startup logging (also the real internal edge the firewall sanity
 # checks). No `qe-runtime`/`qe-venue` — see the QE-132 firewall + QE-001 decoupling guards.
 qe-telemetry.workspace = true
+# QE-257 read APIs. Both are leaf/shared crates clear of `qe-runtime`/`qe-venue` (firewall-legal):
+# `qe-storage` owns the relocated market-data `coverage()` query; `qe-vintage` is the sealed-vintage
+# repository the `/api/vintages` list reads.
+qe-storage.workspace = true
+qe-vintage.workspace = true
 axum.workspace = true
 tokio.workspace = true
 tower-http.workspace = true
