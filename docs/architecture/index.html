@@ -1,0 +1,319 @@
+<title>quant-engine — Architecture</title>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="./assets/architecture.css">
+
+<div class="layout">
+  <nav class="sidebar" aria-label="Table of contents">
+    <h2>quant-engine</h2>
+    <ul class="toc">
+      <li><a href="#s1"><span class="n">1</span>Architecture Summary</a></li>
+      <li><a href="#s2"><span class="n">2</span>System Context</a></li>
+      <li><a href="#s3"><span class="n">3</span>High-Level Architecture</a></li>
+      <li><a href="#s4"><span class="n">4</span>Repository Structure</a></li>
+      <li><a href="#s5"><span class="n">5</span>Frontend Architecture</a></li>
+      <li><a href="#s6"><span class="n">6</span>Backend / API Architecture</a></li>
+      <li><a href="#s7"><span class="n">7</span>Auth &amp; Authorization</a></li>
+      <li><a href="#s8"><span class="n">8</span>Core Request Flow</a></li>
+      <li><a href="#s9"><span class="n">9</span>Data Model</a></li>
+      <li><a href="#s10"><span class="n">10</span>Environment Config</a></li>
+      <li><a href="#s11"><span class="n">11</span>Deployment &amp; Infra</a></li>
+      <li><a href="#s12"><span class="n">12</span>CI/CD &amp; Observability</a></li>
+      <li><a href="#s13"><span class="n">13</span>Background Jobs</a></li>
+      <li><a href="#s14"><span class="n">14</span>Security Boundaries</a></li>
+      <li><a href="#s15"><span class="n">15</span>Risks &amp; Recommendations</a></li>
+    </ul>
+  </nav>
+
+  <main class="main">
+   <div class="wrap">
+    <header class="hero">
+      <h1>quant-engine — Architecture</h1>
+      <p class="lede">A deterministic, deployment-agnostic quant engine: two decoupled pipelines
+        (<strong>training</strong> → sealed vintage, and <strong>runtime</strong>) sharing one domain
+        vocabulary, plus an authenticated admin UI (<code>qe-server</code> + React SPA) that triggers and
+        supervises the training-side CLI jobs. All state is paper/offline — no live order submission.</p>
+      <div class="meta-row">
+        <span class="chip"><strong>Repo</strong>&nbsp; aoimasu/quant-engine</span>
+        <span class="chip"><strong>Generated</strong>&nbsp; 2026-07-05</span>
+        <span class="chip"><strong>Stack</strong>&nbsp; Rust 1.96 · axum · React 19 · LMDB</span>
+        <span class="chip"><strong>Crates</strong>&nbsp; 20 + web SPA</span>
+      </div>
+      <div class="callout">Diagrams are editable: the <code>.drawio</code> files under <code>diagrams/</code>
+        open in diagrams.net and are the source of truth; the embedded <code>.svg</code> files are their
+        exports. Native draw.io export tooling was unavailable, so diagrams were authored as valid mxGraph
+        XML with matching hand-rendered SVGs from one shared spec.</div>
+    </header>
+
+    <!-- 1 -->
+    <section id="s1">
+      <h2><span class="num">1</span>Architecture Summary</h2>
+      <p>A <strong>Rust Cargo workspace</strong> of 20 internal crates plus a <strong>Vite + React 19 +
+        TypeScript</strong> admin SPA. Deterministic work runs as CLI jobs (<code>qe-cli</code>); a small
+        <code>axum</code> server (<code>qe-server</code>) wraps those jobs behind an authenticated HTTP API
+        and hosts the SPA.</p>
+      <div class="tablewrap"><table>
+        <thead><tr><th>Area</th><th>Detected technology</th><th>Evidence</th><th>Confidence</th></tr></thead>
+        <tbody>
+          <tr><td>Language (engine)</td><td>Rust 2021, edition pinned 1.96</td><td><code>Cargo.toml</code>, <code>rust-toolchain.toml</code></td><td>High</td></tr>
+          <tr><td>Workspace</td><td>Cargo workspace, <code>crates/*</code> (20)</td><td><code>Cargo.toml</code></td><td>High</td></tr>
+          <tr><td>CLI</td><td><code>qe-cli</code> (binary <code>qe</code>): train / backtest / ingest</td><td><code>crates/cli/src/main.rs</code></td><td>High</td></tr>
+          <tr><td>Web/API server</td><td>axum 0.8 + tokio (multi-thread)</td><td><code>crates/server/src/lib.rs</code></td><td>High</td></tr>
+          <tr><td>Static hosting</td><td>tower-http <code>ServeDir</code>/<code>ServeFile</code></td><td><code>crates/server/src/lib.rs</code></td><td>High</td></tr>
+          <tr><td>Frontend</td><td>React 19 + TS 5.7, Vite 6</td><td><code>web/package.json</code>, <code>web/vite.config.ts</code></td><td>High</td></tr>
+          <tr><td>Frontend state/routing</td><td>React hooks only — no router/redux/zustand</td><td><code>web/src/app/App.tsx</code>; <code>web/package.json</code></td><td>High</td></tr>
+          <tr><td>Persistence</td><td>Embedded LMDB (<code>heed</code> 0.20)</td><td><code>crates/storage/src/store.rs</code></td><td>High</td></tr>
+          <tr><td>Artefact store</td><td>Content-addressed vintage JSON</td><td><code>crates/vintage/src/lib.rs</code></td><td>High</td></tr>
+          <tr><td>Run store</td><td>File-based meta/index/result JSON</td><td><code>crates/server/src/runs/store.rs</code></td><td>High</td></tr>
+          <tr><td>Authentication</td><td>Google OAuth + email allowlist + HMAC session cookie</td><td><code>crates/server/src/auth/mod.rs</code></td><td>High</td></tr>
+          <tr><td>Deployment</td><td>Multi-stage Dockerfile, 12-factor env</td><td><code>Dockerfile</code>, <code>config.example.toml</code></td><td>High</td></tr>
+          <tr><td>CI</td><td>GitHub Actions: ci.yml (Rust), frontend.yml (web)</td><td><code>.github/workflows/*</code></td><td>High</td></tr>
+          <tr><td>Observability</td><td><code>tracing</code> structured logs; <code>/api/health</code></td><td><code>crates/telemetry/src/lib.rs</code></td><td>High</td></tr>
+          <tr><td>Live venue integration</td><td>Behind default-off <code>http</code> feature; not on server path</td><td><code>crates/venue</code>, <code>crates/cli/src/main.rs</code></td><td>High</td></tr>
+          <tr><td>Background queue / cron</td><td>Not detected — bounded worker pool instead</td><td><code>crates/server/src/runs/manager.rs</code></td><td>High</td></tr>
+        </tbody>
+      </table></div>
+    </section>
+
+    <!-- 2 -->
+    <section id="s2">
+      <h2><span class="num">2</span>System Context</h2>
+      <figure><div class="scroll"><img src="./diagrams/01-system-context.svg" alt="System context diagram"></div>
+        <figcaption><span>Actors and external systems around quant-engine.</span><a href="./diagrams/01-system-context.drawio">01-system-context.drawio</a></figcaption></figure>
+      <ul>
+        <li><strong>Admin user</strong> — signs in through the browser SPA (Google OAuth, allowlisted email) to trigger, monitor, and review runs.</li>
+        <li><strong>Developer / operator</strong> — runs the <code>qe</code> binary directly (train / backtest / ingest).</li>
+        <li><strong>Google OAuth</strong> — identity for the admin UI (<code>crates/server/src/auth/mod.rs</code>).</li>
+        <li><strong>Binance</strong> (<code>data.binance.vision</code>; REST/WSS) — ingestion &amp; venue connectivity, both behind the default-off <code>http</code> feature. The committed sample store lets backtests run fully offline.</li>
+      </ul>
+      <p>The live venue/trading path is <strong>not reachable from the server</strong> — the QE-132 firewall forbids <code>qe-server</code> from linking <code>qe-runtime</code>/<code>qe-venue</code> (§14).</p>
+    </section>
+
+    <!-- 3 -->
+    <section id="s3">
+      <h2><span class="num">3</span>High-Level Application Architecture</h2>
+      <figure><div class="scroll"><img src="./diagrams/02-high-level-architecture.svg" alt="High-level architecture diagram"></div>
+        <figcaption><span>Two composition roots over shared foundation crates and a local data layer.</span><a href="./diagrams/02-high-level-architecture.drawio">02-high-level-architecture.drawio</a></figcaption></figure>
+      <ol>
+        <li><strong><code>qe-cli</code></strong> — the deterministic pipeline as three jobs, each emitting JSON-line progress on stdout.</li>
+        <li><strong><code>qe-server</code></strong> — an axum server that serves the SPA at <code>/</code>, exposes <code>/api</code>, and spawns <code>qe-cli</code> subprocesses. Async lives only here.</li>
+      </ol>
+      <p>The data layer is local and file/LMDB-based: <code>MarketStore</code> + <code>SyntheticStore</code> (LMDB), content-addressed vintages, and a file-based run store. The <strong>QE-132 firewall</strong> enforces a three-way <code>search ⟂ portfolio ⟂ live</code> separation (§14).</p>
+    </section>
+
+    <!-- 4 -->
+    <section id="s4">
+      <h2><span class="num">4</span>Repository and Module Structure</h2>
+      <figure><div class="scroll"><img src="./diagrams/03-repository-structure.svg" alt="Repository structure diagram"></div>
+        <figcaption><span>Cargo workspace grouped by role, plus the React SPA and docs.</span><a href="./diagrams/03-repository-structure.drawio">03-repository-structure.drawio</a></figcaption></figure>
+      <div class="tablewrap"><table>
+        <thead><tr><th>Path</th><th>Responsibility</th><th>Important files</th></tr></thead>
+        <tbody>
+          <tr><td><code>crates/domain</code></td><td>Shared vocabulary (instruments, time, money, bars)</td><td><code>src/{money,bar,instrument,time}.rs</code></td></tr>
+          <tr><td><code>crates/config</code></td><td>Typed layered config (TOML → profile → <code>QE_</code> env)</td><td><code>src/{schema,universe}.rs</code></td></tr>
+          <tr><td><code>crates/determinism</code></td><td>RNG, reproduction harness, lineage</td><td><code>src/{rng,harness,lineage}.rs</code></td></tr>
+          <tr><td><code>crates/error</code> / <code>telemetry</code> / <code>clock</code></td><td>Error taxonomy + hot-path lint; tracing; clock-skew guard</td><td><code>src/lib.rs</code>, <code>skew.rs</code></td></tr>
+          <tr><td><code>crates/storage</code></td><td>Embedded LMDB market + synthetic stores</td><td><code>src/{store,synthetic,key}.rs</code></td></tr>
+          <tr><td><code>crates/signal</code></td><td>Indicators, features, genome (train+runtime shared)</td><td><code>src/{genome,feature,indicator/*}.rs</code></td></tr>
+          <tr><td><code>crates/wfo</code></td><td>Walk-forward / MAP-Elites search (search side)</td><td><code>src/{mapelites,fitness,cv,friction}.rs</code></td></tr>
+          <tr><td><code>crates/ensemble</code></td><td>Discrete-DE ensemble, stress, capacity (portfolio side)</td><td><code>src/{de,objective,stress,capacity}.rs</code></td></tr>
+          <tr><td><code>crates/validation</code> / <code>gate</code></td><td>DSR/PBO/SPA suite; G1 holdout-embargo gate</td><td><code>src/{dsr,pbo,spa}.rs</code></td></tr>
+          <tr><td><code>crates/vintage</code> / <code>report</code></td><td>Sealed artefact format; validation evidence pack</td><td><code>src/lib.rs</code></td></tr>
+          <tr><td><code>crates/ingest</code></td><td>Binance bulk-history download + fusion</td><td><code>src/{downloader,fuse,integrity}.rs</code></td></tr>
+          <tr><td><code>crates/runtime</code> / <code>venue</code> / <code>risk</code></td><td>Live/paper evaluation; venue adapters; risk/kill contract</td><td><code>src/{evaluator,rest,limit,kill}.rs</code></td></tr>
+          <tr><td><code>crates/architecture</code></td><td>Executable firewall/decoupling guard (CI)</td><td><code>tests/firewall.rs</code></td></tr>
+          <tr><td><code>crates/cli</code></td><td>Composition root #1: <code>qe</code> binary</td><td><code>src/main.rs</code>, <code>src/jobs/*</code></td></tr>
+          <tr><td><code>crates/server</code></td><td>Composition root #2: admin API + SPA host</td><td><code>src/{lib,main}.rs</code>, <code>{auth,runs,read}</code></td></tr>
+          <tr><td><code>web/</code></td><td>React admin SPA (build → <code>web/dist</code>)</td><td><code>src/{app,design,api,styles}</code></td></tr>
+          <tr><td><code>docs/architecture</code></td><td>Design ADRs (<code>qe-XXX-*.md</code>) + this package</td><td><code>qe-001…qe-268</code></td></tr>
+        </tbody>
+      </table></div>
+    </section>
+
+    <!-- 5 -->
+    <section id="s5">
+      <h2><span class="num">5</span>Frontend Architecture</h2>
+      <figure><div class="scroll"><img src="./diagrams/04-frontend-architecture.svg" alt="Frontend architecture diagram"></div>
+        <figcaption><span>State-driven SPA — no router, no state library.</span><a href="./diagrams/04-frontend-architecture.drawio">04-frontend-architecture.drawio</a></figcaption></figure>
+      <p>Navigation is a two-level <code>useState</code> machine (no <code>react-router</code>, redux, zustand, or <code>createContext</code> anywhere in <code>web/src</code>).</p>
+      <ul>
+        <li><strong>Entry</strong> — <code>main.tsx</code> mounts <code>&lt;App/&gt;</code> in <code>StrictMode</code>; imports fonts + <code>global.css</code>. <code>index.html</code> sets <code>data-theme="dark"</code>.</li>
+        <li><strong>Shell / nav</strong> — <code>app/App.tsx</code> holds auth <code>status</code> (from <code>fetchMe()</code>) + <code>active</code> screen; <code>design/AppShell.tsx</code> renders the sidebar and calls <code>onNav(id)</code>. A one-shot deep-link pushes a sealed vintage from the training monitor into the New-backtest flow.</li>
+        <li><strong>Screens</strong> — <code>backtest/</code> (List, New, Result), <code>training/</code> (List, New, Monitor), plus MarketData, Login, Placeholder (Strategies).</li>
+        <li><strong>Design system</strong> — <code>design/index.ts</code> exports Button, Card, Badge, Callout, Input, Select, DataTable, Tag, Pnl, Tabs, Icon, AppShell. Styling via <code>:root</code> CSS design tokens (<code>styles/tokens/*.css</code>) + a runtime <code>injectCss()</code> for jsdom parity.</li>
+        <li><strong>API layer</strong> — <code>api/session.ts</code> + <code>api/runs.ts</code> (typed <code>fetch</code>, <code>credentials: 'same-origin'</code>). Monitor screens <strong>poll <code>GET /api/runs/:id</code> every 2 s</strong> with bounded retry (<code>MAX_POLL_FAILURES = 4</code>), stopping on a terminal status.</li>
+      </ul>
+    </section>
+
+    <!-- 6 -->
+    <section id="s6">
+      <h2><span class="num">6</span>Backend / API Architecture</h2>
+      <figure><div class="scroll"><img src="./diagrams/05-backend-api-architecture.svg" alt="Backend API architecture diagram"></div>
+        <figcaption><span>One axum router: nested <code>/api</code> with a session-gated protected subtree + static SPA fallback.</span><a href="./diagrams/05-backend-api-architecture.drawio">05-backend-api-architecture.drawio</a></figcaption></figure>
+      <p><code>build_router</code> (<code>crates/server/src/lib.rs</code>) carries a shared <code>AppState { manager, auth, read }</code>; handlers extract sub-state via <code>FromRef</code>. Blocking work runs in <code>spawn_blocking</code>.</p>
+      <div class="tablewrap"><table>
+        <thead><tr><th>Method</th><th>Route</th><th>Handler / source</th><th>Auth</th><th>Service</th><th>Notes</th></tr></thead>
+        <tbody>
+          <tr><td>GET</td><td><code>/api/health</code></td><td><code>health</code> — lib.rs</td><td>No</td><td>—</td><td><code>{"status":"ok"}</code></td></tr>
+          <tr><td>GET</td><td><code>/api/auth/login</code></td><td><code>login</code> — auth/mod.rs</td><td>No</td><td>AuthContext</td><td>302 → Google, CSRF state</td></tr>
+          <tr><td>GET</td><td><code>/api/auth/callback</code></td><td><code>callback</code> — auth/mod.rs</td><td>No</td><td>AuthContext</td><td>Verify token, set session</td></tr>
+          <tr><td>GET</td><td><code>/api/me</code></td><td><code>me</code> — auth/mod.rs</td><td>Yes</td><td>—</td><td><code>{email}</code></td></tr>
+          <tr><td>POST</td><td><code>/api/runs</code></td><td><code>create_run</code> — runs/api.rs</td><td>Yes</td><td>RunManager</td><td>201 {id} / 400</td></tr>
+          <tr><td>GET</td><td><code>/api/runs</code></td><td><code>list_runs</code> — runs/api.rs</td><td>Yes</td><td>RunManager</td><td>Newest-first</td></tr>
+          <tr><td>GET</td><td><code>/api/runs/{id}</code></td><td><code>get_run</code> — runs/api.rs</td><td>Yes</td><td>RunManager</td><td>RunMeta / 404</td></tr>
+          <tr><td>GET</td><td><code>/api/runs/{id}/result</code></td><td><code>get_result</code> — runs/api.rs</td><td>Yes</td><td>RunManager</td><td>result.json / 409</td></tr>
+          <tr><td>GET</td><td><code>/api/vintages</code></td><td><code>list_vintages</code> — read.rs</td><td>Yes</td><td>ReadState</td><td>Hash-verified list</td></tr>
+          <tr><td>GET</td><td><code>/api/market-data/coverage</code></td><td><code>market_data_coverage</code> — read.rs</td><td>Yes</td><td>ReadState</td><td>LMDB coverage rows</td></tr>
+        </tbody>
+      </table></div>
+    </section>
+
+    <!-- 7 -->
+    <section id="s7">
+      <h2><span class="num">7</span>Authentication and Authorization</h2>
+      <figure><div class="scroll"><img src="./diagrams/06-auth-flow.svg" alt="Authentication flow diagram"></div>
+        <figcaption><span>Google OAuth authorization-code + email allowlist + HMAC session cookie.</span><a href="./diagrams/06-auth-flow.drawio">06-auth-flow.drawio</a></figcaption></figure>
+      <ol>
+        <li><code>GET /api/auth/login</code> — mint a CSRF <code>state</code>, set a short-lived cookie, 302 to Google (<code>scope=openid email</code>).</li>
+        <li><code>GET /api/auth/callback</code> — verify <code>state</code> (double-submit), then exchange + verify the ID token via the injectable <code>IdTokenVerifier</code> in <code>spawn_blocking</code>.</li>
+        <li><code>check_claims</code> — enforce <code>aud</code>, Google <code>iss</code>, unexpired <code>exp</code>, <code>email_verified</code>.</li>
+        <li>Allowlist (<code>QE_ADMIN_ALLOWED_EMAILS</code>, <strong>fail-closed</strong>); non-allowlisted logins redirect to <code>/?error=forbidden</code>.</li>
+        <li><code>mint_session_cookie</code> signs <code>{email, exp}</code> (12 h) as <code>HttpOnly; Secure; SameSite=Lax</code>; <code>require_session</code> verifies it on every protected route.</li>
+      </ol>
+      <div class="callout">A missing <code>QE_SESSION_SECRET</code> falls back to a random ephemeral secret (sessions don't survive a restart) — the server still boots, fail-closed.</div>
+    </section>
+
+    <!-- 8 -->
+    <section id="s8">
+      <h2><span class="num">8</span>Core Runtime Request Flow</h2>
+      <figure><div class="scroll"><img src="./diagrams/07-core-request-flow.svg" alt="Core request flow diagram"></div>
+        <figcaption><span>Trigger &amp; monitor a backtest — SPA → API → CLI subprocess → files → poll.</span><a href="./diagrams/07-core-request-flow.drawio">07-core-request-flow.drawio</a></figcaption></figure>
+      <ol>
+        <li><code>NewBacktest</code> calls <code>createRun(params)</code> → <code>POST /api/runs</code> (session-gated).</li>
+        <li><code>RunManager::create</code> validates, writes initial <code>meta.json</code>, returns <code>201 {id}</code>.</li>
+        <li>Worker pool: <code>queued → running</code>; <code>CliJobSpawner</code> runs <code>qe-cli backtest … --run-dir --json</code> (piped, <code>kill_on_drop</code>).</li>
+        <li>Supervisor tails JSON-line progress, atomically updates <code>meta.json</code>; child writes <code>result.json</code>.</li>
+        <li><code>BacktestResult</code> polls every 2 s; on <code>succeeded</code> fetches the result once and renders metrics, inline-SVG charts, heatmap, trades.</li>
+      </ol>
+    </section>
+
+    <!-- 9 -->
+    <section id="s9">
+      <h2><span class="num">9</span>Data Model</h2>
+      <figure><div class="scroll"><img src="./diagrams/08-data-model.svg" alt="Data model diagram"></div>
+        <figcaption><span>No RDBMS: vintage artefacts (JSON), file run store, embedded LMDB.</span><a href="./diagrams/08-data-model.drawio">08-data-model.drawio</a></figcaption></figure>
+      <ul>
+        <li><strong>Vintage artefact</strong> (<code>crates/vintage/src/lib.rs</code>) — <code>Vintage { content, content_hash }</code>; <code>VintageContent { format_version=2, vintage_id, chromosomes: Vec&lt;Genome&gt;, weights: Vec&lt;f64&gt; (aligned 1:1), calibration, worst_case_loss?, lineage }</code>. Content-hash = SHA-256 over canonical JSON.</li>
+        <li><strong>Run store</strong> (<code>crates/server/src/runs/model.rs</code>) — <code>RunMeta { id, type, status, params, progress, train?, created_ms, …, exit?, error?, artifacts[] }</code>; <code>IndexEntry</code> (immutable discovery fields); <code>result.json</code> = <code>BacktestResult</code>.</li>
+        <li><strong>LMDB <code>MarketStore</code></strong> (<code>crates/storage/src/store.rs</code>) — sub-DBs <code>bars → Bar</code>, <code>funding → FundingRateSample</code>, <code>premium → PremiumSample</code>, <code>futures_metrics → FuturesMetrics</code>, keyed by instrument (+resolution) + time. <code>CoverageRow</code> derived by scan. <code>SyntheticStore</code> = lineage-tagged indicator/bar cache.</li>
+      </ul>
+    </section>
+
+    <!-- 10 -->
+    <section id="s10">
+      <h2><span class="num">10</span>Environment Configuration Matrix</h2>
+      <p>Placeholders only — no real secrets are read or shown. Engine config: <code>config.toml</code> (every key overridable by a <code>QE_</code>-prefixed, <code>__</code>-nested env var). Server/auth knobs come from env directly.</p>
+      <div class="tablewrap"><table>
+        <thead><tr><th>Variable</th><th>Purpose</th><th>Required</th><th>Evidence</th></tr></thead>
+        <tbody>
+          <tr><td><code>QE_DETERMINISM__SEED</code></td><td>Master RNG seed</td><td>optional</td><td>config.example.toml</td></tr>
+          <tr><td><code>QE_STORAGE__MARKET_DIR</code> / <code>__SYNTHETIC_DIR</code> / <code>__ARTIFACTS_DIR</code></td><td>LMDB + artefact dirs</td><td>optional (defaults)</td><td>crates/config/src/schema.rs</td></tr>
+          <tr><td><code>QE_CODE_COMMIT</code></td><td>Code provenance in vintage id</td><td>optional</td><td>crates/cli/src/main.rs</td></tr>
+          <tr><td><code>QE_SERVER_ADDR</code></td><td>Bind address (default <code>127.0.0.1:8080</code>)</td><td>optional</td><td>crates/server/src/lib.rs</td></tr>
+          <tr><td><code>QE_SERVER_STATIC_DIR</code></td><td>Built SPA dir served at <code>/</code></td><td>optional (needed for SPA)</td><td>crates/server/src/lib.rs</td></tr>
+          <tr><td><code>QE_SERVER_DATA_DIR</code></td><td>State dir (holds <code>runs/</code>)</td><td>optional</td><td>crates/server/src/lib.rs</td></tr>
+          <tr><td><code>QE_SERVER_MAX_CONCURRENCY</code></td><td>Max concurrent run subprocesses (default 2)</td><td>optional</td><td>crates/server/src/lib.rs</td></tr>
+          <tr><td><code>QE_SERVER_ARTIFACTS_DIR</code> / <code>QE_SERVER_MARKET_DIR</code></td><td>Read-API vintage / market dirs</td><td>optional</td><td>crates/server/src/lib.rs</td></tr>
+          <tr><td><code>QE_SERVER_CLI_BIN</code></td><td>Path to <code>qe</code> binary to spawn</td><td>optional</td><td>crates/server/src/runs/spawn.rs</td></tr>
+          <tr><td><code>QE_GOOGLE_CLIENT_ID</code> (+ <code>QE_OAUTH_*</code> alias)</td><td>OAuth client id (= token <code>aud</code>)</td><td>required for login</td><td>crates/server/src/auth/mod.rs</td></tr>
+          <tr><td><code>QE_GOOGLE_CLIENT_SECRET</code></td><td>OAuth client secret — <em>secret, omitted</em></td><td>required for login</td><td>crates/server/src/auth/mod.rs</td></tr>
+          <tr><td><code>QE_GOOGLE_REDIRECT_URI</code></td><td>Registered callback URI</td><td>required for login</td><td>crates/server/src/auth/mod.rs</td></tr>
+          <tr><td><code>QE_SESSION_SECRET</code></td><td>HMAC session key — <em>secret, omitted</em> (random fallback)</td><td>recommended (prod)</td><td>crates/server/src/auth/mod.rs</td></tr>
+          <tr><td><code>QE_ADMIN_ALLOWED_EMAILS</code></td><td>Comma-separated allowlist (fail-closed)</td><td>required</td><td>crates/server/src/auth/mod.rs</td></tr>
+        </tbody>
+      </table></div>
+      <p>Per-environment separation (staging/production configs or deploy manifests) is <strong>not detected in repository</strong>.</p>
+    </section>
+
+    <!-- 11 -->
+    <section id="s11">
+      <h2><span class="num">11</span>Deployment and Infrastructure</h2>
+      <figure><div class="scroll"><img src="./diagrams/09-deployment-infrastructure.svg" alt="Deployment infrastructure diagram"></div>
+        <figcaption><span>Multi-stage Dockerfile; 12-factor; loopback bind; mountable state volume.</span><a href="./diagrams/09-deployment-infrastructure.drawio">09-deployment-infrastructure.drawio</a></figcaption></figure>
+      <ul>
+        <li><strong>Builder</strong> — <code>rust:1.96</code>, <code>cargo build --release --locked -p qe-cli</code>.</li>
+        <li><strong>Runtime</strong> — <code>debian:bookworm-slim</code>; copies <code>qe</code>; <code>ENTRYPOINT ["qe"]</code>, <code>CMD ["train", "--config", "config.toml"]</code>; state under <code>VOLUME ["/app/data"]</code>.</li>
+        <li><strong>Server + SPA</strong> — build the SPA to <code>web/dist</code>, run <code>qe-server</code> with <code>QE_SERVER_STATIC_DIR=web/dist</code>; serves <code>web/dist</code> at <code>/</code> and the API at <code>/api</code>; binds loopback by default.</li>
+      </ul>
+      <p>No IaC (Terraform/CDK/Pulumi/Kubernetes/Helm) and no PaaS config (vercel/fly/render) were detected — <em>deployment target beyond Docker: not detected in repository</em>.</p>
+    </section>
+
+    <!-- 12 -->
+    <section id="s12">
+      <h2><span class="num">12</span>CI/CD and Observability</h2>
+      <figure><div class="scroll"><img src="./diagrams/10-cicd-observability.svg" alt="CI/CD and observability diagram"></div>
+        <figcaption><span>GitHub Actions gates + tracing-based observability.</span><a href="./diagrams/10-cicd-observability.drawio">10-cicd-observability.drawio</a></figcaption></figure>
+      <ul>
+        <li><code>ci.yml</code> (Rust): <code>fmt</code>, <code>clippy -D warnings</code>, <code>test --locked</code> (runs the firewall + hot-path lint tests), <code>cargo-deny check</code>. Toolchain pinned by SHA.</li>
+        <li><code>frontend.yml</code> (web, path-filtered): <code>npm ci → lint → build → test</code> (vitest) on Node 20.</li>
+        <li><strong>No CD / deploy workflow detected.</strong></li>
+        <li><strong>Observability</strong>: <code>qe-telemetry</code> structured <code>tracing</code> + correlation fields (<code>run_id</code>/<code>vintage_hash</code>/<code>instrument</code>/<code>window_id</code>); <code>HOT_PATH_TARGET</code> short-circuits under prod filters; <code>qe-error</code> maps to retry/skip/halt (no panic). Liveness: <code>GET /api/health</code>. No external APM/error-tracking SaaS detected.</li>
+      </ul>
+    </section>
+
+    <!-- 13 -->
+    <section id="s13">
+      <h2><span class="num">13</span>Background Jobs, Webhooks &amp; Async Events</h2>
+      <figure><div class="scroll"><img src="./diagrams/11-background-jobs.svg" alt="Background jobs diagram"></div>
+        <figcaption><span>No queue/cron/webhooks — in-process subprocess supervision.</span><a href="./diagrams/11-background-jobs.drawio">11-background-jobs.drawio</a></figcaption></figure>
+      <ul>
+        <li><strong>Worker pool</strong> — a tokio semaphore bounds concurrent subprocesses (<code>QE_SERVER_MAX_CONCURRENCY</code>, default 2); excess stay <code>queued</code>.</li>
+        <li><strong>Spawn</strong> — <code>CliJobSpawner</code> runs <code>qe-cli</code> with piped stdout/stderr and <code>kill_on_drop</code> (no runaway job on shutdown).</li>
+        <li><strong>Supervision</strong> — tails JSON-line progress, atomically rewrites <code>meta.json</code>; records <code>succeeded</code>/<code>failed</code> + exit code + error tail.</li>
+        <li><strong>Client</strong> — SPA polls <code>GET /api/runs/:id</code> every 2 s, stops on terminal (no server push). No retry/DLQ — a failed run is terminal.</li>
+      </ul>
+    </section>
+
+    <!-- 14 -->
+    <section id="s14">
+      <h2><span class="num">14</span>Security Boundaries and Data Protection</h2>
+      <figure><div class="scroll"><img src="./diagrams/12-security-boundaries.svg" alt="Security boundaries diagram"></div>
+        <figcaption><span>Public browser / trusted server / isolation boundaries.</span><a href="./diagrams/12-security-boundaries.drawio">12-security-boundaries.drawio</a></figcaption></figure>
+      <ul>
+        <li><strong>Public boundary</strong> — session cookie <code>HttpOnly; Secure; SameSite=Lax</code>; OAuth CSRF <code>state</code> double-submit.</li>
+        <li><strong>Server boundary</strong> — <code>require_session</code> gates the protected <code>/api</code> subtree (constant-time verify, <code>401</code> without a valid HMAC); unknown <code>/api/*</code> → <code>404</code>.</li>
+        <li><strong>AuthZ</strong> — fail-closed email allowlist + strict claim checks.</li>
+        <li><strong>Secrets</strong> — env only; no committed secrets; missing session secret degrades to random ephemeral key.</li>
+        <li><strong>QE-132 firewall</strong> — <code>tests/firewall.rs</code> fails CI on forbidden edges: <code>qe-wfo ⊬ {ensemble, runtime, venue}</code>, <code>qe-ensemble ⊬ {wfo, runtime, venue}</code>, <code>qe-server ⊬ {runtime, venue}</code> — the server can never link the live path.</li>
+        <li><strong>No live order path</strong>; workspace lints <code>unsafe_code = deny</code> + <code>clippy::unwrap_used = deny</code> keep the order path panic-free.</li>
+        <li><strong>Network</strong> — loopback bind by default; TLS/CORS/rate-limiting <strong>not detected</strong> in code (fronting proxy assumed).</li>
+      </ul>
+    </section>
+
+    <!-- 15 -->
+    <section id="s15">
+      <h2><span class="num">15</span>Architectural Risks and Recommendations</h2>
+      <div class="tablewrap"><table>
+        <thead><tr><th>Risk</th><th>Evidence</th><th>Recommendation</th><th>Priority</th></tr></thead>
+        <tbody>
+          <tr><td>No TLS / CORS / rate-limiting in server code</td><td><code>crates/server/src/lib.rs</code></td><td>Require a TLS proxy; add rate-limiting + CORS if bound non-loopback</td><td><span class="pill high">High</span></td></tr>
+          <tr><td>Ephemeral session secret fallback</td><td><code>auth/mod.rs</code> <code>from_env</code></td><td>Refuse to boot on non-loopback bind + missing <code>QE_SESSION_SECRET</code></td><td><span class="pill high">High</span></td></tr>
+          <tr><td><code>ingest</code> job is a scaffold only</td><td><code>crates/cli/src/main.rs</code></td><td>Track the "real ingestion is future work" seam; document sample-store reliance</td><td><span class="pill med">Medium</span></td></tr>
+          <tr><td>No CD / deploy automation</td><td><code>.github/workflows/*</code></td><td>Add a release workflow once a target platform is chosen</td><td><span class="pill med">Medium</span></td></tr>
+          <tr><td>No environment separation config</td><td>One <code>config.example.toml</code></td><td>Add per-profile overlays or a documented per-env matrix</td><td><span class="pill med">Medium</span></td></tr>
+          <tr><td>Run status via polling only</td><td><code>web/src/api/runs.ts</code></td><td>Consider SSE/websocket if concurrent viewers grow (fine at current scale)</td><td><span class="pill low">Low</span></td></tr>
+          <tr><td>LMDB single-open contract is a footgun</td><td><code>crates/storage/src/store.rs</code></td><td>Keep the <code>Arc</code> single-open discipline; add a debug double-open guard</td><td><span class="pill low">Low</span></td></tr>
+          <tr><td>No at-rest encryption for stored data</td><td><code>crates/storage</code>, vintages (JSON)</td><td>Rely on volume-level encryption on shared infra; document the assumption</td><td><span class="pill low">Low</span></td></tr>
+        </tbody>
+      </table></div>
+    </section>
+
+    <footer>
+      <p>Generated 2026-07-05 by the architecture-docs skill. Evidence-based; claims trace to files under
+        <code>crates/</code>, <code>web/</code>, <code>.github/</code>, and root config. Areas without repository
+        evidence are marked "not detected in repository". Diagram <code>.drawio</code> sources are editable in
+        diagrams.net; SVGs are their exports.</p>
+    </footer>
+   </div>
+  </main>
+</div>

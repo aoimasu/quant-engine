@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 560" font-family="Helvetica, Arial, sans-serif" font-size="13">
+<defs><marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L8,3 L0,6 Z" fill="#5f6368"/></marker></defs>
+<rect x="0" y="0" width="980" height="560" fill="#ffffff"/>
+<text x="24" y="34" font-size="20" font-weight="700" fill="#202124">Authentication &amp; Authorization Flow</text>
+<text x="24" y="54" font-size="12" fill="#5f6368">Google OAuth (authorization code) + email allowlist + HMAC session cookie. Evidence: crates/server/src/auth/mod.rs, auth/session.rs</text>
+<rect x="40" y="80" width="230" height="440" rx="10" fill="none" stroke="#9aa0a6" stroke-width="1.5" stroke-dasharray="6 4" opacity="0.9"/>
+<text x="52" y="100" font-size="12" font-weight="700" fill="#9aa0a6" letter-spacing="0.5">BROWSER (SPA)</text>
+<rect x="300" y="80" width="360" height="440" rx="10" fill="none" stroke="#9aa0a6" stroke-width="1.5" stroke-dasharray="6 4" opacity="0.9"/>
+<text x="312" y="100" font-size="12" font-weight="700" fill="#9aa0a6" letter-spacing="0.5">QE-SERVER (AUTH)</text>
+<rect x="690" y="80" width="250" height="440" rx="10" fill="none" stroke="#9aa0a6" stroke-width="1.5" stroke-dasharray="6 4" opacity="0.9"/>
+<text x="702" y="100" font-size="12" font-weight="700" fill="#9aa0a6" letter-spacing="0.5">GOOGLE</text>
+<line x1="250" y1="142" x2="330" y2="142" stroke="#5f6368" stroke-width="1.6" marker-end="url(#arrow)"/>
+<line x1="630" y1="145" x2="710" y2="150" stroke="#5f6368" stroke-width="1.6" marker-end="url(#arrow)"/>
+<rect x="654.5" y="137.5" width="31" height="18" rx="4" fill="#ffffff" stroke="#dadce0"/>
+<text x="670.0" y="150.5" font-size="11" fill="#3c4043" text-anchor="middle">302</text>
+<line x1="710" y1="232" x2="630" y2="235" stroke="#5f6368" stroke-width="1.6" marker-end="url(#arrow)"/>
+<rect x="651.0" y="223.5" width="38" height="18" rx="4" fill="#ffffff" stroke="#dadce0"/>
+<text x="670.0" y="236.5" font-size="11" fill="#3c4043" text-anchor="middle">code</text>
+<line x1="480" y1="270" x2="480" y2="290" stroke="#5f6368" stroke-width="1.6" marker-end="url(#arrow)"/>
+<line x1="630" y1="315" x2="710" y2="315" stroke="#5f6368" stroke-width="1.6" marker-end="url(#arrow)"/>
+<line x1="480" y1="344" x2="480" y2="360" stroke="#5f6368" stroke-width="1.6" marker-end="url(#arrow)"/>
+<line x1="480" y1="420" x2="480" y2="440" stroke="#5f6368" stroke-width="1.6" marker-end="url(#arrow)"/>
+<rect x="450.5" y="420.0" width="59" height="18" rx="4" fill="#ffffff" stroke="#dadce0"/>
+<text x="480.0" y="433.0" font-size="11" fill="#3c4043" text-anchor="middle">allowed</text>
+<line x1="330" y1="460" x2="250" y2="400" stroke="#5f6368" stroke-width="1.6" marker-end="url(#arrow)"/>
+<rect x="264.0" y="420.0" width="52" height="18" rx="4" fill="#ffffff" stroke="#dadce0"/>
+<text x="290.0" y="433.0" font-size="11" fill="#3c4043" text-anchor="middle">denied</text>
+<line x1="250" y1="470" x2="150" y2="240" stroke="#5f6368" stroke-width="1.6" stroke-dasharray="5 4" marker-end="url(#arrow)"/>
+<rect x="170.5" y="345.0" width="59" height="18" rx="4" fill="#ffffff" stroke="#dadce0"/>
+<text x="200.0" y="358.0" font-size="11" fill="#3c4043" text-anchor="middle">session</text>
+<rect x="60" y="120" width="190" height="44" rx="7" fill="#e8f0fe" stroke="#3b6fd4" stroke-width="1.6"/>
+<text x="155.0" y="146.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">GET /api/auth/login</text>
+<rect x="330" y="120" width="300" height="54" rx="7" fill="#e6f4ea" stroke="#2f8f4e" stroke-width="1.6"/>
+<text x="480.0" y="143.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">mint CSRF state + cookie</text>
+<text x="480.0" y="159.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">302 → consent URL</text>
+<rect x="710" y="130" width="210" height="54" rx="7" fill="#fce8e6" stroke="#c5382b" stroke-width="1.6"/>
+<text x="815.0" y="153.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">consent screen</text>
+<text x="815.0" y="169.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">scope openid email</text>
+<rect x="710" y="210" width="210" height="54" rx="7" fill="#fce8e6" stroke="#c5382b" stroke-width="1.6"/>
+<text x="815.0" y="241.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">redirect w/ code+state</text>
+<rect x="330" y="210" width="300" height="60" rx="7" fill="#e6f4ea" stroke="#2f8f4e" stroke-width="1.6"/>
+<text x="480.0" y="236.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">GET /api/auth/callback</text>
+<text x="480.0" y="252.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">verify CSRF (double-submit)</text>
+<rect x="330" y="290" width="300" height="54" rx="7" fill="#e6f4ea" stroke="#2f8f4e" stroke-width="1.6"/>
+<text x="480.0" y="313.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">exchange+verify id_token</text>
+<text x="480.0" y="329.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">spawn_blocking · http feat.</text>
+<rect x="710" y="290" width="210" height="54" rx="7" fill="#fce8e6" stroke="#c5382b" stroke-width="1.6"/>
+<text x="815.0" y="313.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">tokeninfo verify</text>
+<text x="815.0" y="329.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">aud/iss/exp</text>
+<rect x="330" y="360" width="300" height="60" rx="7" fill="#e6f4ea" stroke="#2f8f4e" stroke-width="1.6"/>
+<text x="480.0" y="386.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">check_claims + allowlist</text>
+<text x="480.0" y="402.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">QE_ADMIN_ALLOWED_EMAILS</text>
+<rect x="330" y="440" width="300" height="54" rx="7" fill="#e6f4ea" stroke="#2f8f4e" stroke-width="1.6"/>
+<text x="480.0" y="463.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">set signed session cookie</text>
+<text x="480.0" y="479.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">HMAC-SHA256 · 12h · 302 /</text>
+<rect x="60" y="210" width="190" height="54" rx="7" fill="#e8f0fe" stroke="#3b6fd4" stroke-width="1.6"/>
+<text x="155.0" y="233.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">GET /api/me</text>
+<text x="155.0" y="249.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">cookie → {email}</text>
+<rect x="60" y="360" width="190" height="60" rx="7" fill="#fce8e6" stroke="#c5382b" stroke-width="1.6"/>
+<text x="155.0" y="386.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">reject → /?error=forbidden</text>
+<text x="155.0" y="402.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">styled Callout</text>
+</svg>

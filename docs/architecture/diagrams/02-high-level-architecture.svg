@@ -1,0 +1,71 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 640" font-family="Helvetica, Arial, sans-serif" font-size="13">
+<defs><marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L8,3 L0,6 Z" fill="#5f6368"/></marker></defs>
+<rect x="0" y="0" width="980" height="640" fill="#ffffff"/>
+<text x="24" y="34" font-size="20" font-weight="700" fill="#202124">High-Level Application Architecture</text>
+<text x="24" y="54" font-size="12" fill="#5f6368">Evidence: crates/server/src/lib.rs, crates/cli, crates/*, web/src</text>
+<rect x="40" y="80" width="260" height="120" rx="10" fill="none" stroke="#9aa0a6" stroke-width="1.5" stroke-dasharray="6 4" opacity="0.9"/>
+<text x="52" y="100" font-size="12" font-weight="700" fill="#9aa0a6" letter-spacing="0.5">CLIENT</text>
+<rect x="40" y="230" width="400" height="360" rx="10" fill="none" stroke="#9aa0a6" stroke-width="1.5" stroke-dasharray="6 4" opacity="0.9"/>
+<text x="52" y="250" font-size="12" font-weight="700" fill="#9aa0a6" letter-spacing="0.5">SERVER / API  (COMPOSITION ROOT #2)</text>
+<rect x="470" y="230" width="240" height="360" rx="10" fill="none" stroke="#9aa0a6" stroke-width="1.5" stroke-dasharray="6 4" opacity="0.9"/>
+<text x="482" y="250" font-size="12" font-weight="700" fill="#9aa0a6" letter-spacing="0.5">DETERMINISTIC PIPELINES (CLI)</text>
+<rect x="740" y="230" width="200" height="360" rx="10" fill="none" stroke="#9aa0a6" stroke-width="1.5" stroke-dasharray="6 4" opacity="0.9"/>
+<text x="752" y="250" font-size="12" font-weight="700" fill="#9aa0a6" letter-spacing="0.5">DATA LAYER</text>
+<line x1="170" y1="180" x2="170" y2="270" stroke="#5f6368" stroke-width="1.6" marker-end="url(#arrow)"/>
+<rect x="116.0" y="215.0" width="108" height="18" rx="4" fill="#ffffff" stroke="#dadce0"/>
+<text x="170.0" y="228.0" font-size="11" fill="#3c4043" text-anchor="middle">HTTPS / cookie</text>
+<line x1="240" y1="435" x2="470" y2="310" stroke="#5f6368" stroke-width="1.6" marker-end="url(#arrow)"/>
+<rect x="311.5" y="362.5" width="87" height="18" rx="4" fill="#ffffff" stroke="#dadce0"/>
+<text x="355.0" y="375.5" font-size="11" fill="#3c4043" text-anchor="middle">argv + JSON</text>
+<line x1="410" y1="437" x2="470" y2="412" stroke="#5f6368" stroke-width="1.6" marker-end="url(#arrow)"/>
+<line x1="230" y1="437" x2="240" y2="437" stroke="#5f6368" stroke-width="1.6" marker-end="url(#arrow)"/>
+<line x1="680" y1="300" x2="765" y2="297" stroke="#5f6368" stroke-width="1.6" marker-end="url(#arrow)"/>
+<rect x="693.0" y="288.5" width="59" height="18" rx="4" fill="#ffffff" stroke="#dadce0"/>
+<text x="722.5" y="301.5" font-size="11" fill="#3c4043" text-anchor="middle">DB scan</text>
+<line x1="680" y1="410" x2="765" y2="429" stroke="#5f6368" stroke-width="1.6" marker-end="url(#arrow)"/>
+<rect x="686.0" y="409.5" width="73" height="18" rx="4" fill="#ffffff" stroke="#dadce0"/>
+<text x="722.5" y="422.5" font-size="11" fill="#3c4043" text-anchor="middle">read/seal</text>
+<line x1="410" y1="430" x2="765" y2="490" stroke="#5f6368" stroke-width="1.6" stroke-dasharray="5 4" marker-end="url(#arrow)"/>
+<rect x="544.0" y="450.0" width="87" height="18" rx="4" fill="#ffffff" stroke="#dadce0"/>
+<text x="587.5" y="463.0" font-size="11" fill="#3c4043" text-anchor="middle">meta/result</text>
+<rect x="70" y="120" width="200" height="60" rx="7" fill="#e8f0fe" stroke="#3b6fd4" stroke-width="1.6"/>
+<text x="170.0" y="146.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">Admin SPA (browser)</text>
+<text x="170.0" y="162.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">React 19 · same-origin</text>
+<rect x="70" y="270" width="340" height="50" rx="7" fill="#e6f4ea" stroke="#2f8f4e" stroke-width="1.6"/>
+<text x="240.0" y="299.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">axum Router  /api + static SPA</text>
+<rect x="70" y="340" width="160" height="54" rx="7" fill="#e6f4ea" stroke="#2f8f4e" stroke-width="1.6"/>
+<text x="150.0" y="363.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">auth</text>
+<text x="150.0" y="379.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">OAuth+session</text>
+<rect x="250" y="340" width="160" height="54" rx="7" fill="#e6f4ea" stroke="#2f8f4e" stroke-width="1.6"/>
+<text x="330.0" y="363.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">runs</text>
+<text x="330.0" y="379.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">RunManager</text>
+<rect x="70" y="410" width="160" height="54" rx="7" fill="#e6f4ea" stroke="#2f8f4e" stroke-width="1.6"/>
+<text x="150.0" y="433.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">read</text>
+<text x="150.0" y="449.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">vintages/coverage</text>
+<rect x="250" y="410" width="160" height="54" rx="7" fill="#e6f4ea" stroke="#2f8f4e" stroke-width="1.6"/>
+<text x="330.0" y="433.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">spawner</text>
+<text x="330.0" y="449.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">qe-cli subprocess</text>
+<rect x="500" y="270" width="180" height="84" rx="7" fill="#e8eaed" stroke="#3c4043" stroke-width="1.6"/>
+<text x="590.0" y="308.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">Training pipeline</text>
+<text x="590.0" y="324.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">signal→wfo→ensemble
+→validation→G1→vintage</text>
+<rect x="500" y="370" width="180" height="84" rx="7" fill="#e8eaed" stroke="#3c4043" stroke-width="1.6"/>
+<text x="590.0" y="408.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">Runtime pipeline</text>
+<text x="590.0" y="424.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">bootstrap→evaluate
+→risk→venue (paper)</text>
+<rect x="500" y="480" width="180" height="60" rx="7" fill="#fce8e6" stroke="#c5382b" stroke-width="1.6"/>
+<text x="590.0" y="506.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">QE-132 firewall</text>
+<text x="590.0" y="522.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">search⟂portfolio⟂live</text>
+<rect x="765" y="270" width="150" height="54" rx="7" fill="#fef7e0" stroke="#c58a1a" stroke-width="1.6"/>
+<text x="840.0" y="293.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">MarketStore</text>
+<text x="840.0" y="309.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">LMDB</text>
+<rect x="765" y="336" width="150" height="54" rx="7" fill="#fef7e0" stroke="#c58a1a" stroke-width="1.6"/>
+<text x="840.0" y="359.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">SyntheticStore</text>
+<text x="840.0" y="375.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">LMDB cache</text>
+<rect x="765" y="402" width="150" height="54" rx="7" fill="#fef7e0" stroke="#c58a1a" stroke-width="1.6"/>
+<text x="840.0" y="425.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">Vintages</text>
+<text x="840.0" y="441.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">content-addressed</text>
+<rect x="765" y="468" width="150" height="54" rx="7" fill="#fef7e0" stroke="#c58a1a" stroke-width="1.6"/>
+<text x="840.0" y="491.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">Run store</text>
+<text x="840.0" y="507.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">meta/result JSON</text>
+</svg>

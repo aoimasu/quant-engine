@@ -1,0 +1,31 @@
+<mxfile host="app.diagrams.net" type="device">
+  <diagram name="Background Jobs &amp; Subprocess Supervision" id="diagram-1">
+    <mxGraphModel dx="980" dy="540" grid="1" gridSize="10" guides="1" tooltips="1"
+        connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="980"
+        pageHeight="540" math="0" shadow="0">
+      <root>
+<mxCell id="0"/>
+<mxCell id="1" parent="0"/>
+<mxCell id="api" value="POST /api/runs&#10;create" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e6f4ea;strokeColor=#2f8f4e;fontColor=#202124;fontFamily=Helvetica;fontSize=12;" vertex="1" parent="1"><mxGeometry x="40" y="120" width="150" height="54" as="geometry"/></mxCell>
+<mxCell id="pool" value="worker-pool&#10;Semaphore(max_concurrency)&#10;default 2" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8eaed;strokeColor=#3c4043;fontColor=#202124;fontFamily=Helvetica;fontSize=12;" vertex="1" parent="1"><mxGeometry x="230" y="110" width="180" height="74" as="geometry"/></mxCell>
+<mxCell id="queued" value="queued" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f1f3f4;strokeColor=#5f6368;fontColor=#202124;fontFamily=Helvetica;fontSize=12;" vertex="1" parent="1"><mxGeometry x="230" y="220" width="180" height="40" as="geometry"/></mxCell>
+<mxCell id="running" value="running" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f1f3f4;strokeColor=#5f6368;fontColor=#202124;fontFamily=Helvetica;fontSize=12;" vertex="1" parent="1"><mxGeometry x="230" y="290" width="180" height="40" as="geometry"/></mxCell>
+<mxCell id="term" value="succeeded / failed" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f1f3f4;strokeColor=#5f6368;fontColor=#202124;fontFamily=Helvetica;fontSize=12;" vertex="1" parent="1"><mxGeometry x="230" y="360" width="180" height="44" as="geometry"/></mxCell>
+<mxCell id="spawn" value="CliJobSpawner.spawn&#10;stdout/stderr piped&#10;kill_on_drop" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e6f4ea;strokeColor=#2f8f4e;fontColor=#202124;fontFamily=Helvetica;fontSize=12;" vertex="1" parent="1"><mxGeometry x="470" y="110" width="200" height="74" as="geometry"/></mxCell>
+<mxCell id="child" value="qe-cli child process&#10;emits JSON-line progress" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fce8e6;strokeColor=#c5382b;fontColor=#202124;fontFamily=Helvetica;fontSize=12;" vertex="1" parent="1"><mxGeometry x="470" y="220" width="200" height="60" as="geometry"/></mxCell>
+<mxCell id="tail" value="supervisor tail&#10;parse → update meta.json" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e6f4ea;strokeColor=#2f8f4e;fontColor=#202124;fontFamily=Helvetica;fontSize=12;" vertex="1" parent="1"><mxGeometry x="470" y="320" width="200" height="60" as="geometry"/></mxCell>
+<mxCell id="store" value="run store (files)&#10;meta.json · result.json&#10;stdout.log · index.json" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fef7e0;strokeColor=#c58a1a;fontColor=#202124;fontFamily=Helvetica;fontSize=12;" vertex="1" parent="1"><mxGeometry x="730" y="220" width="200" height="74" as="geometry"/></mxCell>
+<mxCell id="spa" value="SPA poller&#10;GET /runs/:id every 2s&#10;stop on terminal" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8f0fe;strokeColor=#3b6fd4;fontColor=#202124;fontFamily=Helvetica;fontSize=12;" vertex="1" parent="1"><mxGeometry x="730" y="340" width="200" height="74" as="geometry"/></mxCell>
+<mxCell id="n2" value="" style="endArrow=classic;html=1;strokeColor=#5f6368;fontSize=10;labelBackgroundColor=#ffffff;" edge="1" parent="1"><mxGeometry relative="1" as="geometry"><mxPoint x="190" y="147" as="sourcePoint"/><mxPoint x="230" y="147" as="targetPoint"/></mxGeometry></mxCell>
+<mxCell id="n3" value="" style="endArrow=classic;html=1;strokeColor=#5f6368;fontSize=10;labelBackgroundColor=#ffffff;" edge="1" parent="1"><mxGeometry relative="1" as="geometry"><mxPoint x="320" y="184" as="sourcePoint"/><mxPoint x="320" y="220" as="targetPoint"/></mxGeometry></mxCell>
+<mxCell id="n4" value="slot free" style="endArrow=classic;html=1;strokeColor=#5f6368;fontSize=10;labelBackgroundColor=#ffffff;" edge="1" parent="1"><mxGeometry relative="1" as="geometry"><mxPoint x="320" y="260" as="sourcePoint"/><mxPoint x="320" y="290" as="targetPoint"/></mxGeometry></mxCell>
+<mxCell id="n5" value="exit" style="endArrow=classic;html=1;strokeColor=#5f6368;fontSize=10;labelBackgroundColor=#ffffff;" edge="1" parent="1"><mxGeometry relative="1" as="geometry"><mxPoint x="320" y="330" as="sourcePoint"/><mxPoint x="320" y="360" as="targetPoint"/></mxGeometry></mxCell>
+<mxCell id="n6" value="spawn" style="endArrow=classic;html=1;strokeColor=#5f6368;fontSize=10;labelBackgroundColor=#ffffff;" edge="1" parent="1"><mxGeometry relative="1" as="geometry"><mxPoint x="410" y="140" as="sourcePoint"/><mxPoint x="470" y="140" as="targetPoint"/></mxGeometry></mxCell>
+<mxCell id="n7" value="" style="endArrow=classic;html=1;strokeColor=#5f6368;fontSize=10;labelBackgroundColor=#ffffff;" edge="1" parent="1"><mxGeometry relative="1" as="geometry"><mxPoint x="570" y="184" as="sourcePoint"/><mxPoint x="570" y="220" as="targetPoint"/></mxGeometry></mxCell>
+<mxCell id="n8" value="stdout" style="endArrow=classic;html=1;strokeColor=#5f6368;fontSize=10;labelBackgroundColor=#ffffff;" edge="1" parent="1"><mxGeometry relative="1" as="geometry"><mxPoint x="570" y="280" as="sourcePoint"/><mxPoint x="570" y="320" as="targetPoint"/></mxGeometry></mxCell>
+<mxCell id="n9" value="atomic write" style="endArrow=classic;html=1;strokeColor=#5f6368;fontSize=10;labelBackgroundColor=#ffffff;" edge="1" parent="1"><mxGeometry relative="1" as="geometry"><mxPoint x="670" y="350" as="sourcePoint"/><mxPoint x="730" y="290" as="targetPoint"/></mxGeometry></mxCell>
+<mxCell id="n10" value="read" style="endArrow=classic;html=1;dashed=1;strokeColor=#5f6368;fontSize=10;labelBackgroundColor=#ffffff;" edge="1" parent="1"><mxGeometry relative="1" as="geometry"><mxPoint x="730" y="360" as="sourcePoint"/><mxPoint x="670" y="355" as="targetPoint"/></mxGeometry></mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

@@ -1,0 +1,27 @@
+<mxfile host="app.diagrams.net" type="device">
+  <diagram name="Deployment &amp; Infrastructure" id="diagram-1">
+    <mxGraphModel dx="940" dy="560" grid="1" gridSize="10" guides="1" tooltips="1"
+        connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="940"
+        pageHeight="560" math="0" shadow="0">
+      <root>
+<mxCell id="0"/>
+<mxCell id="1" parent="0"/>
+<mxCell id="n2" value="DOCKER BUILD (MULTI-STAGE)" style="rounded=1;dashed=1;html=1;fillColor=none;strokeColor=#9aa0a6;verticalAlign=top;fontColor=#9aa0a6;fontStyle=1;fontSize=11;" vertex="1" parent="1"><mxGeometry x="40" y="90" width="380" height="260" as="geometry"/></mxCell>
+<mxCell id="n3" value="RUNTIME HOST" style="rounded=1;dashed=1;html=1;fillColor=none;strokeColor=#9aa0a6;verticalAlign=top;fontColor=#9aa0a6;fontStyle=1;fontSize=11;" vertex="1" parent="1"><mxGeometry x="460" y="90" width="440" height="260" as="geometry"/></mxCell>
+<mxCell id="b1" value="builder&#10;rust:1.96&#10;cargo build --release" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f3e8fd;strokeColor=#8a3ffc;fontColor=#202124;fontFamily=Helvetica;fontSize=12;" vertex="1" parent="1"><mxGeometry x="70" y="130" width="150" height="74" as="geometry"/></mxCell>
+<mxCell id="b2" value="runtime&#10;debian:bookworm-slim" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f3e8fd;strokeColor=#8a3ffc;fontColor=#202124;fontFamily=Helvetica;fontSize=12;" vertex="1" parent="1"><mxGeometry x="250" y="130" width="150" height="74" as="geometry"/></mxCell>
+<mxCell id="bin" value="qe binary  (ENTRYPOINT qe)&#10;same binary as local run" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e6f4ea;strokeColor=#2f8f4e;fontColor=#202124;fontFamily=Helvetica;fontSize=12;" vertex="1" parent="1"><mxGeometry x="70" y="240" width="330" height="54" as="geometry"/></mxCell>
+<mxCell id="srv" value="qe-server&#10;bind 127.0.0.1:8080" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e6f4ea;strokeColor=#2f8f4e;fontColor=#202124;fontFamily=Helvetica;fontSize=12;" vertex="1" parent="1"><mxGeometry x="490" y="130" width="180" height="60" as="geometry"/></mxCell>
+<mxCell id="spa2" value="web/dist&#10;ServeDir /" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8f0fe;strokeColor=#3b6fd4;fontColor=#202124;fontFamily=Helvetica;fontSize=12;" vertex="1" parent="1"><mxGeometry x="700" y="130" width="170" height="60" as="geometry"/></mxCell>
+<mxCell id="vol" value="/app/data (VOLUME)&#10;LMDB · vintages · runs/" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fef7e0;strokeColor=#c58a1a;fontColor=#202124;fontFamily=Helvetica;fontSize=12;" vertex="1" parent="1"><mxGeometry x="490" y="220" width="180" height="74" as="geometry"/></mxCell>
+<mxCell id="env" value="QE_* env / config.toml&#10;12-factor overrides" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f1f3f4;strokeColor=#5f6368;fontColor=#202124;fontFamily=Helvetica;fontSize=12;" vertex="1" parent="1"><mxGeometry x="700" y="220" width="170" height="74" as="geometry"/></mxCell>
+<mxCell id="note" value="No hard-coded paths · loopback bind by default · state under mountable volume" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#9aa0a6;fontColor=#202124;fontFamily=Helvetica;fontSize=12;" vertex="1" parent="1"><mxGeometry x="460" y="380" width="440" height="60" as="geometry"/></mxCell>
+<mxCell id="secrets" value="Secrets via env only (OAuth creds, QE_SESSION_SECRET) — never committed" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fce8e6;strokeColor=#c5382b;fontColor=#202124;fontFamily=Helvetica;fontSize=12;" vertex="1" parent="1"><mxGeometry x="40" y="380" width="380" height="60" as="geometry"/></mxCell>
+<mxCell id="n4" value="copy qe" style="endArrow=classic;html=1;strokeColor=#5f6368;fontSize=10;labelBackgroundColor=#ffffff;" edge="1" parent="1"><mxGeometry relative="1" as="geometry"><mxPoint x="220" y="167" as="sourcePoint"/><mxPoint x="250" y="167" as="targetPoint"/></mxGeometry></mxCell>
+<mxCell id="n5" value="static" style="endArrow=classic;html=1;strokeColor=#5f6368;fontSize=10;labelBackgroundColor=#ffffff;" edge="1" parent="1"><mxGeometry relative="1" as="geometry"><mxPoint x="670" y="160" as="sourcePoint"/><mxPoint x="700" y="160" as="targetPoint"/></mxGeometry></mxCell>
+<mxCell id="n6" value="state" style="endArrow=classic;html=1;strokeColor=#5f6368;fontSize=10;labelBackgroundColor=#ffffff;" edge="1" parent="1"><mxGeometry relative="1" as="geometry"><mxPoint x="580" y="190" as="sourcePoint"/><mxPoint x="580" y="220" as="targetPoint"/></mxGeometry></mxCell>
+<mxCell id="n7" value="run" style="endArrow=classic;html=1;dashed=1;strokeColor=#5f6368;fontSize=10;labelBackgroundColor=#ffffff;" edge="1" parent="1"><mxGeometry relative="1" as="geometry"><mxPoint x="400" y="267" as="sourcePoint"/><mxPoint x="490" y="160" as="targetPoint"/></mxGeometry></mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
