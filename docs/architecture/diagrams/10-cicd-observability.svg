@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 560" font-family="Helvetica, Arial, sans-serif" font-size="13">
+<defs><marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L8,3 L0,6 Z" fill="#5f6368"/></marker></defs>
+<rect x="0" y="0" width="960" height="560" fill="#ffffff"/>
+<text x="24" y="34" font-size="20" font-weight="700" fill="#202124">CI/CD &amp; Observability</text>
+<text x="24" y="54" font-size="12" fill="#5f6368">Evidence: .github/workflows/ci.yml, frontend.yml, crates/telemetry, crates/error</text>
+<rect x="40" y="90" width="500" height="220" rx="10" fill="none" stroke="#9aa0a6" stroke-width="1.5" stroke-dasharray="6 4" opacity="0.9"/>
+<text x="52" y="110" font-size="12" font-weight="700" fill="#9aa0a6" letter-spacing="0.5">GITHUB ACTIONS — CI (RUST)  CI.YML</text>
+<rect x="40" y="330" width="500" height="130" rx="10" fill="none" stroke="#9aa0a6" stroke-width="1.5" stroke-dasharray="6 4" opacity="0.9"/>
+<text x="52" y="350" font-size="12" font-weight="700" fill="#9aa0a6" letter-spacing="0.5">GITHUB ACTIONS — FRONTEND.YML (WEB/**)</text>
+<rect x="580" y="90" width="360" height="370" rx="10" fill="none" stroke="#9aa0a6" stroke-width="1.5" stroke-dasharray="6 4" opacity="0.9"/>
+<text x="592" y="110" font-size="12" font-weight="700" fill="#9aa0a6" letter-spacing="0.5">OBSERVABILITY</text>
+<line x1="180" y1="170" x2="210" y2="152" stroke="#5f6368" stroke-width="1.6" marker-end="url(#arrow)"/>
+<line x1="180" y1="180" x2="210" y2="210" stroke="#5f6368" stroke-width="1.6" marker-end="url(#arrow)"/>
+<line x1="300" y1="152" x2="320" y2="152" stroke="#5f6368" stroke-width="1.6" marker-end="url(#arrow)"/>
+<line x1="160" y1="402" x2="180" y2="402" stroke="#5f6368" stroke-width="1.6" marker-end="url(#arrow)"/>
+<line x1="280" y1="402" x2="300" y2="402" stroke="#5f6368" stroke-width="1.6" marker-end="url(#arrow)"/>
+<line x1="400" y1="402" x2="420" y2="402" stroke="#5f6368" stroke-width="1.6" marker-end="url(#arrow)"/>
+<rect x="60" y="140" width="120" height="60" rx="7" fill="#f3e8fd" stroke="#8a3ffc" stroke-width="1.6"/>
+<text x="120.0" y="166.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">push / PR</text>
+<text x="120.0" y="182.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">→ main</text>
+<rect x="210" y="130" width="90" height="44" rx="7" fill="#f3e8fd" stroke="#8a3ffc" stroke-width="1.6"/>
+<text x="255.0" y="156.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">fmt</text>
+<rect x="210" y="190" width="90" height="44" rx="7" fill="#f3e8fd" stroke="#8a3ffc" stroke-width="1.6"/>
+<text x="255.0" y="208.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">clippy</text>
+<text x="255.0" y="224.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">-D warn</text>
+<rect x="320" y="130" width="100" height="44" rx="7" fill="#f3e8fd" stroke="#8a3ffc" stroke-width="1.6"/>
+<text x="370.0" y="148.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">test</text>
+<text x="370.0" y="164.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">--locked</text>
+<rect x="320" y="190" width="100" height="44" rx="7" fill="#f3e8fd" stroke="#8a3ffc" stroke-width="1.6"/>
+<text x="370.0" y="216.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">cargo-deny</text>
+<rect x="440" y="160" width="90" height="74" rx="7" fill="#fce8e6" stroke="#c5382b" stroke-width="1.6"/>
+<text x="485.0" y="193.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">firewall</text>
+<text x="485.0" y="209.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">train⟂live
+guard</text>
+<rect x="60" y="375" width="100" height="54" rx="7" fill="#f3e8fd" stroke="#8a3ffc" stroke-width="1.6"/>
+<text x="110.0" y="406.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">npm ci</text>
+<rect x="180" y="375" width="100" height="54" rx="7" fill="#f3e8fd" stroke="#8a3ffc" stroke-width="1.6"/>
+<text x="230.0" y="406.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">lint</text>
+<rect x="300" y="375" width="100" height="54" rx="7" fill="#f3e8fd" stroke="#8a3ffc" stroke-width="1.6"/>
+<text x="350.0" y="406.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">build</text>
+<rect x="420" y="375" width="100" height="54" rx="7" fill="#f3e8fd" stroke="#8a3ffc" stroke-width="1.6"/>
+<text x="470.0" y="398.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">test</text>
+<text x="470.0" y="414.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">vitest</text>
+<rect x="610" y="140" width="300" height="74" rx="7" fill="#e6f4ea" stroke="#2f8f4e" stroke-width="1.6"/>
+<text x="760.0" y="173.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">qe-telemetry</text>
+<text x="760.0" y="189.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">tracing + JSON logs
+correlation: run_id/vintage/instrument</text>
+<rect x="610" y="240" width="300" height="60" rx="7" fill="#e8eaed" stroke="#3c4043" stroke-width="1.6"/>
+<text x="760.0" y="266.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">HOT_PATH_TARGET</text>
+<text x="760.0" y="282.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">hot-path emissions short-circuit</text>
+<rect x="610" y="330" width="300" height="74" rx="7" fill="#fce8e6" stroke="#c5382b" stroke-width="1.6"/>
+<text x="760.0" y="363.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">qe-error</text>
+<text x="760.0" y="379.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">ErrorClass Transient/Data/Fatal
+Disposition → retry/skip/halt (no panic)</text>
+<rect x="610" y="420" width="300" height="30" rx="7" fill="#f1f3f4" stroke="#5f6368" stroke-width="1.6"/>
+<text x="760.0" y="439.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">GET /api/health → {status:ok}</text>
+</svg>

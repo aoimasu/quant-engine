@@ -1,0 +1,30 @@
+<mxfile host="app.diagrams.net" type="device">
+  <diagram name="Security Boundaries &amp; Data Protection" id="diagram-1">
+    <mxGraphModel dx="980" dy="600" grid="1" gridSize="10" guides="1" tooltips="1"
+        connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="980"
+        pageHeight="600" math="0" shadow="0">
+      <root>
+<mxCell id="0"/>
+<mxCell id="1" parent="0"/>
+<mxCell id="n2" value="PUBLIC (BROWSER)" style="rounded=1;dashed=1;html=1;fillColor=none;strokeColor=#9aa0a6;verticalAlign=top;fontColor=#9aa0a6;fontStyle=1;fontSize=11;" vertex="1" parent="1"><mxGeometry x="40" y="90" width="260" height="460" as="geometry"/></mxCell>
+<mxCell id="n3" value="TRUSTED SERVER" style="rounded=1;dashed=1;html=1;fillColor=none;strokeColor=#9aa0a6;verticalAlign=top;fontColor=#9aa0a6;fontStyle=1;fontSize=11;" vertex="1" parent="1"><mxGeometry x="330" y="90" width="320" height="460" as="geometry"/></mxCell>
+<mxCell id="n4" value="ISOLATION / DATA" style="rounded=1;dashed=1;html=1;fillColor=none;strokeColor=#9aa0a6;verticalAlign=top;fontColor=#9aa0a6;fontStyle=1;fontSize=11;" vertex="1" parent="1"><mxGeometry x="680" y="90" width="260" height="460" as="geometry"/></mxCell>
+<mxCell id="pb" value="Admin SPA&#10;untrusted input" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8f0fe;strokeColor=#3b6fd4;fontColor=#202124;fontFamily=Helvetica;fontSize=12;" vertex="1" parent="1"><mxGeometry x="70" y="130" width="200" height="60" as="geometry"/></mxCell>
+<mxCell id="cook" value="session cookie&#10;HttpOnly·Secure·SameSite" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8f0fe;strokeColor=#3b6fd4;fontColor=#202124;fontFamily=Helvetica;fontSize=12;" vertex="1" parent="1"><mxGeometry x="70" y="220" width="200" height="60" as="geometry"/></mxCell>
+<mxCell id="csrf" value="OAuth CSRF state&#10;double-submit" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8f0fe;strokeColor=#3b6fd4;fontColor=#202124;fontFamily=Helvetica;fontSize=12;" vertex="1" parent="1"><mxGeometry x="70" y="320" width="200" height="60" as="geometry"/></mxCell>
+<mxCell id="gate" value="require_session gate&#10;401 without valid HMAC" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fce8e6;strokeColor=#c5382b;fontColor=#202124;fontFamily=Helvetica;fontSize=12;" vertex="1" parent="1"><mxGeometry x="360" y="130" width="260" height="60" as="geometry"/></mxCell>
+<mxCell id="allow" value="email allowlist&#10;fail-closed · normalized" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fce8e6;strokeColor=#c5382b;fontColor=#202124;fontFamily=Helvetica;fontSize=12;" vertex="1" parent="1"><mxGeometry x="360" y="220" width="260" height="60" as="geometry"/></mxCell>
+<mxCell id="claims" value="id-token claims check&#10;aud/iss/exp/email_verified" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e6f4ea;strokeColor=#2f8f4e;fontColor=#202124;fontFamily=Helvetica;fontSize=12;" vertex="1" parent="1"><mxGeometry x="360" y="310" width="260" height="60" as="geometry"/></mxCell>
+<mxCell id="secret" value="secret handling&#10;env only · QE_SESSION_SECRET&#10;no .env committed" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fef7e0;strokeColor=#c58a1a;fontColor=#202124;fontFamily=Helvetica;fontSize=12;" vertex="1" parent="1"><mxGeometry x="360" y="400" width="260" height="74" as="geometry"/></mxCell>
+<mxCell id="noun" value="no bare unwrap (order path)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8eaed;strokeColor=#3c4043;fontColor=#202124;fontFamily=Helvetica;fontSize=12;" vertex="1" parent="1"><mxGeometry x="360" y="490" width="260" height="40" as="geometry"/></mxCell>
+<mxCell id="fw" value="QE-132 firewall&#10;server ⊬ runtime/venue&#10;search⟂portfolio⟂live" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fce8e6;strokeColor=#c5382b;fontColor=#202124;fontFamily=Helvetica;fontSize=12;" vertex="1" parent="1"><mxGeometry x="710" y="130" width="200" height="84" as="geometry"/></mxCell>
+<mxCell id="nolive" value="no live order path&#10;paper/offline only" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8eaed;strokeColor=#3c4043;fontColor=#202124;fontFamily=Helvetica;fontSize=12;" vertex="1" parent="1"><mxGeometry x="710" y="240" width="200" height="60" as="geometry"/></mxCell>
+<mxCell id="det" value="deterministic vintages&#10;content hash · lineage&#10;reproducible" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fef7e0;strokeColor=#c58a1a;fontColor=#202124;fontFamily=Helvetica;fontSize=12;" vertex="1" parent="1"><mxGeometry x="710" y="330" width="200" height="74" as="geometry"/></mxCell>
+<mxCell id="loop" value="loopback bind default&#10;127.0.0.1:8080" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f1f3f4;strokeColor=#5f6368;fontColor=#202124;fontFamily=Helvetica;fontSize=12;" vertex="1" parent="1"><mxGeometry x="710" y="430" width="200" height="54" as="geometry"/></mxCell>
+<mxCell id="n5" value="HTTPS" style="endArrow=classic;html=1;strokeColor=#5f6368;fontSize=10;labelBackgroundColor=#ffffff;" edge="1" parent="1"><mxGeometry relative="1" as="geometry"><mxPoint x="270" y="160" as="sourcePoint"/><mxPoint x="360" y="160" as="targetPoint"/></mxGeometry></mxCell>
+<mxCell id="n6" value="verify" style="endArrow=classic;html=1;strokeColor=#5f6368;fontSize=10;labelBackgroundColor=#ffffff;" edge="1" parent="1"><mxGeometry relative="1" as="geometry"><mxPoint x="270" y="250" as="sourcePoint"/><mxPoint x="360" y="245" as="targetPoint"/></mxGeometry></mxCell>
+<mxCell id="n7" value="" style="endArrow=classic;html=1;strokeColor=#5f6368;fontSize=10;labelBackgroundColor=#ffffff;" edge="1" parent="1"><mxGeometry relative="1" as="geometry"><mxPoint x="620" y="160" as="sourcePoint"/><mxPoint x="710" y="170" as="targetPoint"/></mxGeometry></mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

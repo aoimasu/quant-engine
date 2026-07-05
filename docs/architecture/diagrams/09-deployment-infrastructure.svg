@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 940 560" font-family="Helvetica, Arial, sans-serif" font-size="13">
+<defs><marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L8,3 L0,6 Z" fill="#5f6368"/></marker></defs>
+<rect x="0" y="0" width="940" height="560" fill="#ffffff"/>
+<text x="24" y="34" font-size="20" font-weight="700" fill="#202124">Deployment &amp; Infrastructure</text>
+<text x="24" y="54" font-size="12" fill="#5f6368">12-factor, deployment-agnostic. Evidence: Dockerfile, README.md, crates/server/src/lib.rs, config.example.toml</text>
+<rect x="40" y="90" width="380" height="260" rx="10" fill="none" stroke="#9aa0a6" stroke-width="1.5" stroke-dasharray="6 4" opacity="0.9"/>
+<text x="52" y="110" font-size="12" font-weight="700" fill="#9aa0a6" letter-spacing="0.5">DOCKER BUILD (MULTI-STAGE)</text>
+<rect x="460" y="90" width="440" height="260" rx="10" fill="none" stroke="#9aa0a6" stroke-width="1.5" stroke-dasharray="6 4" opacity="0.9"/>
+<text x="472" y="110" font-size="12" font-weight="700" fill="#9aa0a6" letter-spacing="0.5">RUNTIME HOST</text>
+<line x1="220" y1="167" x2="250" y2="167" stroke="#5f6368" stroke-width="1.6" marker-end="url(#arrow)"/>
+<rect x="205.5" y="157.0" width="59" height="18" rx="4" fill="#ffffff" stroke="#dadce0"/>
+<text x="235.0" y="170.0" font-size="11" fill="#3c4043" text-anchor="middle">copy qe</text>
+<line x1="670" y1="160" x2="700" y2="160" stroke="#5f6368" stroke-width="1.6" marker-end="url(#arrow)"/>
+<rect x="659.0" y="150.0" width="52" height="18" rx="4" fill="#ffffff" stroke="#dadce0"/>
+<text x="685.0" y="163.0" font-size="11" fill="#3c4043" text-anchor="middle">static</text>
+<line x1="580" y1="190" x2="580" y2="220" stroke="#5f6368" stroke-width="1.6" marker-end="url(#arrow)"/>
+<rect x="557.5" y="195.0" width="45" height="18" rx="4" fill="#ffffff" stroke="#dadce0"/>
+<text x="580.0" y="208.0" font-size="11" fill="#3c4043" text-anchor="middle">state</text>
+<line x1="400" y1="267" x2="490" y2="160" stroke="#5f6368" stroke-width="1.6" stroke-dasharray="5 4" marker-end="url(#arrow)"/>
+<rect x="429.5" y="203.5" width="31" height="18" rx="4" fill="#ffffff" stroke="#dadce0"/>
+<text x="445.0" y="216.5" font-size="11" fill="#3c4043" text-anchor="middle">run</text>
+<rect x="70" y="130" width="150" height="74" rx="7" fill="#f3e8fd" stroke="#8a3ffc" stroke-width="1.6"/>
+<text x="145.0" y="163.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">builder</text>
+<text x="145.0" y="179.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">rust:1.96
+cargo build --release</text>
+<rect x="250" y="130" width="150" height="74" rx="7" fill="#f3e8fd" stroke="#8a3ffc" stroke-width="1.6"/>
+<text x="325.0" y="163.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">runtime</text>
+<text x="325.0" y="179.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">debian:bookworm-slim</text>
+<rect x="70" y="240" width="330" height="54" rx="7" fill="#e6f4ea" stroke="#2f8f4e" stroke-width="1.6"/>
+<text x="235.0" y="263.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">qe binary  (ENTRYPOINT qe)</text>
+<text x="235.0" y="279.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">same binary as local run</text>
+<rect x="490" y="130" width="180" height="60" rx="7" fill="#e6f4ea" stroke="#2f8f4e" stroke-width="1.6"/>
+<text x="580.0" y="156.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">qe-server</text>
+<text x="580.0" y="172.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">bind 127.0.0.1:8080</text>
+<rect x="700" y="130" width="170" height="60" rx="7" fill="#e8f0fe" stroke="#3b6fd4" stroke-width="1.6"/>
+<text x="785.0" y="156.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">web/dist</text>
+<text x="785.0" y="172.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">ServeDir /</text>
+<rect x="490" y="220" width="180" height="74" rx="7" fill="#fef7e0" stroke="#c58a1a" stroke-width="1.6"/>
+<text x="580.0" y="253.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">/app/data (VOLUME)</text>
+<text x="580.0" y="269.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">LMDB · vintages · runs/</text>
+<rect x="700" y="220" width="170" height="74" rx="7" fill="#f1f3f4" stroke="#5f6368" stroke-width="1.6"/>
+<text x="785.0" y="253.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">QE_* env / config.toml</text>
+<text x="785.0" y="269.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">12-factor overrides</text>
+<rect x="460" y="380" width="440" height="60" rx="7" fill="#ffffff" stroke="#9aa0a6" stroke-width="1.6"/>
+<text x="680.0" y="414.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">No hard-coded paths · loopback bind by default · state under mountable volume</text>
+<rect x="40" y="380" width="380" height="60" rx="7" fill="#fce8e6" stroke="#c5382b" stroke-width="1.6"/>
+<text x="230.0" y="414.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">Secrets via env only (OAuth creds, QE_SESSION_SECRET) — never committed</text>
+</svg>

@@ -23,7 +23,7 @@ const CSS = `
 .qe-cov__grid { display: grid; grid-template-columns: repeat(20, 1fr); gap: 3px; }
 .qe-cov__cell { aspect-ratio: 1; border-radius: var(--radius-xs); background: var(--surface-inset); }
 .qe-cov__cell--long { background: var(--violet-400); }
-.qe-cov__cell--short { background: var(--cyan-400, #22d3ee); }
+.qe-cov__cell--short { background: var(--info-500); }
 .qe-gate { display: flex; flex-direction: column; gap: 12px; }
 .qe-gate__crit { display: flex; flex-direction: column; gap: 6px; }
 .qe-gate__crit .row { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-secondary); }

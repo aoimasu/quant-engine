@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 600" font-family="Helvetica, Arial, sans-serif" font-size="13">
+<defs><marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L8,3 L0,6 Z" fill="#5f6368"/></marker></defs>
+<rect x="0" y="0" width="980" height="600" fill="#ffffff"/>
+<text x="24" y="34" font-size="20" font-weight="700" fill="#202124">Security Boundaries &amp; Data Protection</text>
+<text x="24" y="54" font-size="12" fill="#5f6368">Evidence: crates/server/src/auth, crates/architecture (firewall), README.md, Cargo.toml lints</text>
+<rect x="40" y="90" width="260" height="460" rx="10" fill="none" stroke="#9aa0a6" stroke-width="1.5" stroke-dasharray="6 4" opacity="0.9"/>
+<text x="52" y="110" font-size="12" font-weight="700" fill="#9aa0a6" letter-spacing="0.5">PUBLIC (BROWSER)</text>
+<rect x="330" y="90" width="320" height="460" rx="10" fill="none" stroke="#9aa0a6" stroke-width="1.5" stroke-dasharray="6 4" opacity="0.9"/>
+<text x="342" y="110" font-size="12" font-weight="700" fill="#9aa0a6" letter-spacing="0.5">TRUSTED SERVER</text>
+<rect x="680" y="90" width="260" height="460" rx="10" fill="none" stroke="#9aa0a6" stroke-width="1.5" stroke-dasharray="6 4" opacity="0.9"/>
+<text x="692" y="110" font-size="12" font-weight="700" fill="#9aa0a6" letter-spacing="0.5">ISOLATION / DATA</text>
+<line x1="270" y1="160" x2="360" y2="160" stroke="#5f6368" stroke-width="1.6" marker-end="url(#arrow)"/>
+<rect x="292.5" y="150.0" width="45" height="18" rx="4" fill="#ffffff" stroke="#dadce0"/>
+<text x="315.0" y="163.0" font-size="11" fill="#3c4043" text-anchor="middle">HTTPS</text>
+<line x1="270" y1="250" x2="360" y2="245" stroke="#5f6368" stroke-width="1.6" marker-end="url(#arrow)"/>
+<rect x="289.0" y="237.5" width="52" height="18" rx="4" fill="#ffffff" stroke="#dadce0"/>
+<text x="315.0" y="250.5" font-size="11" fill="#3c4043" text-anchor="middle">verify</text>
+<line x1="620" y1="160" x2="710" y2="170" stroke="#5f6368" stroke-width="1.6" marker-end="url(#arrow)"/>
+<rect x="70" y="130" width="200" height="60" rx="7" fill="#e8f0fe" stroke="#3b6fd4" stroke-width="1.6"/>
+<text x="170.0" y="156.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">Admin SPA</text>
+<text x="170.0" y="172.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">untrusted input</text>
+<rect x="70" y="220" width="200" height="60" rx="7" fill="#e8f0fe" stroke="#3b6fd4" stroke-width="1.6"/>
+<text x="170.0" y="246.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">session cookie</text>
+<text x="170.0" y="262.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">HttpOnly·Secure·SameSite</text>
+<rect x="70" y="320" width="200" height="60" rx="7" fill="#e8f0fe" stroke="#3b6fd4" stroke-width="1.6"/>
+<text x="170.0" y="346.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">OAuth CSRF state</text>
+<text x="170.0" y="362.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">double-submit</text>
+<rect x="360" y="130" width="260" height="60" rx="7" fill="#fce8e6" stroke="#c5382b" stroke-width="1.6"/>
+<text x="490.0" y="156.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">require_session gate</text>
+<text x="490.0" y="172.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">401 without valid HMAC</text>
+<rect x="360" y="220" width="260" height="60" rx="7" fill="#fce8e6" stroke="#c5382b" stroke-width="1.6"/>
+<text x="490.0" y="246.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">email allowlist</text>
+<text x="490.0" y="262.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">fail-closed · normalized</text>
+<rect x="360" y="310" width="260" height="60" rx="7" fill="#e6f4ea" stroke="#2f8f4e" stroke-width="1.6"/>
+<text x="490.0" y="336.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">id-token claims check</text>
+<text x="490.0" y="352.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">aud/iss/exp/email_verified</text>
+<rect x="360" y="400" width="260" height="74" rx="7" fill="#fef7e0" stroke="#c58a1a" stroke-width="1.6"/>
+<text x="490.0" y="433.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">secret handling</text>
+<text x="490.0" y="449.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">env only · QE_SESSION_SECRET
+no .env committed</text>
+<rect x="360" y="490" width="260" height="40" rx="7" fill="#e8eaed" stroke="#3c4043" stroke-width="1.6"/>
+<text x="490.0" y="514.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">no bare unwrap (order path)</text>
+<rect x="710" y="130" width="200" height="84" rx="7" fill="#fce8e6" stroke="#c5382b" stroke-width="1.6"/>
+<text x="810.0" y="168.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">QE-132 firewall</text>
+<text x="810.0" y="184.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">server ⊬ runtime/venue
+search⟂portfolio⟂live</text>
+<rect x="710" y="240" width="200" height="60" rx="7" fill="#e8eaed" stroke="#3c4043" stroke-width="1.6"/>
+<text x="810.0" y="266.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">no live order path</text>
+<text x="810.0" y="282.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">paper/offline only</text>
+<rect x="710" y="330" width="200" height="74" rx="7" fill="#fef7e0" stroke="#c58a1a" stroke-width="1.6"/>
+<text x="810.0" y="363.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">deterministic vintages</text>
+<text x="810.0" y="379.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">content hash · lineage
+reproducible</text>
+<rect x="710" y="430" width="200" height="54" rx="7" fill="#f1f3f4" stroke="#5f6368" stroke-width="1.6"/>
+<text x="810.0" y="453.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">loopback bind default</text>
+<text x="810.0" y="469.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">127.0.0.1:8080</text>
+</svg>

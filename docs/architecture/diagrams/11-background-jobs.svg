@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 540" font-family="Helvetica, Arial, sans-serif" font-size="13">
+<defs><marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L8,3 L0,6 Z" fill="#5f6368"/></marker></defs>
+<rect x="0" y="0" width="980" height="540" fill="#ffffff"/>
+<text x="24" y="34" font-size="20" font-weight="700" fill="#202124">Background Jobs &amp; Subprocess Supervision</text>
+<text x="24" y="54" font-size="12" fill="#5f6368">No queue/cron; run supervision via a bounded worker pool. Evidence: crates/server/src/runs (manager/spawn/store), web/src/api/runs.ts</text>
+<line x1="190" y1="147" x2="230" y2="147" stroke="#5f6368" stroke-width="1.6" marker-end="url(#arrow)"/>
+<line x1="320" y1="184" x2="320" y2="220" stroke="#5f6368" stroke-width="1.6" marker-end="url(#arrow)"/>
+<line x1="320" y1="260" x2="320" y2="290" stroke="#5f6368" stroke-width="1.6" marker-end="url(#arrow)"/>
+<rect x="283.5" y="265.0" width="73" height="18" rx="4" fill="#ffffff" stroke="#dadce0"/>
+<text x="320.0" y="278.0" font-size="11" fill="#3c4043" text-anchor="middle">slot free</text>
+<line x1="320" y1="330" x2="320" y2="360" stroke="#5f6368" stroke-width="1.6" marker-end="url(#arrow)"/>
+<rect x="301.0" y="335.0" width="38" height="18" rx="4" fill="#ffffff" stroke="#dadce0"/>
+<text x="320.0" y="348.0" font-size="11" fill="#3c4043" text-anchor="middle">exit</text>
+<line x1="410" y1="140" x2="470" y2="140" stroke="#5f6368" stroke-width="1.6" marker-end="url(#arrow)"/>
+<rect x="417.5" y="130.0" width="45" height="18" rx="4" fill="#ffffff" stroke="#dadce0"/>
+<text x="440.0" y="143.0" font-size="11" fill="#3c4043" text-anchor="middle">spawn</text>
+<line x1="570" y1="184" x2="570" y2="220" stroke="#5f6368" stroke-width="1.6" marker-end="url(#arrow)"/>
+<line x1="570" y1="280" x2="570" y2="320" stroke="#5f6368" stroke-width="1.6" marker-end="url(#arrow)"/>
+<rect x="544.0" y="290.0" width="52" height="18" rx="4" fill="#ffffff" stroke="#dadce0"/>
+<text x="570.0" y="303.0" font-size="11" fill="#3c4043" text-anchor="middle">stdout</text>
+<line x1="670" y1="350" x2="730" y2="290" stroke="#5f6368" stroke-width="1.6" marker-end="url(#arrow)"/>
+<rect x="653.0" y="310.0" width="94" height="18" rx="4" fill="#ffffff" stroke="#dadce0"/>
+<text x="700.0" y="323.0" font-size="11" fill="#3c4043" text-anchor="middle">atomic write</text>
+<line x1="730" y1="360" x2="670" y2="355" stroke="#5f6368" stroke-width="1.6" stroke-dasharray="5 4" marker-end="url(#arrow)"/>
+<rect x="681.0" y="347.5" width="38" height="18" rx="4" fill="#ffffff" stroke="#dadce0"/>
+<text x="700.0" y="360.5" font-size="11" fill="#3c4043" text-anchor="middle">read</text>
+<rect x="40" y="120" width="150" height="54" rx="7" fill="#e6f4ea" stroke="#2f8f4e" stroke-width="1.6"/>
+<text x="115.0" y="143.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">POST /api/runs</text>
+<text x="115.0" y="159.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">create</text>
+<rect x="230" y="110" width="180" height="74" rx="7" fill="#e8eaed" stroke="#3c4043" stroke-width="1.6"/>
+<text x="320.0" y="143.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">worker-pool</text>
+<text x="320.0" y="159.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">Semaphore(max_concurrency)
+default 2</text>
+<rect x="230" y="220" width="180" height="40" rx="7" fill="#f1f3f4" stroke="#5f6368" stroke-width="1.6"/>
+<text x="320.0" y="244.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">queued</text>
+<rect x="230" y="290" width="180" height="40" rx="7" fill="#f1f3f4" stroke="#5f6368" stroke-width="1.6"/>
+<text x="320.0" y="314.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">running</text>
+<rect x="230" y="360" width="180" height="44" rx="7" fill="#f1f3f4" stroke="#5f6368" stroke-width="1.6"/>
+<text x="320.0" y="386.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">succeeded / failed</text>
+<rect x="470" y="110" width="200" height="74" rx="7" fill="#e6f4ea" stroke="#2f8f4e" stroke-width="1.6"/>
+<text x="570.0" y="143.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">CliJobSpawner.spawn</text>
+<text x="570.0" y="159.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">stdout/stderr piped
+kill_on_drop</text>
+<rect x="470" y="220" width="200" height="60" rx="7" fill="#fce8e6" stroke="#c5382b" stroke-width="1.6"/>
+<text x="570.0" y="246.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">qe-cli child process</text>
+<text x="570.0" y="262.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">emits JSON-line progress</text>
+<rect x="470" y="320" width="200" height="60" rx="7" fill="#e6f4ea" stroke="#2f8f4e" stroke-width="1.6"/>
+<text x="570.0" y="346.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">supervisor tail</text>
+<text x="570.0" y="362.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">parse → update meta.json</text>
+<rect x="730" y="220" width="200" height="74" rx="7" fill="#fef7e0" stroke="#c58a1a" stroke-width="1.6"/>
+<text x="830.0" y="253.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">run store (files)</text>
+<text x="830.0" y="269.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">meta.json · result.json
+stdout.log · index.json</text>
+<rect x="730" y="340" width="200" height="74" rx="7" fill="#e8f0fe" stroke="#3b6fd4" stroke-width="1.6"/>
+<text x="830.0" y="373.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">SPA poller</text>
+<text x="830.0" y="389.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">GET /runs/:id every 2s
+stop on terminal</text>
+</svg>

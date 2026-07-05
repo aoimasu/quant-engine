@@ -1,0 +1,30 @@
+<mxfile host="app.diagrams.net" type="device">
+  <diagram name="System Context" id="diagram-1">
+    <mxGraphModel dx="900" dy="560" grid="1" gridSize="10" guides="1" tooltips="1"
+        connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="900"
+        pageHeight="560" math="0" shadow="0">
+      <root>
+<mxCell id="0"/>
+<mxCell id="1" parent="0"/>
+<mxCell id="n2" value="ACTORS" style="rounded=1;dashed=1;html=1;fillColor=none;strokeColor=#9aa0a6;verticalAlign=top;fontColor=#9aa0a6;fontStyle=1;fontSize=11;" vertex="1" parent="1"><mxGeometry x="40" y="80" width="220" height="200" as="geometry"/></mxCell>
+<mxCell id="n3" value="QUANT-ENGINE (SINGLE REPO)" style="rounded=1;dashed=1;html=1;fillColor=none;strokeColor=#9aa0a6;verticalAlign=top;fontColor=#9aa0a6;fontStyle=1;fontSize=11;" vertex="1" parent="1"><mxGeometry x="320" y="80" width="300" height="420" as="geometry"/></mxCell>
+<mxCell id="n4" value="EXTERNAL SYSTEMS" style="rounded=1;dashed=1;html=1;fillColor=none;strokeColor=#9aa0a6;verticalAlign=top;fontColor=#9aa0a6;fontStyle=1;fontSize=11;" vertex="1" parent="1"><mxGeometry x="680" y="80" width="190" height="320" as="geometry"/></mxCell>
+<mxCell id="admin" value="Admin user&#10;browser" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#3c4043;fontColor=#202124;fontFamily=Helvetica;fontSize=12;" vertex="1" parent="1"><mxGeometry x="70" y="120" width="160" height="54" as="geometry"/></mxCell>
+<mxCell id="dev" value="Developer / operator&#10;shell" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#3c4043;fontColor=#202124;fontFamily=Helvetica;fontSize=12;" vertex="1" parent="1"><mxGeometry x="70" y="200" width="160" height="54" as="geometry"/></mxCell>
+<mxCell id="spa" value="Admin SPA&#10;web/  (Vite+React)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8f0fe;strokeColor=#3b6fd4;fontColor=#202124;fontFamily=Helvetica;fontSize=12;" vertex="1" parent="1"><mxGeometry x="350" y="120" width="240" height="54" as="geometry"/></mxCell>
+<mxCell id="srv" value="qe-server&#10;axum API + static host" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e6f4ea;strokeColor=#2f8f4e;fontColor=#202124;fontFamily=Helvetica;fontSize=12;" vertex="1" parent="1"><mxGeometry x="350" y="200" width="240" height="60" as="geometry"/></mxCell>
+<mxCell id="cli" value="qe-cli (qe)&#10;train / backtest / ingest" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e6f4ea;strokeColor=#2f8f4e;fontColor=#202124;fontFamily=Helvetica;fontSize=12;" vertex="1" parent="1"><mxGeometry x="350" y="290" width="240" height="60" as="geometry"/></mxCell>
+<mxCell id="data" value="Local state&#10;LMDB + vintages + runs/" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fef7e0;strokeColor=#c58a1a;fontColor=#202124;fontFamily=Helvetica;fontSize=12;" vertex="1" parent="1"><mxGeometry x="350" y="390" width="240" height="62" as="geometry"/></mxCell>
+<mxCell id="google" value="Google OAuth&#10;accounts.google.com" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fce8e6;strokeColor=#c5382b;fontColor=#202124;fontFamily=Helvetica;fontSize=12;" vertex="1" parent="1"><mxGeometry x="700" y="120" width="150" height="60" as="geometry"/></mxCell>
+<mxCell id="binance" value="Binance&#10;data.binance.vision&#10;REST/WSS (http feat.)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fce8e6;strokeColor=#c5382b;fontColor=#202124;fontFamily=Helvetica;fontSize=12;" vertex="1" parent="1"><mxGeometry x="700" y="210" width="150" height="74" as="geometry"/></mxCell>
+<mxCell id="note1" value="Live venue path&#10;not reachable from&#10;server (firewall)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f1f3f4;strokeColor=#5f6368;fontColor=#202124;fontFamily=Helvetica;fontSize=12;" vertex="1" parent="1"><mxGeometry x="700" y="420" width="150" height="60" as="geometry"/></mxCell>
+<mxCell id="n5" value="HTTPS" style="endArrow=classic;html=1;strokeColor=#5f6368;fontSize=10;labelBackgroundColor=#ffffff;" edge="1" parent="1"><mxGeometry relative="1" as="geometry"><mxPoint x="230" y="147" as="sourcePoint"/><mxPoint x="350" y="147" as="targetPoint"/></mxGeometry></mxCell>
+<mxCell id="n6" value="CLI" style="endArrow=classic;html=1;strokeColor=#5f6368;fontSize=10;labelBackgroundColor=#ffffff;" edge="1" parent="1"><mxGeometry relative="1" as="geometry"><mxPoint x="230" y="227" as="sourcePoint"/><mxPoint x="350" y="315" as="targetPoint"/></mxGeometry></mxCell>
+<mxCell id="n7" value="OAuth" style="endArrow=classic;html=1;strokeColor=#5f6368;fontSize=10;labelBackgroundColor=#ffffff;" edge="1" parent="1"><mxGeometry relative="1" as="geometry"><mxPoint x="590" y="230" as="sourcePoint"/><mxPoint x="700" y="150" as="targetPoint"/></mxGeometry></mxCell>
+<mxCell id="n8" value="spawns" style="endArrow=classic;html=1;strokeColor=#5f6368;fontSize=10;labelBackgroundColor=#ffffff;" edge="1" parent="1"><mxGeometry relative="1" as="geometry"><mxPoint x="475" y="260" as="sourcePoint"/><mxPoint x="475" y="290" as="targetPoint"/></mxGeometry></mxCell>
+<mxCell id="n9" value="reads/writes" style="endArrow=classic;html=1;strokeColor=#5f6368;fontSize=10;labelBackgroundColor=#ffffff;" edge="1" parent="1"><mxGeometry relative="1" as="geometry"><mxPoint x="475" y="350" as="sourcePoint"/><mxPoint x="475" y="390" as="targetPoint"/></mxGeometry></mxCell>
+<mxCell id="n10" value="ingest (opt.)" style="endArrow=classic;html=1;dashed=1;strokeColor=#5f6368;fontSize=10;labelBackgroundColor=#ffffff;" edge="1" parent="1"><mxGeometry relative="1" as="geometry"><mxPoint x="590" y="320" as="sourcePoint"/><mxPoint x="700" y="250" as="targetPoint"/></mxGeometry></mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

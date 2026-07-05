@@ -1,0 +1,33 @@
+<mxfile host="app.diagrams.net" type="device">
+  <diagram name="Frontend Architecture (web/)" id="diagram-1">
+    <mxGraphModel dx="940" dy="620" grid="1" gridSize="10" guides="1" tooltips="1"
+        connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="940"
+        pageHeight="620" math="0" shadow="0">
+      <root>
+<mxCell id="0"/>
+<mxCell id="1" parent="0"/>
+<mxCell id="n2" value="SCREEN AREAS (NESTED VIEW-STATE)" style="rounded=1;dashed=1;html=1;fillColor=none;strokeColor=#9aa0a6;verticalAlign=top;fontColor=#9aa0a6;fontStyle=1;fontSize=11;" vertex="1" parent="1"><mxGeometry x="310" y="90" width="380" height="300" as="geometry"/></mxCell>
+<mxCell id="n3" value="STYLING" style="rounded=1;dashed=1;html=1;fillColor=none;strokeColor=#9aa0a6;verticalAlign=top;fontColor=#9aa0a6;fontStyle=1;fontSize=11;" vertex="1" parent="1"><mxGeometry x="310" y="410" width="380" height="120" as="geometry"/></mxCell>
+<mxCell id="n4" value="API LAYER (API/)" style="rounded=1;dashed=1;html=1;fillColor=none;strokeColor=#9aa0a6;verticalAlign=top;fontColor=#9aa0a6;fontStyle=1;fontSize=11;" vertex="1" parent="1"><mxGeometry x="720" y="90" width="180" height="300" as="geometry"/></mxCell>
+<mxCell id="main" value="main.tsx&#10;createRoot · StrictMode" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8f0fe;strokeColor=#3b6fd4;fontColor=#202124;fontFamily=Helvetica;fontSize=12;" vertex="1" parent="1"><mxGeometry x="60" y="110" width="200" height="54" as="geometry"/></mxCell>
+<mxCell id="app" value="App.tsx&#10;auth gate + active screen" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8f0fe;strokeColor=#3b6fd4;fontColor=#202124;fontFamily=Helvetica;fontSize=12;" vertex="1" parent="1"><mxGeometry x="60" y="200" width="200" height="60" as="geometry"/></mxCell>
+<mxCell id="shell" value="AppShell&#10;sidebar nav · onNav(id)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8f0fe;strokeColor=#3b6fd4;fontColor=#202124;fontFamily=Helvetica;fontSize=12;" vertex="1" parent="1"><mxGeometry x="60" y="300" width="200" height="60" as="geometry"/></mxCell>
+<mxCell id="bt" value="backtest/&#10;List · New&#10;Result (polls+charts)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8eaed;strokeColor=#3c4043;fontColor=#202124;fontFamily=Helvetica;fontSize=12;" vertex="1" parent="1"><mxGeometry x="340" y="130" width="150" height="74" as="geometry"/></mxCell>
+<mxCell id="tr" value="training/&#10;List · New&#10;Monitor (polls)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8eaed;strokeColor=#3c4043;fontColor=#202124;fontFamily=Helvetica;fontSize=12;" vertex="1" parent="1"><mxGeometry x="520" y="130" width="150" height="74" as="geometry"/></mxCell>
+<mxCell id="md" value="MarketData&#10;coverage table" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8eaed;strokeColor=#3c4043;fontColor=#202124;fontFamily=Helvetica;fontSize=12;" vertex="1" parent="1"><mxGeometry x="340" y="230" width="150" height="54" as="geometry"/></mxCell>
+<mxCell id="lg" value="Login / Placeholder" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8eaed;strokeColor=#3c4043;fontColor=#202124;fontFamily=Helvetica;fontSize=12;" vertex="1" parent="1"><mxGeometry x="520" y="230" width="150" height="54" as="geometry"/></mxCell>
+<mxCell id="ph" value="design system (design/)&#10;Button·Card·DataTable·Badge·Callout·Tabs·Pnl·Icon" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f1f3f4;strokeColor=#5f6368;fontColor=#202124;fontFamily=Helvetica;fontSize=12;" vertex="1" parent="1"><mxGeometry x="340" y="310" width="330" height="54" as="geometry"/></mxCell>
+<mxCell id="tokens" value="styles/tokens/*.css&#10;:root design tokens" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fef7e0;strokeColor=#c58a1a;fontColor=#202124;fontFamily=Helvetica;fontSize=12;" vertex="1" parent="1"><mxGeometry x="340" y="450" width="150" height="60" as="geometry"/></mxCell>
+<mxCell id="inject" value="design/injectCss.ts&#10;runtime &lt;style&gt; inject" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fef7e0;strokeColor=#c58a1a;fontColor=#202124;fontFamily=Helvetica;fontSize=12;" vertex="1" parent="1"><mxGeometry x="520" y="450" width="150" height="60" as="geometry"/></mxCell>
+<mxCell id="sess" value="session.ts&#10;fetchMe·login·logout" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e6f4ea;strokeColor=#2f8f4e;fontColor=#202124;fontFamily=Helvetica;fontSize=12;" vertex="1" parent="1"><mxGeometry x="745" y="130" width="130" height="74" as="geometry"/></mxCell>
+<mxCell id="runsapi" value="runs.ts&#10;fetch client&#10;same-origin cookie&#10;poll 2s" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e6f4ea;strokeColor=#2f8f4e;fontColor=#202124;fontFamily=Helvetica;fontSize=12;" vertex="1" parent="1"><mxGeometry x="745" y="230" width="130" height="90" as="geometry"/></mxCell>
+<mxCell id="n5" value="" style="endArrow=classic;html=1;strokeColor=#5f6368;fontSize=10;labelBackgroundColor=#ffffff;" edge="1" parent="1"><mxGeometry relative="1" as="geometry"><mxPoint x="160" y="164" as="sourcePoint"/><mxPoint x="160" y="200" as="targetPoint"/></mxGeometry></mxCell>
+<mxCell id="n6" value="" style="endArrow=classic;html=1;strokeColor=#5f6368;fontSize=10;labelBackgroundColor=#ffffff;" edge="1" parent="1"><mxGeometry relative="1" as="geometry"><mxPoint x="160" y="260" as="sourcePoint"/><mxPoint x="160" y="300" as="targetPoint"/></mxGeometry></mxCell>
+<mxCell id="n7" value="renders" style="endArrow=classic;html=1;strokeColor=#5f6368;fontSize=10;labelBackgroundColor=#ffffff;" edge="1" parent="1"><mxGeometry relative="1" as="geometry"><mxPoint x="260" y="240" as="sourcePoint"/><mxPoint x="340" y="165" as="targetPoint"/></mxGeometry></mxCell>
+<mxCell id="n8" value="" style="endArrow=classic;html=1;strokeColor=#5f6368;fontSize=10;labelBackgroundColor=#ffffff;" edge="1" parent="1"><mxGeometry relative="1" as="geometry"><mxPoint x="455" y="204" as="sourcePoint"/><mxPoint x="490" y="230" as="targetPoint"/></mxGeometry></mxCell>
+<mxCell id="n9" value="GET/POST /api" style="endArrow=classic;html=1;dashed=1;strokeColor=#5f6368;fontSize=10;labelBackgroundColor=#ffffff;" edge="1" parent="1"><mxGeometry relative="1" as="geometry"><mxPoint x="490" y="167" as="sourcePoint"/><mxPoint x="745" y="200" as="targetPoint"/></mxGeometry></mxCell>
+<mxCell id="n10" value="fetchMe()" style="endArrow=classic;html=1;dashed=1;strokeColor=#5f6368;fontSize=10;labelBackgroundColor=#ffffff;" edge="1" parent="1"><mxGeometry relative="1" as="geometry"><mxPoint x="160" y="230" as="sourcePoint"/><mxPoint x="745" y="150" as="targetPoint"/></mxGeometry></mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
