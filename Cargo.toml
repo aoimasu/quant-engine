@@ -45,13 +45,16 @@ tempfile = "3"
 # net it needs; `tower-http/fs` provides static-asset serving (`ServeDir`/`ServeFile`).
 axum = "0.8"
 # QE-255 adds subprocess supervision (`process`), async line-tailing of child stdout (`io-util`),
-# the bounded worker-pool semaphore + index mutex (`sync`), and bounded test polling (`time`).
+# the bounded worker-pool semaphore + index mutex (`sync`), and bounded test polling (`time`). QE-407
+# adds `signal` for the graceful-shutdown handler (`ctrl_c` + unix `SIGTERM`); it pulls only
+# `signal-hook-registry`, already in `Cargo.lock`, so `cargo deny check` stays green.
 tokio = { version = "1", features = [
     "rt-multi-thread",
     "macros",
     "net",
     "process",
     "io-util",
+    "signal",
     "sync",
     "time",
 ] }

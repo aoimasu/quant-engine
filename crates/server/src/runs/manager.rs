@@ -6,13 +6,16 @@
 //! [`Mutex`] serialises `index.json` read-modify-write. `meta.json` is the authoritative per-run
 //! record, written atomically by the supervisor on every transition/progress update.
 
+use std::collections::HashMap;
 use std::io::Write as _;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use qe_run_protocol::{ProgressLine, PROTOCOL_VERSION};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{Mutex, Semaphore};
+use tokio::task::JoinHandle;
 
 use super::model::{
     BacktestParams, CreateRunRequest, EnsembleSnapshot, GateSnapshot, GenSnapshot, IndexEntry,
@@ -30,10 +33,23 @@ pub enum CreateError {
     /// The request failed validation (missing/empty required field, unsupported type).
     #[error("invalid run request: {0}")]
     Validation(String),
+    /// The server is shutting down and no longer accepts new runs (QE-407 → HTTP 503).
+    #[error("server is shutting down")]
+    ShuttingDown,
     /// A filesystem error persisting the new run.
     #[error("failed to persist run: {0}")]
     Io(#[from] std::io::Error),
 }
+
+/// Reason recorded when the startup reconciler fails an orphaned run (QE-407 / widens QE-263): the run
+/// was `running`/`queued` in a `meta.json` left behind by a hard-killed prior process, so no live
+/// supervisor exists and it can never make progress.
+const RECONCILE_REASON: &str = "run was interrupted by a server restart (no live supervisor)";
+
+/// Reason recorded when a still-live run is aborted because its bounded shutdown-drain window elapsed
+/// (QE-407): the graceful drain could not let it finish, so it is terminally failed rather than left
+/// `running`.
+const SHUTDOWN_DRAIN_REASON: &str = "run did not finish before server shutdown";
 
 /// Owns the run store, the spawn seam, and the worker-pool bound. Wrapped in an `Arc` and shared as
 /// axum state.
@@ -42,6 +58,13 @@ pub struct RunManager {
     spawner: Arc<dyn JobSpawner>,
     permits: Arc<Semaphore>,
     index_lock: Arc<Mutex<()>>,
+    /// QE-407: live supervisor `JoinHandle`s keyed by run id. Each `create` inserts its handle and the
+    /// supervisor self-deregisters on completion, so at shutdown this is exactly the set of in-flight
+    /// runs to drain/cancel — the registry QE-263 lacked.
+    registry: Arc<Mutex<HashMap<String, JoinHandle<()>>>>,
+    /// QE-407: cleared by [`RunManager::shutdown`] to stop accepting new runs (a fresh `create` then
+    /// returns [`CreateError::ShuttingDown`]).
+    accepting: Arc<AtomicBool>,
 }
 
 impl RunManager {
@@ -57,6 +80,8 @@ impl RunManager {
             spawner,
             permits: Arc::new(Semaphore::new(max_concurrency.max(1))),
             index_lock: Arc::new(Mutex::new(())),
+            registry: Arc::new(Mutex::new(HashMap::new())),
+            accepting: Arc::new(AtomicBool::new(true)),
         }
     }
 
@@ -66,11 +91,16 @@ impl RunManager {
     }
 
     /// Validate + create a run: write `meta.json` (`queued`), append `index.json`, and spawn a
-    /// detached supervisor task. Returns the new run id.
+    /// supervisor task registered in the in-flight [`Self::registry`]. Returns the new run id.
     ///
     /// # Errors
-    /// [`CreateError::Validation`] on a bad request; [`CreateError::Io`] on a persistence failure.
+    /// [`CreateError::Validation`] on a bad request; [`CreateError::ShuttingDown`] if the manager has
+    /// begun shutting down; [`CreateError::Io`] on a persistence failure.
     pub async fn create(&self, req: CreateRunRequest) -> Result<String, CreateError> {
+        // QE-407: refuse new work once shutdown has begun so the drain set can't grow under our feet.
+        if !self.accepting.load(Ordering::SeqCst) {
+            return Err(CreateError::ShuttingDown);
+        }
         let spec = build_spec(&req)?;
         let id = uuid::Uuid::new_v4().to_string();
         let created_ms = now_ms();
@@ -104,16 +134,89 @@ impl RunManager {
             self.store.write_index(&index)?;
         }
 
-        // Detached supervisor: acquires a pool permit (blocking here keeps the run `queued`), then
-        // runs + tails the subprocess.
+        // Supervisor task: acquires a pool permit (blocking here keeps the run `queued`), then runs +
+        // tails the subprocess. Registered in `registry` so shutdown can drain/cancel it (QE-407).
         let store = self.store.clone();
         let spawner = Arc::clone(&self.spawner);
         let permits = Arc::clone(&self.permits);
-        tokio::spawn(async move {
+        let registry = Arc::clone(&self.registry);
+        let task_id = id.clone();
+        // Hold the registry lock across `spawn` + `insert` so the task's self-deregister (which also
+        // takes this lock, only at the very end of `supervise`) can never run before the insert — even
+        // for an instantly-finishing job. This guarantees insert-before-remove: no leaked live entry,
+        // no double-remove.
+        let mut reg = self.registry.lock().await;
+        let handle = tokio::spawn(async move {
             supervise(store, spawner, permits, meta, spec).await;
+            registry.lock().await.remove(&task_id);
         });
+        reg.insert(id.clone(), handle);
+        drop(reg);
 
         Ok(id)
+    }
+
+    /// QE-407 — the startup reconciler (widens QE-263). Any run whose `meta.json` is still
+    /// `Queued`/`Running` in a freshly-booted process was orphaned by a hard kill (no supervisor can be
+    /// alive), so mark it `failed`. Terminal runs (`Succeeded`/`Failed`) are left untouched. Returns
+    /// how many runs were reconciled.
+    ///
+    /// # Errors
+    /// A filesystem/parse error reading `index.json` or a run's `meta.json`.
+    pub fn reconcile_orphans(&self) -> std::io::Result<usize> {
+        let index = self.store.read_index()?;
+        let mut reconciled = 0;
+        for entry in &index {
+            if let Some(mut meta) = self.store.read_meta(&entry.id)? {
+                if matches!(meta.status, RunStatus::Queued | RunStatus::Running) {
+                    let exit = meta.exit;
+                    finish_failed(&self.store, &mut meta, exit, RECONCILE_REASON.to_owned());
+                    reconciled += 1;
+                }
+            }
+        }
+        Ok(reconciled)
+    }
+
+    /// QE-407 — graceful shutdown. Stop accepting new runs, then drain in-flight supervisors within a
+    /// bounded window: handles that finish naturally write their own terminal `meta.json`; any handle
+    /// still live at the deadline is aborted (dropping its `Child` fires `kill_on_drop`) and its run is
+    /// terminally marked `failed`, so no `running` `meta.json` survives a clean shutdown.
+    pub async fn shutdown(&self, drain: Duration) {
+        self.accepting.store(false, Ordering::SeqCst);
+        // Wake any *queued* supervisor blocked on `acquire()`: the existing `Err` arm fails it cleanly
+        // ("worker pool closed") so it drains promptly rather than being force-aborted below.
+        self.permits.close();
+
+        let handles: Vec<(String, JoinHandle<()>)> = {
+            let mut reg = self.registry.lock().await;
+            reg.drain().collect()
+        };
+
+        let deadline = Instant::now() + drain;
+        for (id, mut handle) in handles {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let drained =
+                !remaining.is_zero() && tokio::time::timeout(remaining, &mut handle).await.is_ok();
+            if !drained {
+                handle.abort();
+                // Await the cancellation to fully settle (Child dropped → killed) before writing the
+                // terminal record, so the aborted task can't interleave a later `meta.json` write.
+                let _ = handle.await;
+                self.terminally_mark_interrupted(&id, SHUTDOWN_DRAIN_REASON);
+            }
+        }
+    }
+
+    /// Mark a run `failed` with `reason`, but only if it is still non-terminal (`Queued`/`Running`) —
+    /// a run that finished during the drain keeps its real terminal outcome.
+    fn terminally_mark_interrupted(&self, id: &str, reason: &str) {
+        if let Ok(Some(mut meta)) = self.store.read_meta(id) {
+            if matches!(meta.status, RunStatus::Queued | RunStatus::Running) {
+                let exit = meta.exit;
+                finish_failed(&self.store, &mut meta, exit, reason.to_owned());
+            }
+        }
     }
 }
 
@@ -232,12 +335,10 @@ async fn supervise(
     meta.exit = exit;
     meta.finished_ms = Some(now_ms());
 
-    if done_seen && exit == Some(0) {
-        // TODO(QE-follow-up): a misbehaving job that emits `done` + exits 0 but writes no
-        // `result.json` is currently classified `succeeded` (with empty `artifacts`), so
-        // `GET /result` then returns 409. Consider treating a missing result artefact as `failed`.
+    if done_seen && exit == Some(0) && store.result_path(&meta.id).exists() {
         meta.status = RunStatus::Succeeded;
         meta.error = None;
+        meta.artifacts = vec!["result.json".to_owned()];
         // A succeeded train run should read 100% — its last coarse stage was the gate line (85%). The
         // backtest job reports its own terminal `report` pct, so leave backtest progress unchanged.
         if matches!(spec, RunSpec::Train(_)) {
@@ -247,10 +348,16 @@ async fn supervise(
                 msg: "training complete".to_owned(),
             };
         }
-        if store.result_path(&meta.id).exists() {
-            meta.artifacts = vec!["result.json".to_owned()];
-        }
         let _ = store.write_meta(&meta);
+    } else if done_seen && exit == Some(0) {
+        // QE-407 (honest success): the job reported `done` and exited 0 but wrote no `result.json`, so
+        // `GET /runs/{id}/result` would 409 on a run the UI showed green. Report the truth: `failed`.
+        finish_failed(
+            &store,
+            &mut meta,
+            exit,
+            "job reported done but wrote no result.json".to_owned(),
+        );
     } else {
         let msg = if err_tail.trim().is_empty() {
             format!("job exited with status {exit:?} without a `done` line")

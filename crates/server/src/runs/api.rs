@@ -37,6 +37,12 @@ async fn create_run(
         Err(CreateError::Validation(msg)) => {
             (StatusCode::BAD_REQUEST, Json(json!({ "error": msg }))).into_response()
         }
+        // QE-407: the server has begun shutting down and no longer accepts runs.
+        Err(err @ CreateError::ShuttingDown) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": err.to_string() })),
+        )
+            .into_response(),
         Err(CreateError::Io(e)) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": format!("failed to create run: {e}") })),

@@ -129,6 +129,10 @@ pub const DEFAULT_DATA_DIR: &str = "data";
 /// Default bound on concurrently-running subprocesses when `QE_SERVER_MAX_CONCURRENCY` is unset.
 pub const DEFAULT_MAX_CONCURRENCY: usize = 2;
 
+/// QE-407: how long graceful shutdown waits for in-flight run supervisors to finish before aborting
+/// and terminally marking them `failed`. Bounded so a wedged child can never hold the process open.
+pub const DEFAULT_SHUTDOWN_DRAIN: Duration = Duration::from_secs(20);
+
 /// Default sealed-vintage artifacts directory when `QE_SERVER_ARTIFACTS_DIR` is unset. A **relative**
 /// default (CWD-relative, never hard-coded absolute), matching the repo `data/` layout
 /// (`qe-config` `storage.artifacts_dir = data/artifacts`). The `/api/vintages` endpoint reads the
