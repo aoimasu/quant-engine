@@ -159,6 +159,28 @@ fn train_over_fixture_store_seals_verifiable_vintage() {
     // The result sidecar records the full G1 decision (5 criteria) for QE-261.
     assert_eq!(outcome.result.g1.criteria.len(), 5);
     assert_eq!(outcome.result.vintage_id, outcome.vintage_id);
+
+    // QE-414: on the real fixture archive the DSR trial variance is estimated from the FULL cell
+    // population (every occupied cell's champion), not the top-`MAX_POOL=10` ensemble pool. Prove the
+    // population is genuinely broader than the top-10 pool and that the deflation basis is recorded.
+    let robustness = &outcome.result.robustness;
+    assert!(
+        robustness.variance_trials > outcome.result.pool_size,
+        "trial variance must be estimated from the full cell population ({}), broader than the top-N \
+         ensemble pool ({})",
+        robustness.variance_trials,
+        outcome.result.pool_size,
+    );
+    assert!(
+        robustness.variance_trials > 10,
+        "the fixture archive must fill > 10 cells so the change is not inert (got {})",
+        robustness.variance_trials,
+    );
+    assert!(
+        robustness.trial_variance >= 0.0 && robustness.trial_variance.is_finite(),
+        "the trial variance (deflation basis) must be recorded, got {}",
+        robustness.trial_variance,
+    );
 }
 
 #[test]

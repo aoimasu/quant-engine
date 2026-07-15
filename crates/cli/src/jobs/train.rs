@@ -351,8 +351,22 @@ pub fn run_train_job(
     };
     let n_trials = effective_trials(archive.occupied_cells(), generations, train_cfg.windows);
 
-    let robustness =
-        assess_robustness(&pool, &in_sample_returns, train_bars, n_trials, params.seed);
+    // QE-414: the DSR deflation bar's cross-trial Sharpe *dispersion* is estimated from the FULL cell
+    // population — the best elite of every occupied cell, one representative Sharpe per behavioural niche
+    // — not the top-`MAX_POOL` `pool` (which stays the ensemble/CSCV/SPA population). This population's
+    // size is `archive.occupied_cells()`, the same cell factor `n_trials` uses, so the trial count and the
+    // trial variance derive from the SAME population. A censored top-N sample under-estimates dispersion
+    // and inflates the DSR — exactly what G1 must not reward.
+    let variance_returns = cell_champion_returns(&archive, train_bars, &train_cfg);
+
+    let robustness = assess_robustness(
+        &pool,
+        &variance_returns,
+        &in_sample_returns,
+        train_bars,
+        n_trials,
+        params.seed,
+    );
 
     let in_sample_sharpe = sharpe_ratio(&in_sample_returns);
     let holdout_sharpe = sharpe_ratio(&holdout_returns);
@@ -494,6 +508,33 @@ fn elite_pool(archive: &MapElitesArchive) -> Vec<Genome> {
     scored.into_iter().map(|(_, g)| g).collect()
 }
 
+/// The net-of-cost train-window return series of the **best elite in every occupied cell**, across both
+/// directions — the full cross-niche trial population the MAP-Elites archive retains (QE-414). One
+/// representative Sharpe per behavioural niche, gathered in deterministic order (Long then Short;
+/// occupied cells are BTreeMap-sorted; the cell champion is `SubPopulation::best()`), so the same search
+/// yields the same population ⇒ the same trial variance ⇒ the same DSR.
+///
+/// This is the *uncensored* Sharpe-dispersion sample the Deflated-Sharpe trial variance is estimated
+/// from — every niche champion, not just the top-[`MAX_POOL`] by fitness. Its length equals
+/// `archive.occupied_cells()`, the same cell factor `n_trials` counts, so the trial count and the trial
+/// variance are derived from the SAME population.
+fn cell_champion_returns(
+    archive: &MapElitesArchive,
+    bars: &[DecisionBar],
+    cfg: &BacktestConfig,
+) -> Vec<Vec<f64>> {
+    let mut series: Vec<Vec<f64>> = Vec::new();
+    for direction in [Direction::Long, Direction::Short] {
+        let dir = archive.direction(direction);
+        for cell in dir.occupied_cells() {
+            if let Some(elite) = dir.cell(cell).and_then(|sub| sub.best()) {
+                series.push(backtest(&elite.genome, bars, cfg).returns);
+            }
+        }
+    }
+    series
+}
+
 /// Equal-/given-weight combine of `genomes`' net-of-cost return series over `bars`: `Σ_c w_c · r_c[t]`,
 /// truncated to the shortest series (all equal for a shared bar slice).
 fn combine(
@@ -543,6 +584,7 @@ fn ensemble_funding_net(
 /// errors — so a tiny-budget run always reaches the gate rather than aborting.
 fn assess_robustness(
     pool: &[Vec<f64>],
+    variance_returns: &[Vec<f64>],
     candidate_returns: &[f64],
     train_bars: &[DecisionBar],
     n_trials: usize,
@@ -554,6 +596,9 @@ fn assess_robustness(
         pbo: 1.0,
         spa_pvalue: 1.0,
         n_trials,
+        // No deflation basis was applied (the DSR is pinned to the conservative floor).
+        trial_variance: 0.0,
+        variance_trials: 0,
     };
     if pool.len() < CSCV_BLOCKS {
         return conservative();
@@ -572,6 +617,8 @@ fn assess_robustness(
     let stats = VintageStats {
         candidate_returns,
         trial_returns: pool,
+        // QE-414: dispersion from the full cell population; `pool` (top-N) stays the CSCV/SPA columns.
+        variance_returns,
         excess_over_benchmark: &excess,
         n_trials,
         cscv_blocks: CSCV_BLOCKS,

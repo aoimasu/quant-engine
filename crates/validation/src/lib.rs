@@ -51,9 +51,15 @@ pub enum ValidationError {
 pub struct VintageStats<'a> {
     /// The candidate ensemble's per-period net-of-cost returns.
     pub candidate_returns: &'a [f64],
-    /// The per-trial return series (e.g. one per archive cell) — the deflation's trial population, and
-    /// the CSCV columns. `trial_returns[k]` is trial `k`'s series.
+    /// The per-trial return series that form the CSCV columns (e.g. the elite pool). `trial_returns[k]`
+    /// is trial `k`'s series. This is the *portfolio-overfitting* population, which may be a censored
+    /// (top-N) sample — keep it distinct from `variance_returns`.
     pub trial_returns: &'a [Vec<f64>],
+    /// The **uncensored** trial population whose cross-trial Sharpe *dispersion* sets the DSR deflation
+    /// bar (QE-414): the Sharpes of every occupied archive cell, not just the top-N by fitness. Kept
+    /// separate from `trial_returns` because a censored survivor sample under-estimates dispersion and
+    /// inflates the DSR. `variance_returns[k]` is trial `k`'s series.
+    pub variance_returns: &'a [Vec<f64>],
     /// Per-period performance of each trial **relative to the benchmark** (for the Reality Check / SPA).
     pub excess_over_benchmark: &'a [Vec<f64>],
     /// Effective number of trials = cells × generations × windows ([`effective_trials`]).
@@ -75,6 +81,13 @@ pub struct RobustnessReport {
     pub spa_pvalue: f64,
     /// Effective number of trials the DSR deflated against.
     pub n_trials: usize,
+    /// The cross-trial Sharpe **variance** that set the deflation bar `E[max SR]` (QE-414). Recorded so
+    /// the deflation basis is auditable alongside `n_trials`.
+    pub trial_variance: f64,
+    /// The number of trial Sharpes `trial_variance` was estimated from — the size of the uncensored
+    /// variance population (QE-414). Paired with `n_trials`, this makes the deflation basis auditable:
+    /// the dispersion and the trial count both derive from the same (full-cell) population.
+    pub variance_trials: usize,
 }
 
 /// Compute DSR / PBO / SPA for a vintage (QE-131/D6, the AC entry point). The bootstrap p-value is seeded
@@ -88,13 +101,17 @@ pub fn assess(
     seed: u64,
 ) -> Result<RobustnessReport, ValidationError> {
     let pbo_report = pbo_cscv(stats.trial_returns, stats.cscv_blocks)?;
-    let trial_variance = trial_sharpe_variance(stats.trial_returns);
+    // QE-414: the deflation bar's dispersion comes from the uncensored full-cell population, not the
+    // (possibly top-N) CSCV `trial_returns`. Both are recorded so the basis is auditable.
+    let trial_variance = trial_sharpe_variance(stats.variance_returns);
     Ok(RobustnessReport {
         observed_sharpe: sharpe_ratio(stats.candidate_returns),
         dsr: deflated_sharpe_ratio(stats.candidate_returns, trial_variance, stats.n_trials),
         pbo: pbo_report.pbo,
         spa_pvalue: reality_check_pvalue(stats.excess_over_benchmark, cfg, seed),
         n_trials: stats.n_trials,
+        trial_variance,
+        variance_trials: stats.variance_returns.len(),
     })
 }
 
@@ -123,6 +140,7 @@ mod tests {
         let stats = VintageStats {
             candidate_returns: &candidate,
             trial_returns: &trials,
+            variance_returns: &trials,
             excess_over_benchmark: &excess,
             n_trials: effective_trials(64, 30, 4),
             cscv_blocks: 6,
@@ -135,6 +153,9 @@ mod tests {
         assert!((0.0..=1.0).contains(&report.spa_pvalue));
         assert_eq!(report.n_trials, 64 * 30 * 4);
         assert!(report.observed_sharpe > 0.0);
+        // QE-414: the deflation basis is recorded — the variance and the population it was estimated from.
+        assert_eq!(report.variance_trials, trials.len());
+        assert!((report.trial_variance - trial_sharpe_variance(&trials)).abs() < 1e-12);
 
         // The report round-trips through serde (so G1 can record it).
         let json = serde_json::to_string(&report).unwrap();
@@ -148,6 +169,7 @@ mod tests {
         let stats = VintageStats {
             candidate_returns: &[0.01, 0.02],
             trial_returns: &trials,
+            variance_returns: &trials,
             excess_over_benchmark: &trials,
             n_trials: 100,
             cscv_blocks: 3, // odd
