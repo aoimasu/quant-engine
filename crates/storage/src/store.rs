@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use heed::types::{Bytes, SerdeJson, Str};
+use heed::types::{Bytes, DecodeIgnore, SerdeJson, Str};
 use heed::{Database, Env, RoTxn};
 use serde::de::DeserializeOwned;
 
@@ -166,6 +166,53 @@ impl MarketStore {
             }
         }
         Ok(out)
+    }
+
+    /// Covered range + bar count for one `(instrument, resolution)` pair, **without decoding any
+    /// `Bar` value** (QE-412).
+    ///
+    /// Returns `Some((first_open_time, last_open_time, count))` — the earliest and latest bar
+    /// `open_time` (inclusive) and the number of stored bars — or `None` when the pair has no bars.
+    ///
+    /// Bars share the `(instrument, resolution)` key prefix and sort chronologically (the key ends in
+    /// an order-preserving timestamp, see [`crate::key`]), so the first key in the prefix carries the
+    /// earliest open time and the last key the latest. The value type is remapped to
+    /// [`heed::types::DecodeIgnore`] — whose decoder returns `()` without reading the value bytes — so
+    /// the `SerdeJson<Bar>` deserialiser is **never** invoked: timestamps come purely from the key.
+    /// This is the key-only cursor [`Self::bar_instruments`] uses, specialised to one prefix.
+    ///
+    /// # Errors
+    /// [`StorageError`] on an LMDB failure.
+    pub fn coverage_bounds(
+        &self,
+        instrument: &InstrumentId,
+        resolution: Resolution,
+    ) -> Result<Option<(Timestamp, Timestamp, usize)>, StorageError> {
+        let rtxn = self.env.read_txn()?;
+        let prefix = bar_prefix(instrument, resolution);
+        let mut first: Option<i64> = None;
+        let mut last: i64 = 0;
+        let mut count: usize = 0;
+        for item in self
+            .bars
+            .remap_data_type::<DecodeIgnore>()
+            .prefix_iter(&rtxn, &prefix)?
+        {
+            let (key, ()) = item?;
+            let t = time_from_key(key).millis();
+            if first.is_none() {
+                first = Some(t);
+            }
+            last = t;
+            count += 1;
+        }
+        Ok(first.map(|f| {
+            (
+                Timestamp::from_millis(f),
+                Timestamp::from_millis(last),
+                count,
+            )
+        }))
     }
 
     // ---- funding (keyed by instrument + time) -----------------------------------------------
@@ -376,4 +423,150 @@ where
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::coverage::{coverage, CoverageRow};
+    use crate::key::bar_key;
+    use qe_domain::{Price, Qty};
+    use rust_decimal::Decimal;
+
+    fn inst(s: &str) -> InstrumentId {
+        InstrumentId::new(s).unwrap()
+    }
+
+    fn price(n: i64) -> Price {
+        Price::new(Decimal::from(n)).unwrap()
+    }
+
+    fn bar(res: Resolution, secs: i64, base: i64) -> Bar {
+        Bar::new(
+            Timestamp::from_secs(secs),
+            res,
+            price(base),
+            price(base + 10),
+            price(base - 10),
+            price(base),
+            Qty::new(Decimal::from(1)).unwrap(),
+            1,
+        )
+        .unwrap()
+    }
+
+    fn open(dir: &std::path::Path) -> MarketStore {
+        MarketStore::open(dir, 10 * 1024 * 1024).unwrap()
+    }
+
+    #[test]
+    fn coverage_bounds_reports_range_and_count_from_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open(dir.path());
+        let id = inst("BTCUSDT");
+
+        // Empty prefix → None.
+        assert_eq!(store.coverage_bounds(&id, Resolution::M5).unwrap(), None);
+
+        store
+            .put_bars(
+                &id,
+                &[
+                    bar(Resolution::M5, 100, 100),
+                    bar(Resolution::M5, 200, 110),
+                    bar(Resolution::M5, 300, 120),
+                ],
+            )
+            .unwrap();
+        // Single-bar H1 (first == last, count == 1) — a separate resolution prefix.
+        store
+            .put_bars(&id, &[bar(Resolution::H1, 3600, 200)])
+            .unwrap();
+
+        assert_eq!(
+            store.coverage_bounds(&id, Resolution::M5).unwrap(),
+            Some((
+                Timestamp::from_millis(100_000),
+                Timestamp::from_millis(300_000),
+                3
+            )),
+        );
+        assert_eq!(
+            store.coverage_bounds(&id, Resolution::H1).unwrap(),
+            Some((
+                Timestamp::from_millis(3_600_000),
+                Timestamp::from_millis(3_600_000),
+                1
+            )),
+        );
+        // A resolution with no bars stays None.
+        assert_eq!(store.coverage_bounds(&id, Resolution::D1).unwrap(), None);
+    }
+
+    /// QE-412 AC #2: the coverage path (`coverage_bounds` → `coverage`) reads timestamps + count from
+    /// the KEY only and never decodes a `Bar` value. Proven by planting a bar whose value bytes are
+    /// **undecodable JSON** under a valid `bar_key`: `coverage_bounds` still returns the correct
+    /// range/count, while `scan_bars` (which *does* decode values) errors on the very same store — so
+    /// the coverage success is not vacuous.
+    #[test]
+    fn coverage_path_never_decodes_bar_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open(dir.path());
+        let id = inst("BTCUSDT");
+        let res = Resolution::M5;
+
+        // Two real bars, then overwrite the second bar's *value* with non-JSON bytes while keeping its
+        // valid key (bypassing `SerdeJson<Bar>` via a raw-bytes remap — the only way to forge an
+        // undecodable value the writer would never produce).
+        store
+            .put_bars(&id, &[bar(res, 100, 100), bar(res, 200, 110)])
+            .unwrap();
+        {
+            let mut wtxn = store.env.write_txn().unwrap();
+            store
+                .bars
+                .remap_data_type::<Bytes>()
+                .put(
+                    &mut wtxn,
+                    &bar_key(&id, res, Timestamp::from_secs(200)),
+                    &b"\xffnot-json"[..],
+                )
+                .unwrap();
+            wtxn.commit().unwrap();
+        }
+
+        // Coverage path succeeds with correct range + count: no value was decoded.
+        assert_eq!(
+            store.coverage_bounds(&id, res).unwrap(),
+            Some((
+                Timestamp::from_millis(100_000),
+                Timestamp::from_millis(200_000),
+                2
+            )),
+        );
+        assert_eq!(
+            coverage(&store, std::slice::from_ref(&id)).unwrap(),
+            vec![CoverageRow {
+                symbol: "BTCUSDT".to_owned(),
+                resolution: res.as_str().to_owned(),
+                from: 100_000,
+                to: 200_000,
+                bars: 2,
+            }],
+        );
+
+        // Control: the decode path *does* choke on the same store, proving the value is genuinely
+        // undecodable — so the coverage success above is meaningful, not vacuous.
+        assert!(
+            store
+                .scan_bars(
+                    &id,
+                    res,
+                    Timestamp::from_millis(i64::MIN),
+                    Timestamp::from_millis(i64::MAX)
+                )
+                .is_err(),
+            "scan_bars decodes Bar values and must fail on the planted garbage value",
+        );
+    }
 }

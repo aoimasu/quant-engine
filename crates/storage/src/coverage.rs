@@ -9,7 +9,7 @@
 //! Deterministic: order and contents depend only on the store and the `instruments` slice — no
 //! wall-clock, no RNG.
 
-use qe_domain::{InstrumentId, Resolution, Timestamp};
+use qe_domain::{InstrumentId, Resolution};
 
 use crate::{MarketStore, StorageError};
 
@@ -47,23 +47,17 @@ pub fn coverage(
     let mut rows = Vec::new();
     for instrument in instruments {
         for resolution in Resolution::ALL {
-            // Full-range half-open scan `[MIN, MAX)`; bars come back chronological, so the first is the
-            // earliest and the last the latest open_time.
-            let bars = store.scan_bars(
-                instrument,
-                resolution,
-                Timestamp::from_millis(i64::MIN),
-                Timestamp::from_millis(i64::MAX),
-            )?;
-            let (Some(first), Some(last)) = (bars.first(), bars.last()) else {
+            // Key-only cursor over the (instrument, resolution) prefix: earliest/latest open_time and
+            // the bar count come from the KEYS alone — no `Bar` value is decoded (QE-412).
+            let Some((first, last, bars)) = store.coverage_bounds(instrument, resolution)? else {
                 continue;
             };
             rows.push(CoverageRow {
                 symbol: instrument.as_str().to_owned(),
                 resolution: resolution.as_str().to_owned(),
-                from: first.open_time().millis(),
-                to: last.open_time().millis(),
-                bars: bars.len(),
+                from: first.millis(),
+                to: last.millis(),
+                bars,
             });
         }
     }
