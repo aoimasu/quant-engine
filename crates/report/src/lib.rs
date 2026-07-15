@@ -278,6 +278,8 @@ mod tests {
                 pbo: 0.12,
                 spa_pvalue: 0.03,
                 n_trials: 7680,
+                trial_variance: 0.03,
+                variance_trials: 240,
             },
             regime_expectancy: vec![
                 RegimeRow {

@@ -127,6 +127,47 @@ mod tests {
     }
 
     #[test]
+    fn full_trial_variance_deflates_at_least_as_hard_as_top10() {
+        // QE-414 AC: on a FIXED population of trial Sharpes (the archive's cell champions), the variance
+        // estimated from the FULL population is ≥ the variance from the top-10 by Sharpe, so the DSR
+        // computed from the full-trial variance is ≤ the DSR from the top-10 variance.
+        //
+        // 20 "cells": return series with linearly spreading mean (⇒ spreading Sharpe). The 10 highest are
+        // a censored, tightly-clustered tail; the full 20 are more dispersed.
+        let trial = |mean: f64| -> Vec<f64> {
+            (0..240)
+                .map(|i| mean + 0.01 * ((i % 5) as f64 - 2.0))
+                .collect::<Vec<f64>>()
+        };
+        let full: Vec<Vec<f64>> = (0..20).map(|k| trial(0.001 * k as f64)).collect();
+        // Top-10 by Sharpe = the 10 largest-mean series (Sharpe is monotone in mean here).
+        let top10: Vec<Vec<f64>> = full.iter().skip(10).cloned().collect();
+
+        let var_full = trial_sharpe_variance(&full);
+        let var_top10 = trial_sharpe_variance(&top10);
+        assert!(
+            var_full >= var_top10,
+            "full-population dispersion must be ≥ the censored top-10: {var_full} !>= {var_top10}"
+        );
+
+        let candidate: Vec<f64> = (0..240)
+            .map(|i| 0.02 + 0.01 * ((i % 5) as f64 - 2.0))
+            .collect();
+        let n_trials = 20 * 4 * 2;
+        let dsr_full = deflated_sharpe_ratio(&candidate, var_full, n_trials);
+        let dsr_top10 = deflated_sharpe_ratio(&candidate, var_top10, n_trials);
+        assert!(
+            dsr_full <= dsr_top10,
+            "full-trial variance must not inflate the DSR: {dsr_full} !<= {dsr_top10}"
+        );
+        // And the effect is real on this fixture (strictly harder deflation), not a degenerate tie.
+        assert!(
+            dsr_full < dsr_top10,
+            "the censored top-10 should visibly inflate the DSR here: {dsr_full} vs {dsr_top10}"
+        );
+    }
+
+    #[test]
     fn deflation_lowers_confidence_as_trials_grow() {
         // A modest edge (Sharpe ≈ 0.14/period) so the deflation bar can rise above it as trials grow.
         let returns: Vec<f64> = (0..500)

@@ -191,6 +191,8 @@ mod tests {
             pbo: 0.10,
             spa_pvalue: 0.02, // < 0.05
             n_trials: 5000,
+            trial_variance: 0.02,
+            variance_trials: 5000,
         }
     }
 
