@@ -33,7 +33,7 @@ export function BacktestsList({ onOpen, onNew, pollMs }: BacktestsListProps) {
   const { runs: allRuns, error } = useRunListPolling({ type: 'backtest', pollMs });
   const runs = allRuns?.filter((r) => r.type === 'backtest') ?? null;
 
-  const columns: Column<RunListItem & Record<string, unknown>>[] = [
+  const columns: Column<RunListItem>[] = [
     {
       key: 'id',
       header: 'Run',
@@ -91,7 +91,7 @@ export function BacktestsList({ onOpen, onNew, pollMs }: BacktestsListProps) {
         {runs != null && runs.length > 0 && (
           <DataTable
             columns={columns}
-            rows={runs as (RunListItem & Record<string, unknown>)[]}
+            rows={runs}
             keyField="id"
             onRowClick={(row) => onOpen(row.id)}
           />

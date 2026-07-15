@@ -32,7 +32,7 @@ export function TrainingList({ onOpen, onNew, pollMs }: TrainingListProps) {
   const { runs: allRuns, error } = useRunListPolling({ type: 'train', pollMs });
   const runs = allRuns?.filter((r) => r.type === 'train') ?? null;
 
-  const columns: Column<RunListItem & Record<string, unknown>>[] = [
+  const columns: Column<RunListItem>[] = [
     {
       key: 'id',
       header: 'Run',
@@ -52,7 +52,8 @@ export function TrainingList({ onOpen, onNew, pollMs }: TrainingListProps) {
       ),
     },
     {
-      key: 'gen',
+      // Derived column: reads the nested, optional `train.generation` — not a single `RunListItem` key.
+      id: 'gen',
       header: 'Generation',
       align: 'num',
       render: (_v, row) => {
@@ -65,7 +66,8 @@ export function TrainingList({ onOpen, onNew, pollMs }: TrainingListProps) {
       },
     },
     {
-      key: 'g1',
+      // Derived column: reads the nested, optional `train.gate` — not a single `RunListItem` key.
+      id: 'g1',
       header: 'G1',
       render: (_v, row) => {
         const gate = row.train?.gate;
@@ -115,7 +117,7 @@ export function TrainingList({ onOpen, onNew, pollMs }: TrainingListProps) {
         {runs != null && runs.length > 0 && (
           <DataTable
             columns={columns}
-            rows={runs as (RunListItem & Record<string, unknown>)[]}
+            rows={runs}
             keyField="id"
             onRowClick={(row) => onOpen(row.id)}
           />

@@ -40,7 +40,7 @@ export function MarketData() {
     };
   }, []);
 
-  const columns: Column<CoverageRow & Record<string, unknown>>[] = [
+  const columns: Column<CoverageRow>[] = [
     {
       key: 'symbol',
       header: 'Symbol',
@@ -77,7 +77,7 @@ export function MarketData() {
           <div className="qe-md__empty">The market-data store is empty. Ingest data to populate it.</div>
         )}
         {rows != null && rows.length > 0 && (
-          <DataTable columns={columns} rows={rows as (CoverageRow & Record<string, unknown>)[]} />
+          <DataTable columns={columns} rows={rows} />
         )}
       </Card>
     </div>
