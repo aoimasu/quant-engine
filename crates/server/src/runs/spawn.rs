@@ -30,12 +30,28 @@ pub trait JobSpawner: Send + Sync + 'static {
 pub struct CliJobSpawner {
     /// Path to the `qe-cli` (`qe`) binary.
     bin: PathBuf,
+    /// QE-419: optional `qe-config` path pinned onto the child via `QE_CONFIG`, so the spawned CLI
+    /// reads the exact same config the server loaded and boot-guarded — the storage-dir single source
+    /// of truth is airtight even against CWD drift. `None` (the default, and every test) leaves the
+    /// child to inherit the parent's `QE_CONFIG`/CWD unchanged.
+    config_path: Option<PathBuf>,
 }
 
 impl CliJobSpawner {
-    /// Spawner that runs the binary at `bin`.
+    /// Spawner that runs the binary at `bin`, with no config pin (the child inherits the environment).
     pub fn new(bin: PathBuf) -> Self {
-        Self { bin }
+        Self {
+            bin,
+            config_path: None,
+        }
+    }
+
+    /// QE-419: pin the child's `qe-config` to `config_path` (sets `QE_CONFIG` on the spawned process),
+    /// so the CLI resolves the same `[storage]` dirs the server guarded at boot.
+    #[must_use]
+    pub fn with_config_path(mut self, config_path: PathBuf) -> Self {
+        self.config_path = Some(config_path);
+        self
     }
 
     /// The configured binary path.
@@ -50,6 +66,10 @@ impl JobSpawner for CliJobSpawner {
         match spec {
             RunSpec::Backtest(params) => backtest_args(&mut cmd, params, run_dir),
             RunSpec::Train(params) => train_args(&mut cmd, params, run_dir),
+        }
+        // QE-419: pin the child to the server's config file so it reads the same `[storage]` dirs.
+        if let Some(config_path) = &self.config_path {
+            cmd.env(crate::config::ENV_CONFIG, config_path);
         }
         cmd.stdin(Stdio::null())
             .stdout(Stdio::piped())
