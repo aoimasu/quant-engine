@@ -98,6 +98,9 @@ pub struct CircuitBreaker {
     thresholds: BreakerThresholds,
     fast_window: usize,
     peak: Option<Decimal>,
+    /// The pre-loaded all-time committed-peak anchor (QE-401), preserved across [`reset`](Self::reset). A
+    /// breaker built without a seed keeps this `None` and re-anchors from the first observed tick (legacy).
+    seed_peak: Option<Decimal>,
     recent: VecDeque<Decimal>,
 }
 
@@ -109,20 +112,48 @@ impl CircuitBreaker {
             thresholds,
             fast_window: fast_window.max(1),
             peak: None,
+            seed_peak: None,
             recent: VecDeque::new(),
         }
     }
 
-    /// The all-time equity peak seen so far.
+    /// Pre-load the all-time committed-peak equity anchor (QE-401 — builder form), so the **first** observed
+    /// tick already measures total drawdown against the true historical peak instead of re-anchoring on it.
+    /// Only the slow/med drawdown anchor is seeded; the fast-drop window is intentionally left empty (the
+    /// speed tier is inherently windowed). The seed is preserved across [`reset`](Self::reset) unless a
+    /// genuinely higher peak is later observed.
+    #[must_use]
+    pub fn with_seed_peak(mut self, peak: Decimal) -> Self {
+        self.seed_peak(peak);
+        self
+    }
+
+    /// Pre-load the all-time committed-peak equity anchor in place (QE-401). See [`with_seed_peak`](Self::with_seed_peak).
+    pub fn seed_peak(&mut self, peak: Decimal) {
+        self.seed_peak = Some(peak);
+        self.peak = Some(peak);
+    }
+
+    /// The all-time equity peak seen so far (including any seeded committed peak).
     #[must_use]
     pub fn peak(&self) -> Option<Decimal> {
         self.peak
     }
 
-    /// Clear all state (new vintage / session).
+    /// Re-arm for a new vintage / session rollover. The fast-drop window is cleared. A **seeded** breaker
+    /// preserves its committed-peak anchor (QE-401) — carried at the higher of the seed and the highest
+    /// observed peak, so a genuinely higher live peak survives — instead of re-anchoring to `None`. An
+    /// un-seeded breaker keeps the legacy behaviour (`peak = None`).
     pub fn reset(&mut self) {
-        self.peak = None;
         self.recent.clear();
+        if self.seed_peak.is_some() {
+            // `self.peak` is already `max(seed, highest observed)` (see `observe`), so carrying it forward
+            // preserves the seed unless a genuinely higher peak was observed. Persist it as the new anchor
+            // floor so subsequent rollovers keep it too (monotone non-decreasing).
+            self.seed_peak = self.peak;
+        } else {
+            self.peak = None;
+        }
     }
 
     /// Observe one equity tick and return the most severe tier triggered, if any. Fast (speed) beats
@@ -262,6 +293,57 @@ mod tests {
         );
         // The crash tick (index 13) fires Fast specifically.
         assert!(events.contains(&(13, BreakerTier::Fast)));
+    }
+
+    /// QE-401: a seeded breaker measures drawdown against the true committed peak on the *first* tick — a
+    /// book already 15% below its historical peak reports ≈15% drawdown (not ≈0) and trips the med tier.
+    #[test]
+    fn seed_peak_anchors_drawdown_on_first_tick() {
+        let mut cb = CircuitBreaker::new(thresholds(), 3).with_seed_peak(d("100"));
+        assert_eq!(cb.peak(), Some(d("100")), "seed pre-loads the anchor");
+        // First live tick 15% below the seed: drawdown = (100 − 85)/100 = 0.15 ≥ med_dd (0.12) → Med.
+        assert_eq!(cb.observe(d("85")), Some(BreakerTier::Med));
+        // Without the seed the same first tick re-anchors on 85 and reports ~0 drawdown (silent).
+        let mut unseeded = CircuitBreaker::new(thresholds(), 3);
+        assert_eq!(unseeded.observe(d("85")), None);
+    }
+
+    /// QE-401: a seed at the med threshold exactly trips Med (boundary), and a shallower drop stays Slow.
+    #[test]
+    fn seed_peak_trips_med_at_threshold() {
+        // med_dd = 0.12, slow_dd = 0.05. Seed 200; a drop to 176 is exactly 12% → Med.
+        let mut cb = CircuitBreaker::new(thresholds(), 3).with_seed_peak(d("200"));
+        assert_eq!(cb.observe(d("176")), Some(BreakerTier::Med));
+        // A 6% drop (→188) from a fresh seed is Slow, not Med.
+        let mut cb2 = CircuitBreaker::new(thresholds(), 3).with_seed_peak(d("200"));
+        assert_eq!(cb2.observe(d("188")), Some(BreakerTier::Slow));
+    }
+
+    /// QE-401: `reset` preserves the seed (the anchor survives a rollover), unlike an un-seeded breaker.
+    #[test]
+    fn reset_preserves_seed_peak() {
+        let mut cb = CircuitBreaker::new(thresholds(), 3).with_seed_peak(d("100"));
+        cb.observe(d("98")); // 2% drawdown, no fire
+        cb.reset();
+        assert_eq!(cb.peak(), Some(d("100")), "seed survives reset");
+        // After reset the anchor is still 100, so a 15% drop trips Med on the first post-reset tick.
+        assert_eq!(cb.observe(d("85")), Some(BreakerTier::Med));
+    }
+
+    /// QE-401: a genuinely higher observed peak survives reset (the anchor is monotone non-decreasing).
+    #[test]
+    fn reset_keeps_a_higher_observed_peak() {
+        let mut cb = CircuitBreaker::new(thresholds(), 3).with_seed_peak(d("100"));
+        cb.observe(d("120")); // climbs to a new all-time high above the seed
+        assert_eq!(cb.peak(), Some(d("120")));
+        cb.reset();
+        assert_eq!(
+            cb.peak(),
+            Some(d("120")),
+            "the higher observed peak, not the seed, is carried across the rollover"
+        );
+        // Drawdown is now measured from 120: a drop to 102 is 15% → Med.
+        assert_eq!(cb.observe(d("102")), Some(BreakerTier::Med));
     }
 
     #[test]

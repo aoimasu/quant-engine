@@ -23,6 +23,7 @@ use rust_decimal::Decimal;
 use qe_risk::{BreakerThresholds, BreakerTier, CalibrationProfile, CircuitBreaker, Fraction};
 use qe_signal::Decision;
 
+use crate::boot_state::ReconstructedState;
 use crate::evaluator::ChromosomeDecision;
 
 /// A threshold set to 1.0, so a tier only fires at a full 100% drawdown (total wipeout) — effectively
@@ -122,6 +123,32 @@ impl BreakerLayer {
         layer
     }
 
+    /// Seed the drawdown anchors from a reconstructed cold-start state (QE-401) — the wiring that makes the
+    /// *true* all-time `committed_peak_equity` (computed at bootstrap, [`ReconstructedState::from_replay`])
+    /// actually drive the live breaker. Each strategy breaker's peak is pre-loaded from
+    /// `state.strategies[i].committed_peak_equity` (aligned by [`StrategyState::index`](crate::boot_state::StrategyState::index)),
+    /// so the **first** live equity tick measures total drawdown against the historical peak instead of
+    /// re-anchoring on it — a book already below its peak trips the slow/med tier immediately rather than
+    /// staying silent. The ensemble breaker is seeded from the aggregate committed peak
+    /// ([`ReconstructedState::aggregate_committed_peak`](crate::boot_state::ReconstructedState::aggregate_committed_peak)).
+    ///
+    /// A strategy whose reconstructed peak is `None` (empty equity path) is left un-seeded (re-anchors on its
+    /// first tick, as before). Indices outside this layer are ignored. The seed is preserved across
+    /// [`reset`](Self::reset). Only the slow/med anchor is seeded; the fast-drop window is inherently
+    /// windowed (out of scope). Call this immediately after construction, before the first live tick.
+    pub fn seed_committed_peaks(&mut self, state: &ReconstructedState) {
+        for s in &state.strategies {
+            if let (Some(peak), Some(breaker)) =
+                (s.committed_peak_equity, self.strategy.get_mut(s.index))
+            {
+                breaker.seed_peak(peak);
+            }
+        }
+        if let Some(aggregate) = state.aggregate_committed_peak() {
+            self.ensemble.seed_peak(aggregate);
+        }
+    }
+
     /// Observe one equity tick for strategy `index`, latching it gated if any tier trips. Returns the tier
     /// that fired (for observability), or `None`. Out-of-range indices return `None`.
     pub fn observe_strategy(&mut self, index: usize, equity: Decimal) -> Option<BreakerTier> {
@@ -157,6 +184,20 @@ impl BreakerLayer {
     #[must_use]
     pub fn strategy_count(&self) -> usize {
         self.strategy.len()
+    }
+
+    /// Strategy `index`'s current all-time drawdown anchor (its seeded/observed peak), for observability
+    /// (QE-304 cockpit surfaces the seeded committed peak). `None` for an out-of-range index or an
+    /// un-anchored breaker.
+    #[must_use]
+    pub fn strategy_peak(&self, index: usize) -> Option<Decimal> {
+        self.strategy.get(index).and_then(CircuitBreaker::peak)
+    }
+
+    /// The ensemble breaker's current drawdown anchor (its seeded/observed aggregate peak), for observability.
+    #[must_use]
+    pub fn ensemble_peak(&self) -> Option<Decimal> {
+        self.ensemble.peak()
     }
 
     /// Clamp gated strategies to flat **before netting**: any decision whose strategy is gated becomes
@@ -337,6 +378,69 @@ mod tests {
         // s0 (calibrated) does not trip on a flat first tick.
         assert!(layer.observe_strategy(0, dec(100)).is_none());
         assert!(!layer.is_gated(0));
+    }
+
+    /// QE-401: seeding pre-loads each per-strategy drawdown anchor from the reconstructed committed peak, so
+    /// the **first** live tick of a book already below its peak trips (and gates) instead of re-anchoring.
+    #[test]
+    fn seed_committed_peaks_anchors_first_tick_and_gates() {
+        use crate::boot_state::{DormancyLatch, ReconstructedState, StrategyState};
+        use qe_signal::PositionState;
+
+        let mut layer = BreakerLayer::new(
+            vec![thresholds(), thresholds()],
+            frac("0.10"),
+            DEFAULT_FAST_WINDOW,
+        );
+        let state = ReconstructedState {
+            strategies: vec![
+                StrategyState {
+                    index: 0,
+                    position: PositionState::flat(),
+                    dormancy: DormancyLatch::active(),
+                    committed_peak_equity: Some(dec(100)),
+                },
+                StrategyState {
+                    index: 1,
+                    position: PositionState::flat(),
+                    dormancy: DormancyLatch::active(),
+                    committed_peak_equity: None, // empty path → left un-seeded
+                },
+            ],
+        };
+        layer.seed_committed_peaks(&state);
+
+        // Strategy 0 is anchored at 100: a first tick at 85 is 15% drawdown ≥ med (0.12) → gated immediately.
+        assert_eq!(layer.observe_strategy(0, dec(85)), Some(BreakerTier::Med));
+        assert!(
+            layer.is_gated(0),
+            "seeded strategy gates on the true drawdown"
+        );
+        // Strategy 1 has no seed: the same first tick re-anchors and reports ~0 drawdown → not gated.
+        assert!(layer.observe_strategy(1, dec(85)).is_none());
+        assert!(!layer.is_gated(1));
+    }
+
+    /// QE-401: the seed survives `reset` (a session rollover does not silently un-anchor the breaker).
+    #[test]
+    fn seed_committed_peaks_survive_reset() {
+        use crate::boot_state::{DormancyLatch, ReconstructedState, StrategyState};
+        use qe_signal::PositionState;
+
+        let mut layer = BreakerLayer::new(vec![thresholds()], frac("0.10"), DEFAULT_FAST_WINDOW);
+        let state = ReconstructedState {
+            strategies: vec![StrategyState {
+                index: 0,
+                position: PositionState::flat(),
+                dormancy: DormancyLatch::active(),
+                committed_peak_equity: Some(dec(100)),
+            }],
+        };
+        layer.seed_committed_peaks(&state);
+        layer.observe_strategy(0, dec(98)); // 2% drawdown, no fire
+        layer.reset();
+        // After the rollover the anchor is still 100, so a 15% drop trips Med on the first post-reset tick.
+        assert_eq!(layer.observe_strategy(0, dec(85)), Some(BreakerTier::Med));
     }
 
     /// `reset` clears gating and re-arms the breakers.
