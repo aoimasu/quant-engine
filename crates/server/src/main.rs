@@ -7,7 +7,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use qe_server::auth::{AuthConfig, AuthContext, IdTokenVerifier};
-use qe_server::{build_router, AppState, ServerConfig};
+use qe_server::{build_router, AppState, ServerConfig, DEFAULT_SHUTDOWN_DRAIN};
 use qe_telemetry::{init as init_telemetry, TelemetryConfig};
 
 #[tokio::main]
@@ -30,6 +30,18 @@ async fn main() -> ExitCode {
     };
 
     let manager = cfg.run_manager();
+
+    // QE-407 startup reconciler (widens QE-263): a hard kill leaves `running`/`queued` runs with no
+    // supervisor and a `meta.json` that says `running` forever. Fail them before serving so the run
+    // list is honest from the first request.
+    match manager.reconcile_orphans() {
+        Ok(0) => {}
+        Ok(n) => tracing::warn!(
+            reconciled = n,
+            "failed orphaned runs left `running`/`queued` by a prior hard shutdown"
+        ),
+        Err(e) => tracing::error!(error = %e, "failed to reconcile orphaned runs on startup"),
+    }
 
     // QE-257 read APIs: open the market store once and build the sealed-vintage repository. A failure
     // to open the store is fatal (mirrors the bind-failure path) — the read endpoints could not serve.
@@ -58,6 +70,9 @@ async fn main() -> ExitCode {
     }
     let auth = Arc::new(AuthContext::new(auth_config, verifier));
 
+    // Keep a handle to the manager for the post-serve drain (QE-407); `AppState` takes ownership of one
+    // `Arc` clone.
+    let shutdown_manager = Arc::clone(&manager);
     let state = AppState::new(manager, auth, read);
     let router = build_router(&cfg.static_dir, state);
 
@@ -78,10 +93,53 @@ async fn main() -> ExitCode {
         "qe-server listening"
     );
 
-    if let Err(e) = axum::serve(listener, router).await {
+    // QE-407: serve until a shutdown signal, then stop the listener and drain in-flight run
+    // supervisors (terminally marking any that don't finish in time) so no `running` `meta.json`
+    // survives a clean shutdown.
+    let serve_result = axum::serve(listener, router)
+        .with_graceful_shutdown(shutdown_signal())
+        .await;
+
+    tracing::info!("shutdown signal received; draining in-flight runs");
+    shutdown_manager.shutdown(DEFAULT_SHUTDOWN_DRAIN).await;
+
+    if let Err(e) = serve_result {
         tracing::error!(error = %e, "server error");
         return ExitCode::FAILURE;
     }
 
     ExitCode::SUCCESS
+}
+
+/// Resolve when the process should begin graceful shutdown: a `Ctrl-C` (SIGINT) or, on unix, a
+/// `SIGTERM` (the orchestrator/container stop signal). If a handler cannot be installed the branch is
+/// disabled (a never-resolving future) rather than panicking — the workspace denies `unwrap`, and a
+/// missing SIGTERM handler must not take down the SIGINT path.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        if tokio::signal::ctrl_c().await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut sig) => {
+                sig.recv().await;
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "could not install SIGTERM handler; relying on Ctrl-C only");
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {}
+        _ = terminate => {}
+    }
 }

@@ -58,6 +58,27 @@ fn app_with_script(data_dir: &Path, script: &Path, max_concurrency: usize) -> Ro
     )
 }
 
+/// Like [`app_with_script`] but also returns the `Arc<RunManager>` so QE-407 tests can drive HTTP
+/// **and** call `shutdown` / `reconcile_orphans` on the very same manager the router serves.
+fn app_and_manager_with_script(
+    data_dir: &Path,
+    script: &Path,
+    max_concurrency: usize,
+) -> (Router, Arc<RunManager>) {
+    let spawner = Arc::new(CliJobSpawner::new(script.to_path_buf()));
+    let manager = Arc::new(RunManager::new(
+        data_dir.join("runs"),
+        spawner,
+        max_concurrency,
+    ));
+    let auth = common::auth_context(TEST_EMAIL, None);
+    let router = build_router(
+        &data_dir.join("static"),
+        common::app_state_under(Arc::clone(&manager), auth, data_dir),
+    );
+    (router, manager)
+}
+
 /// A create-run request body for a minimal valid backtest.
 fn create_body() -> Value {
     json!({
@@ -461,4 +482,177 @@ async fn unknown_run_is_404() {
     assert_eq!(s1, StatusCode::NOT_FOUND);
     let (s2, _) = get(&app, "/api/runs/does-not-exist/result").await;
     assert_eq!(s2, StatusCode::NOT_FOUND);
+}
+
+// ---------------------------------------------------------------------------
+// QE-407: run-lifecycle robustness — graceful shutdown, task registry, honest success.
+// ---------------------------------------------------------------------------
+
+/// AC (hard-kill reconcile): a `running`/`queued` `meta.json` left behind by a crashed prior process
+/// has no live supervisor on the next boot; the startup reconciler fails it, while a `succeeded` run is
+/// left untouched (so the reconciler is non-vacuous and never clobbers a terminal run).
+#[test]
+fn reconcile_orphans_fails_running_leftovers_but_keeps_terminal() {
+    let tmp = TempDir::new().unwrap();
+    let runs_dir = tmp.path().join("runs");
+
+    // Seed the on-disk store exactly as a hard-killed process would leave it.
+    let seed = |id: &str, status: &str| {
+        let dir = runs_dir.join(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        let terminal = status == "succeeded";
+        let meta = json!({
+            "id": id,
+            "type": "backtest",
+            "status": status,
+            "params": {},
+            "progress": { "pct": 10, "stage": "load", "msg": "loading" },
+            "created_ms": 1,
+            "started_ms": 2,
+            "finished_ms": (if terminal { json!(3) } else { Value::Null }),
+            "exit": (if terminal { json!(0) } else { Value::Null }),
+            "error": Value::Null,
+            "artifacts": (if terminal { json!(["result.json"]) } else { json!([]) }),
+        });
+        std::fs::write(dir.join("meta.json"), meta.to_string()).unwrap();
+    };
+    seed("run-running", "running");
+    seed("run-queued", "queued");
+    seed("run-succeeded", "succeeded");
+    let index = json!([
+        { "id": "run-running", "type": "backtest", "created_ms": 1, "label": "v" },
+        { "id": "run-queued", "type": "backtest", "created_ms": 1, "label": "v" },
+        { "id": "run-succeeded", "type": "backtest", "created_ms": 1, "label": "v" },
+    ]);
+    std::fs::write(runs_dir.join("index.json"), index.to_string()).unwrap();
+
+    let spawner = Arc::new(CliJobSpawner::new(tmp.path().join("never-spawned")));
+    let manager = RunManager::new(runs_dir.clone(), spawner, 2);
+
+    let reconciled = manager.reconcile_orphans().expect("reconcile ok");
+    assert_eq!(
+        reconciled, 2,
+        "running + queued reconciled; succeeded left alone"
+    );
+
+    let read = |id: &str| -> Value {
+        serde_json::from_slice(&std::fs::read(runs_dir.join(id).join("meta.json")).unwrap())
+            .unwrap()
+    };
+    for id in ["run-running", "run-queued"] {
+        let m = read(id);
+        assert_eq!(m["status"], json!("failed"), "{id} now failed: {m}");
+        assert!(
+            m["error"]
+                .as_str()
+                .unwrap()
+                .contains("interrupted by a server restart"),
+            "{id} honest reason: {m}"
+        );
+        assert!(m["finished_ms"].is_u64(), "{id} finished_ms set: {m}");
+    }
+    let ok = read("run-succeeded");
+    assert_eq!(ok["status"], json!("succeeded"), "terminal run untouched");
+}
+
+/// AC (graceful shutdown drain): a run blocked in `running` is drained within the bounded window —
+/// `shutdown` aborts it and terminally marks it `failed` (no `running` meta survives a clean
+/// shutdown) — and the manager then refuses new runs (`503`).
+#[tokio::test]
+async fn shutdown_drains_running_run_and_stops_accepting() {
+    let tmp = TempDir::new().unwrap();
+    let script = tmp.path().join("job_block.sh");
+    // Blocks forever in `running` (never releases), so the drain window must abort + terminally mark.
+    write_script(
+        &script,
+        r#"#!/bin/sh
+printf '{"t":"progress","pct":10,"stage":"load","msg":"loading"}\n'
+while true; do sleep 0.05; done
+"#,
+    );
+    let (app, manager) = app_and_manager_with_script(tmp.path(), &script, 2);
+
+    let (status, body) = post_run(&app, &create_body()).await;
+    assert_eq!(status, StatusCode::CREATED, "create returned {body}");
+    let id = body["id"].as_str().unwrap().to_owned();
+
+    // Observe `running` before shutting down (the job cannot finish on its own).
+    let running = poll_status(&app, &id, "running", TIMEOUT).await;
+    assert_eq!(running["status"], json!("running"));
+
+    // Bounded drain: the job never finishes, so shutdown aborts + terminally marks it.
+    manager.shutdown(Duration::from_millis(200)).await;
+
+    let (_, meta) = get(&app, &format!("/api/runs/{id}")).await;
+    assert_eq!(
+        meta["status"],
+        json!("failed"),
+        "drained run is failed: {meta}"
+    );
+    assert!(
+        meta["error"]
+            .as_str()
+            .unwrap()
+            .contains("before server shutdown"),
+        "honest shutdown reason: {meta}"
+    );
+    assert!(meta["finished_ms"].is_u64(), "finished_ms set: {meta}");
+
+    // The manager no longer accepts runs once shutdown has begun.
+    let (rstatus, rbody) = post_run(&app, &create_body()).await;
+    assert_eq!(
+        rstatus,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "post-shutdown create is refused: {rbody}"
+    );
+}
+
+/// AC (honest success): a job that prints `done` and exits 0 but writes **no** `result.json` is
+/// `failed` (not falsely `succeeded`), with the honest reason; `GET /result` then reports a `409` on a
+/// *failed* run rather than 409-ing on a run the UI showed green.
+#[tokio::test]
+async fn done_without_result_json_is_failed_not_succeeded() {
+    let tmp = TempDir::new().unwrap();
+    let script = tmp.path().join("job_liar.sh");
+    write_script(
+        &script,
+        r#"#!/bin/sh
+printf '{"t":"progress","pct":50,"stage":"simulate","msg":"working"}\n'
+printf '{"t":"done","result":"result.json"}\n'
+exit 0
+"#,
+    );
+    let app = app_with_script(tmp.path(), &script, 2);
+
+    let (status, body) = post_run(&app, &create_body()).await;
+    assert_eq!(status, StatusCode::CREATED, "create returned {body}");
+    let id = body["id"].as_str().unwrap().to_owned();
+
+    let meta = poll_status(&app, &id, "failed", TIMEOUT).await;
+    assert_eq!(
+        meta["exit"],
+        json!(0),
+        "exited 0 yet failed for a missing result: {meta}"
+    );
+    assert!(
+        meta["error"]
+            .as_str()
+            .unwrap()
+            .contains("wrote no result.json"),
+        "honest reason: {meta}"
+    );
+    assert_eq!(
+        meta["artifacts"],
+        json!([]),
+        "no artefacts recorded: {meta}"
+    );
+
+    // The result endpoint 409s on a *failed* run — not on a falsely-green one.
+    let (rstatus, rbody) = get(&app, &format!("/api/runs/{id}/result")).await;
+    assert_eq!(rstatus, StatusCode::CONFLICT);
+    assert_eq!(
+        rbody["status"],
+        json!("failed"),
+        "409 reports a failed run, not a green one: {rbody}"
+    );
 }
