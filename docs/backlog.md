@@ -274,7 +274,6 @@ Authoritative for the P0/P1 tickets below; later phases inherit unless a ticket 
 | Ticket | Title | Depends on | Status |
 |--------|-------|------------|:------:|
 | QE-421 | Adopt the `qe-error` recoverability taxonomy on the runtime order path  *(P3)* · *complements QE-268* | QE-268 | — |
-| QE-422 | Keyboard / screen-reader access for clickable table rows and universe chips  *(P3 — a11y)* | QE-258 | — |
 | QE-423 | `DataTable` generic typing — drop the `Record<string, unknown>` casts  *(P3 — type-safety)* | QE-258 | — |
 | QE-424 | Frontend resilience: error boundary + tests for the list/401/deep-link seams  *(P3)* | QE-259, QE-261 | — |
 | QE-425 | Harden the axum router: request timeout, body cap, concurrency limit  *(P3)* | QE-254 | — |
