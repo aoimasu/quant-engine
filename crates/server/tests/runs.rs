@@ -235,13 +235,14 @@ exit 0
     assert_eq!(rstatus, StatusCode::OK);
     assert_eq!(rbody, json!({ "ok": true }));
 
-    // List shows the run.
+    // List shows the run (QE-410 slim envelope: `{ runs, next_cursor }`).
     let (lstatus, list) = get(&app, "/api/runs").await;
     assert_eq!(lstatus, StatusCode::OK);
-    let arr = list.as_array().expect("list is an array");
+    let arr = list["runs"].as_array().expect("runs is an array");
     assert_eq!(arr.len(), 1);
     assert_eq!(arr[0]["id"], json!(id));
     assert_eq!(arr[0]["status"], json!("succeeded"));
+    assert_eq!(list["next_cursor"], Value::Null, "single page: {list}");
 }
 
 /// Failure path: a non-zero exit ⇒ `failed`, with the captured stderr tail as the error; the result
@@ -318,7 +319,7 @@ exit 0
     let deadline = Instant::now() + TIMEOUT;
     loop {
         let (_, list) = get(&app, "/api/runs").await;
-        let arr = list.as_array().unwrap();
+        let arr = list["runs"].as_array().unwrap();
         let running = arr.iter().filter(|m| m["status"] == "running").count();
         let queued = arr.iter().filter(|m| m["status"] == "queued").count();
         if running == 2 && queued == 1 {
@@ -376,7 +377,7 @@ async fn create_rejects_invalid_request_uniform_400() {
 
     let (lstatus, list) = get(&app, "/api/runs").await;
     assert_eq!(lstatus, StatusCode::OK);
-    assert_eq!(list.as_array().unwrap().len(), 0, "no run created");
+    assert_eq!(list["runs"].as_array().unwrap().len(), 0, "no run created");
 }
 
 /// QE-261 Part A: a `type:"train"` run spawns the **train** job and the supervisor captures the QE-260
@@ -467,7 +468,7 @@ async fn train_run_rejects_missing_window_400() {
 
     let (lstatus, list) = get(&app, "/api/runs").await;
     assert_eq!(lstatus, StatusCode::OK);
-    assert_eq!(list.as_array().unwrap().len(), 0, "no run created");
+    assert_eq!(list["runs"].as_array().unwrap().len(), 0, "no run created");
 }
 
 /// Unknown ids: `GET /api/runs/{unknown}` and `.../result` both 404.
@@ -519,7 +520,7 @@ exit 0
 
     let (lstatus, list) = get(&app, "/api/runs").await;
     assert_eq!(lstatus, StatusCode::OK);
-    let arr = list.as_array().unwrap();
+    let arr = list["runs"].as_array().unwrap();
     assert_eq!(arr.len(), 2, "both runs listed: {list}");
     assert_eq!(arr[0]["id"], json!(id_b), "newest first: {list}");
     assert_eq!(arr[1]["id"], json!(id_a), "then the older run: {list}");
@@ -533,7 +534,7 @@ exit 0
         StatusCode::OK,
         "indexed-but-missing meta is skipped, not an error: {list}"
     );
-    let arr = list.as_array().unwrap();
+    let arr = list["runs"].as_array().unwrap();
     assert_eq!(arr.len(), 1, "only the run with meta remains: {list}");
     assert_eq!(arr[0]["id"], json!(id_b), "the surviving run is B: {list}");
 }
@@ -572,11 +573,11 @@ exit 0
     let id_tr = t["id"].as_str().unwrap().to_owned();
     poll_status(&app, &id_tr, "succeeded", TIMEOUT).await;
 
-    // No filter → both runs (byte-parity with the pre-QE-408 behaviour).
+    // No filter → both runs (parity with the pre-QE-408 behaviour, now under the QE-410 envelope).
     let (s, all) = get(&app, "/api/runs").await;
     assert_eq!(s, StatusCode::OK);
     assert_eq!(
-        all.as_array().unwrap().len(),
+        all["runs"].as_array().unwrap().len(),
         2,
         "unfiltered lists both: {all}"
     );
@@ -584,7 +585,7 @@ exit 0
     // ?type=backtest → only the backtest run.
     let (s, only_bt) = get(&app, "/api/runs?type=backtest").await;
     assert_eq!(s, StatusCode::OK);
-    let arr = only_bt.as_array().unwrap();
+    let arr = only_bt["runs"].as_array().unwrap();
     assert_eq!(arr.len(), 1, "only the backtest run: {only_bt}");
     assert_eq!(arr[0]["id"], json!(id_bt));
     assert_eq!(arr[0]["type"], json!("backtest"));
@@ -592,7 +593,7 @@ exit 0
     // ?type=train → only the train run.
     let (s, only_tr) = get(&app, "/api/runs?type=train").await;
     assert_eq!(s, StatusCode::OK);
-    let arr = only_tr.as_array().unwrap();
+    let arr = only_tr["runs"].as_array().unwrap();
     assert_eq!(arr.len(), 1, "only the train run: {only_tr}");
     assert_eq!(arr[0]["id"], json!(id_tr));
     assert_eq!(arr[0]["type"], json!("train"));
@@ -601,9 +602,108 @@ exit 0
     let (s, none) = get(&app, "/api/runs?type=bogus").await;
     assert_eq!(s, StatusCode::OK);
     assert_eq!(
-        none.as_array().unwrap().len(),
+        none["runs"].as_array().unwrap().len(),
         0,
         "unknown type → empty list: {none}"
+    );
+
+    // QE-410: `?status=` composes with `?type=`. Both runs succeeded, so `?status=succeeded&type=train`
+    // returns the one train run; `?status=running` (none) returns an empty page.
+    let (s, tr_ok) = get(&app, "/api/runs?type=train&status=succeeded").await;
+    assert_eq!(s, StatusCode::OK);
+    let arr = tr_ok["runs"].as_array().unwrap();
+    assert_eq!(arr.len(), 1, "type+status compose: {tr_ok}");
+    assert_eq!(arr[0]["id"], json!(id_tr));
+    let (s, running) = get(&app, "/api/runs?status=running").await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(
+        running["runs"].as_array().unwrap().len(),
+        0,
+        "no running runs → empty page: {running}"
+    );
+
+    // QE-410: the list rows are the SLIM projection — they carry `label` but defer heavy `params`,
+    // while `GET /api/runs/{id}` still serves the full meta (with `params`).
+    let (_, list) = get(&app, "/api/runs?type=backtest").await;
+    let row = &list["runs"].as_array().unwrap()[0];
+    assert!(row["label"].is_string(), "slim row has label: {row}");
+    assert!(row["params"].is_null(), "slim row defers params: {row}");
+    let (_, full) = get(&app, &format!("/api/runs/{id_bt}")).await;
+    assert!(
+        full["params"].is_object(),
+        "detail endpoint still serves full params: {full}"
+    );
+}
+
+/// QE-410: `?limit=`/`?cursor=` paginate with an **id-anchored** cursor that is stable under concurrent
+/// creates. Page 1 caps at `limit` and yields a `next_cursor`; walking the cursor returns the older rows
+/// with no overlap — and a run created *between* the two page fetches (which prepends to the newest-first
+/// view) never leaks into, skips, or duplicates the cursor-paginated older page.
+#[tokio::test]
+async fn list_runs_paginates_stably_under_concurrent_creates() {
+    let tmp = TempDir::new().unwrap();
+    let script = tmp.path().join("job_quick.sh");
+    write_script(
+        &script,
+        r#"#!/bin/sh
+run_dir=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --run-dir) run_dir="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+printf '{"ok":true}' > "$run_dir/result.json"
+printf '{"t":"done","result":"result.json"}\n'
+exit 0
+"#,
+    );
+    let app = app_with_script(tmp.path(), &script, 4);
+
+    // Create 4 runs in order [r0, r1, r2, r3]; newest-first view is [r3, r2, r1, r0].
+    let mut ids = Vec::new();
+    for _ in 0..4 {
+        let (_, b) = post_run(&app, &create_body()).await;
+        let id = b["id"].as_str().unwrap().to_owned();
+        poll_status(&app, &id, "succeeded", TIMEOUT).await;
+        ids.push(id);
+    }
+    let newest_first = [&ids[3], &ids[2], &ids[1], &ids[0]];
+
+    // Page 1: limit=2 → the two newest [r3, r2], with a next_cursor.
+    let (_, p1) = get(&app, "/api/runs?limit=2").await;
+    let arr = p1["runs"].as_array().unwrap();
+    assert_eq!(arr.len(), 2, "page capped at limit: {p1}");
+    assert_eq!(arr[0]["id"], json!(*newest_first[0]));
+    assert_eq!(arr[1]["id"], json!(*newest_first[1]));
+    let cursor = p1["next_cursor"].as_str().expect("next_cursor present");
+    assert_eq!(
+        cursor,
+        newest_first[1].as_str(),
+        "cursor anchors on last row"
+    );
+
+    // Interleave a NEW create (prepends to the newest-first view) BEFORE fetching page 2.
+    let (_, nb) = post_run(&app, &create_body()).await;
+    let new_id = nb["id"].as_str().unwrap().to_owned();
+    poll_status(&app, &new_id, "succeeded", TIMEOUT).await;
+
+    // Page 2 via the cursor: exactly the original older rows [r1, r0] — the new run does NOT appear,
+    // and nothing is skipped or duplicated (stability under concurrent creates).
+    let (_, p2) = get(&app, &format!("/api/runs?limit=2&cursor={cursor}")).await;
+    let arr = p2["runs"].as_array().unwrap();
+    assert_eq!(
+        arr.len(),
+        2,
+        "second page returns the remaining older rows: {p2}"
+    );
+    assert_eq!(arr[0]["id"], json!(*newest_first[2]));
+    assert_eq!(arr[1]["id"], json!(*newest_first[3]));
+    assert_eq!(p2["next_cursor"], Value::Null, "last page: {p2}");
+    let page2_ids: Vec<&str> = arr.iter().map(|r| r["id"].as_str().unwrap()).collect();
+    assert!(
+        !page2_ids.contains(&new_id.as_str()),
+        "a concurrently-created run never leaks into an older cursor page: {p2}"
     );
 }
 

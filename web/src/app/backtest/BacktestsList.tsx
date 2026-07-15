@@ -1,8 +1,8 @@
-import { useEffect, useState } from 'react';
-import { Badge, Button, Callout, Card, DataTable, Icon } from '../../design';
+import { Button, Callout, Card, DataTable, Icon, StatusBadge, formatRunDate } from '../../design';
 import type { Column } from '../../design';
 import { injectCss } from '../../design/injectCss';
-import { listRuns, isBacktestRun, type BacktestRunMeta, type RunStatus } from '../../api/runs';
+import { useRunListPolling } from '../../api/useRunListPolling';
+import type { RunListItem } from '../../api/runs';
 
 const CSS = `
 .qe-list { max-width: var(--content-max); margin: 0 auto; padding: 24px; display: flex; flex-direction: column; gap: 16px; }
@@ -14,58 +14,26 @@ const CSS = `
 
 injectCss('qe-list-css', CSS);
 
-function statusVariant(status: RunStatus): 'up' | 'info' | 'neutral' | 'down' {
-  switch (status) {
-    case 'succeeded':
-      return 'up';
-    case 'running':
-      return 'info';
-    case 'queued':
-      return 'neutral';
-    case 'failed':
-      return 'down';
-  }
-}
-
-function fmtDate(ms: number): string {
-  const d = new Date(ms);
-  const y = d.getUTCFullYear();
-  const m = String(d.getUTCMonth() + 1).padStart(2, '0');
-  const day = String(d.getUTCDate()).padStart(2, '0');
-  const hh = String(d.getUTCHours()).padStart(2, '0');
-  const mm = String(d.getUTCMinutes()).padStart(2, '0');
-  return `${y}-${m}-${day} ${hh}:${mm}`;
-}
-
 export interface BacktestsListProps {
   onOpen: (id: string) => void;
   onNew: () => void;
+  /** Live-poll cadence while any row is queued/running (ms). Overridable for tests. */
+  pollMs?: number;
 }
 
-/** Backtests list — the runs table from `GET /api/runs`. Row click opens the result. */
-export function BacktestsList({ onOpen, onNew }: BacktestsListProps) {
-  const [runs, setRuns] = useState<BacktestRunMeta[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
+/**
+ * Backtests list — the runs table from `GET /api/runs?type=backtest` (the slim QE-410 projection). It
+ * polls live via {@link useRunListPolling} while any row is queued/running (so a `RUNNING {pct}%` cell
+ * updates without navigating) and stops once every row is terminal. The heavy `params` are deferred to
+ * the result screen; the vintage column reads the server's slim `label`.
+ */
+export function BacktestsList({ onOpen, onNew, pollMs }: BacktestsListProps) {
+  // Server-side `?type=backtest` filter; still narrow client-side (defense-in-depth) so a leaked train
+  // row can never be clickable and route to a permanently-409/404 result.
+  const { runs: allRuns, error } = useRunListPolling({ type: 'backtest', pollMs });
+  const runs = allRuns?.filter((r) => r.type === 'backtest') ?? null;
 
-  useEffect(() => {
-    let cancelled = false;
-    // Fetch only backtest runs (`?type=backtest`) so training runs are not over-fetched, and still
-    // narrow with `isBacktestRun` as defense-in-depth — `isBacktestRun` is a type-predicate, so the
-    // filtered array is `BacktestRunMeta[]` and the columns read `params` (BacktestParams) directly.
-    // Without this a leaked train row would be clickable and route to a permanently-409/404 result.
-    listRuns('backtest')
-      .then((r) => {
-        if (!cancelled) setRuns(r.filter(isBacktestRun));
-      })
-      .catch((e) => {
-        if (!cancelled) setError(e instanceof Error ? e.message : 'Failed to load runs.');
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  const columns: Column<BacktestRunMeta & Record<string, unknown>>[] = [
+  const columns: Column<RunListItem & Record<string, unknown>>[] = [
     {
       key: 'id',
       header: 'Run',
@@ -76,44 +44,21 @@ export function BacktestsList({ onOpen, onNew }: BacktestsListProps) {
       ),
     },
     {
-      key: 'params',
+      key: 'label',
       header: 'Vintage',
-      // The list is filtered to backtest runs, so `row` is a `BacktestRunMeta` and `params.vintage`
-      // reads directly (a train run — which has no vintage — can no longer reach this table).
-      render: (_v, row) => (
-        <span style={{ fontWeight: 600 }}>{row.params.vintage || '—'}</span>
-      ),
-    },
-    {
-      key: 'window',
-      header: 'Window',
-      render: (_v, row) => (
-        <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-secondary)' }}>
-          {row.params.start} → {row.params.end}
-        </span>
-      ),
-    },
-    {
-      key: 'resolution',
-      header: 'Res',
-      align: 'num',
-      render: (_v, row) => row.params.resolution || '—',
+      render: (_v, row) => <span style={{ fontWeight: 600 }}>{row.label || '—'}</span>,
     },
     {
       key: 'status',
       header: 'Status',
-      render: (_v, row) => (
-        <Badge variant={statusVariant(row.status)} dot>
-          {row.status === 'running' ? `RUNNING ${row.progress.pct}%` : row.status.toUpperCase()}
-        </Badge>
-      ),
+      render: (_v, row) => <StatusBadge status={row.status} pct={row.progress.pct} />,
     },
     {
       key: 'created_ms',
       header: 'Created',
       align: 'num',
       render: (v) => (
-        <span style={{ color: 'var(--text-tertiary)' }}>{fmtDate(Number(v))}</span>
+        <span style={{ color: 'var(--text-tertiary)' }}>{formatRunDate(Number(v))}</span>
       ),
     },
   ];
@@ -146,7 +91,7 @@ export function BacktestsList({ onOpen, onNew }: BacktestsListProps) {
         {runs != null && runs.length > 0 && (
           <DataTable
             columns={columns}
-            rows={runs as (BacktestRunMeta & Record<string, unknown>)[]}
+            rows={runs as (RunListItem & Record<string, unknown>)[]}
             keyField="id"
             onRowClick={(row) => onOpen(row.id)}
           />

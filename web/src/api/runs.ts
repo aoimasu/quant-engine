@@ -2,7 +2,8 @@
  * Runs / vintages / market-data API client — the QE-259 backtest screens talk to
  * the session-gated, same-origin qe-server (QE-255 run lifecycle, QE-257 read APIs).
  *
- *   GET  /api/runs                 → RunMeta[] (newest first)
+ *   GET  /api/runs                 → { runs: RunListItem[], next_cursor } (QE-410 slim page, newest
+ *                                    first; wire `next_cursor` is mapped to `nextCursor` client-side)
  *   POST /api/runs                 → 201 { id } | 400 { error }
  *   GET  /api/runs/:id             → RunMeta (status + progress) | 404
  *   GET  /api/runs/:id/result      → BacktestResult (§8.1) | 409 (not ready) | 404
@@ -232,14 +233,73 @@ async function getJson<T>(url: string): Promise<T> {
   return (await res.json()) as T;
 }
 
+/** A run's `type` discriminant (`'backtest' | 'train'`). */
+export type RunType = RunMeta['type'];
+
 /**
- * List runs, newest first. Pass a `type` (`'backtest'` | `'train'`) to have the server filter to that
- * run type (`?type=…`) so a type-specific screen stops over-fetching the other type; omit it for all
- * runs. Callers should still narrow the result (e.g. `.filter(isBacktestRun)`) as defense-in-depth.
+ * The **slim** list projection (QE-410) — one row of `GET /api/runs`, deliberately smaller than the
+ * full {@link RunMeta} served by `GET /api/runs/:id`. Carries only what the run lists render live:
+ * identity (`id`/`type`/`label`), lifecycle (`status`/`progress`), the small live training progress
+ * (`train`), and `created_ms`. The heavy immutable `params` is **deferred** to the detail endpoint —
+ * open a run (`getRun`) to read its full {@link RunMeta} (with `params`).
+ *
+ * `label` is the server's index label — the vintage id (backtest) or `"train {start}→{end}"` (train) —
+ * so a list has an identifying column without shipping `params`.
  */
-export function listRuns(type?: RunMeta['type']): Promise<RunMeta[]> {
-  const url = type ? `/api/runs?type=${encodeURIComponent(type)}` : '/api/runs';
-  return getJson<RunMeta[]>(url);
+export interface RunListItem {
+  id: string;
+  type: RunType;
+  /** Human discovery label (vintage id / window). */
+  label: string;
+  status: RunStatus;
+  progress: Progress;
+  /** Rich training progress — present only on `train` rows. */
+  train?: TrainProgress;
+  created_ms: number;
+}
+
+/** Query for {@link listRuns}: every field is optional and they compose server-side. */
+export interface RunListQuery {
+  /** Filter to a single run type (`?type=`, QE-408). */
+  type?: RunType;
+  /** Filter to a single lifecycle status (`?status=`). */
+  status?: RunStatus;
+  /** Page size (`?limit=`); the server defaults to 50 and caps at 200. */
+  limit?: number;
+  /** Pagination cursor (`?cursor=`) — the run id after which (older than which) to resume. */
+  cursor?: string;
+}
+
+/** One page of {@link listRuns}: the newest-first slim rows plus the cursor for the next (older) page. */
+export interface RunPage {
+  runs: RunListItem[];
+  /** Cursor to pass as `RunListQuery.cursor` for the next page, or `null` when this is the last page. */
+  nextCursor: string | null;
+}
+
+/** The on-wire `GET /api/runs` envelope (snake-case `next_cursor`), mapped to {@link RunPage}. */
+interface RunPageWire {
+  runs: RunListItem[];
+  next_cursor: string | null;
+}
+
+/**
+ * List runs, newest first, as a paginated page of the slim {@link RunListItem} projection (QE-410).
+ * Every {@link RunListQuery} field is optional and composes: `type`/`status` filter, `limit`/`cursor`
+ * paginate (the cursor is id-anchored and stable under concurrent creates). Callers that need a run's
+ * full `params` open it with {@link getRun}.
+ */
+export async function listRuns(query: RunListQuery = {}): Promise<RunPage> {
+  const params = new URLSearchParams();
+  if (query.type) params.set('type', query.type);
+  if (query.status) params.set('status', query.status);
+  // Only forward a positive limit; a non-positive value is nonsensical on the wire (the server would
+  // clamp it to 1 anyway), so omit it and let the server default apply.
+  if (query.limit != null && query.limit > 0) params.set('limit', String(query.limit));
+  if (query.cursor) params.set('cursor', query.cursor);
+  const qs = params.toString();
+  const wire = await getJson<RunPageWire>(qs ? `/api/runs?${qs}` : '/api/runs');
+  return { runs: wire.runs, nextCursor: wire.next_cursor };
 }
 
 /** Fetch one run's meta (status + progress). */
