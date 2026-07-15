@@ -69,6 +69,9 @@ fn params(store_path: PathBuf, vintage_root: PathBuf, seed: u64) -> TrainParams 
         // The committed fixture store has full 8h funding coverage (stamps every 8 bars over 120 bars),
         // so the default 0.90 floor is comfortably cleared.
         funding_coverage_min: 0.90,
+        // QE-415: 2 purged OOS folds keeps the small-budget fixture search fast (test blocks partition the
+        // ~87-bar train window, so per-genome eval stays ~one pass over the train bars).
+        cv_folds: 2,
         lineage: lineage(seed),
         profile: "train".to_owned(),
     }

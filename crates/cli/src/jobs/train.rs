@@ -28,6 +28,9 @@ use qe_validation::{
 };
 use qe_vintage::{Vintage, VintageContent, VintageRepository, VINTAGE_FORMAT_VERSION};
 use qe_wfo::backtest::{backtest, BacktestConfig, Bar as DecisionBar};
+use qe_wfo::cv_fitness::{
+    fold_isolation_fitness, fold_test_ranges, selection_kfold, DEFAULT_LABEL_HORIZON,
+};
 use qe_wfo::regularise::coverage;
 use qe_wfo::{Genome, MapElitesArchive, OperatorSelector, VariationDriver};
 use rust_decimal::prelude::ToPrimitive;
@@ -107,6 +110,12 @@ pub struct TrainParams {
     /// [`RunError::FundingCoverage`] rather than selecting on funding-free returns. Sourced from
     /// `config.selection.funding_coverage_min`.
     pub funding_coverage_min: f64,
+    /// Number of cross-validation folds the *selection* fitness scores each genome over (QE-415). `≥ 2`;
+    /// sourced from `config.selection.cv_folds`. The search records an elite's fitness as the mean per-fold
+    /// log-growth over these disjoint, isolated (flat-start) folds instead of a single whole-window in-sample
+    /// number. The folds tile the train window (nothing held out) — an in-window robustness signal, not a true
+    /// OOS gate; the G1 terminal holdout remains the only true OOS boundary.
+    pub cv_folds: usize,
     /// The config-derived lineage (config hash + snapshot + code commit + seed). Its [`Lineage::id`] is
     /// the sealed vintage id — deterministic and independent of the stochastic search.
     pub lineage: Lineage,
@@ -273,7 +282,26 @@ pub fn run_train_job(
     let mut long = VariationDriver::new(OperatorSelector::with_defaults(), Direction::Long);
     let mut short = VariationDriver::new(OperatorSelector::with_defaults(), Direction::Short);
     let mut rng = seed_rng(params.seed);
-    let eval = |g: &Genome| backtest(g, train_bars, &train_cfg).elite_fitness();
+
+    // QE-415: selection fitness = cross-validated fold-isolation robustness, not whole-window in-sample
+    // growth. Build the fold geometry ONCE (genome-independent): `cv_folds` (config-driven, ≥ 2) balanced test
+    // blocks over the train window, purged/embargoed by the real feature lookback + label horizon so each fold
+    // satisfies `windows_disjoint`. The per-genome eval scores the genome on each disjoint test fold in
+    // isolation (flat start) and records the mean per-fold log-growth (`.mean`) — same units/scale as the old
+    // `elite_fitness()`, so the archive's scalar comparison is unchanged, but selection pressure now rewards
+    // genomes that generalise across folds rather than fitting one contiguous stretch.
+    //
+    // NB: the folds TILE the train window (nothing is held out) — this is an in-window cross-validation
+    // robustness signal, not a true OOS gate; the purge/embargo shapes each fold's (unused) train partition
+    // and the disjointness invariant, not the scored test blocks. The G1 terminal holdout stays the only true
+    // OOS boundary (see `qe_wfo::cv_fitness` module docs).
+    let cv = selection_kfold(
+        params.cv_folds,
+        schema.max_lookback(),
+        DEFAULT_LABEL_HORIZON,
+    );
+    let cv_ranges = fold_test_ranges(&cv, train_bars.len());
+    let eval = |g: &Genome| fold_isolation_fitness(g, train_bars, &cv_ranges, &train_cfg).mean;
     let mut best_fitness = f64::NEG_INFINITY;
 
     for generation in 1..=generations {

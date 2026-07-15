@@ -271,7 +271,6 @@ Authoritative for the P0/P1 tickets below; later phases inherit unless a ticket 
 | QE-410 | Run-list read path: shared polling hook, live list refresh, server pagination/projection/filter  *(P2)* · *coordinate QE-264* | QE-255, QE-259 | — |
 | QE-411 | Take run-store / read blocking `std::fs` off the async executor  *(P2)* · **extends QE-266** | QE-255 | — |
 | QE-412 | Coverage query without full `Bar` decode (key-only LMDB cursor)  *(P2 — efficiency)* | QE-253, QE-257 | — |
-| QE-415 | Wire the purged/embargoed CV into selection fitness (exists but unused)  *(P2 — leakage)* | QE-117, QE-113 | — |
 | QE-416 | Seal capacity-weighted allocation + worst-case-loss + real breaker calibration  *(P2)* | QE-128, QE-130, QE-116 | — |
 | QE-417 | Time-aware mark EMA (gap-aware) for the drawdown-breaker feed  *(P2 — runtime-risk)* | QE-202, QE-208 | — |
 | QE-418 | Pre-trade gross cap checked against true gross exposure, not net notional  *(P2 — risk)* | QE-213, QE-215 | — |
