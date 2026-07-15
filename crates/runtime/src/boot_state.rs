@@ -199,6 +199,22 @@ impl ReconstructedState {
 
         Ok(ReconstructedState { strategies })
     }
+
+    /// The **aggregate** committed peak (QE-401) — the sum of the per-strategy `committed_peak_equity`
+    /// values that are present, or `None` if no strategy has a peak (all equity paths empty). This seeds the
+    /// ensemble breaker's drawdown anchor. It is the aggregate-equity notion available from the reconstructed
+    /// state (which carries no aggregate equity path); a pure, deterministic function of the per-strategy
+    /// committed peaks.
+    #[must_use]
+    pub fn aggregate_committed_peak(&self) -> Option<Decimal> {
+        let mut total: Option<Decimal> = None;
+        for s in &self.strategies {
+            if let Some(p) = s.committed_peak_equity {
+                total = Some(total.map_or(p, |t| t + p));
+            }
+        }
+        total
+    }
 }
 
 #[cfg(test)]
@@ -328,6 +344,45 @@ mod tests {
             "strategy 1 never traded → dormant"
         );
         assert_eq!(s1.committed_peak_equity, Some(dec(100)));
+    }
+
+    /// QE-401: the aggregate committed peak sums the present per-strategy peaks (and is `None` when none).
+    #[test]
+    fn aggregate_committed_peak_sums_present_peaks() {
+        let state = ReconstructedState {
+            strategies: vec![
+                StrategyState {
+                    index: 0,
+                    position: PositionState::flat(),
+                    dormancy: DormancyLatch::active(),
+                    committed_peak_equity: Some(dec(150)),
+                },
+                StrategyState {
+                    index: 1,
+                    position: PositionState::flat(),
+                    dormancy: DormancyLatch::active(),
+                    committed_peak_equity: None, // empty path → excluded from the sum
+                },
+                StrategyState {
+                    index: 2,
+                    position: PositionState::flat(),
+                    dormancy: DormancyLatch::active(),
+                    committed_peak_equity: Some(dec(130)),
+                },
+            ],
+        };
+        assert_eq!(state.aggregate_committed_peak(), Some(dec(280)));
+
+        // All-empty paths → no aggregate.
+        let empty = ReconstructedState {
+            strategies: vec![StrategyState {
+                index: 0,
+                position: PositionState::flat(),
+                dormancy: DormancyLatch::active(),
+                committed_peak_equity: None,
+            }],
+        };
+        assert_eq!(empty.aggregate_committed_peak(), None);
     }
 
     /// A wrong number of equity paths is a clear error, not a panic or silent truncation.
