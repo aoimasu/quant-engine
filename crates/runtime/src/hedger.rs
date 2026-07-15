@@ -46,14 +46,33 @@ pub trait PositionKeeper {
     }
 }
 
-/// An absolute target position for the instrument: a signed [`Notional`] (sign = direction, `0` = flat).
+/// An absolute target position for the instrument: a signed net [`Notional`] (sign = direction, `0` = flat)
+/// plus the unsigned **gross** exposure (`long + short`) the QE-215 governor caps.
+///
+/// `notional` is the net; `gross` is the total two-sided exposure, always `≥ |notional|`. For a single
+/// instrument the two sides never oppose, so `gross == |notional|`; once a hedged/offsetting book exists (net
+/// small, both sides large) `gross` exceeds `|notional|` and the gross cap must be checked against `gross`, not
+/// the net (QE-418).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TargetPosition {
-    /// The signed absolute target notional.
+    /// The signed absolute **net** target notional (sign = direction, `0` = flat).
     pub notional: Notional,
+    /// The unsigned **gross** exposure notional (`long + short`), always `≥ |notional|`.
+    pub gross: Notional,
 }
 
 impl TargetPosition {
+    /// A **single-instrument** target: gross equals `|notional|` by construction (the two sides never oppose).
+    /// Use this for every path that does not model a hedged/offsetting book; the multi-instrument case sets
+    /// `gross` explicitly.
+    #[must_use]
+    pub fn single(notional: Notional) -> Self {
+        Self {
+            notional,
+            gross: Notional::new(notional.get().abs()),
+        }
+    }
+
     /// The target's direction: `Long` if positive, `Short` if negative, `None` if flat.
     #[must_use]
     pub fn direction(&self) -> Option<Direction> {
@@ -92,6 +111,9 @@ impl<K: PositionKeeper> HedgePlanner<K> {
         let equity = self.keeper.equity().get();
         TargetPosition {
             notional: Notional::new(net.net * equity),
+            // Gross exposure scales the same fraction-of-capital by equity as the net, but from `long + short`
+            // — so a hedged book (small net, large sides) carries its true two-sided exposure to the governor.
+            gross: Notional::new(net.gross() * equity),
         }
     }
 }
@@ -194,10 +216,26 @@ mod tests {
         let net = net_target("0.009", "0.015", "0.006");
 
         assert_eq!(planner.plan(net).notional, n("90")); // 0.009 * 10_000
+                                                         // Gross scales `long + short` (0.015 + 0.006) by equity, independent of the net.
+        assert_eq!(planner.plan(net).gross, n("210")); // 0.021 * 10_000
 
         // Doubling equity doubles the target (equity is read fresh each plan).
         planner.keeper.equity.set(dec("20000"));
         assert_eq!(planner.plan(net).notional, n("180"));
+        assert_eq!(planner.plan(net).gross, n("420"));
+    }
+
+    /// A hedged book (equal-and-opposite legs) nets small but carries true gross: `gross > |net|`.
+    #[test]
+    fn plan_carries_gross_above_net_for_a_hedged_book() {
+        let keeper = FakeKeeper::new("10000", "5000", "0");
+        let planner = HedgePlanner::new(keeper);
+        // net 0, gross 0.04 (long 0.02 + short 0.02).
+        let hedged = net_target("0", "0.02", "0.02");
+        let target = planner.plan(hedged);
+        assert_eq!(target.notional, Notional::ZERO);
+        assert_eq!(target.gross, n("400")); // 0.04 * 10_000
+        assert!(target.gross.get() > target.notional.get().abs());
     }
 
     /// The target's sign encodes direction; a zero net is flat.
