@@ -27,7 +27,11 @@ pub mod limit;
 pub use breaker::{
     replay, BreakerThresholds, BreakerTier, CircuitBreaker, MarkEma, DEFAULT_FAST_WINDOW,
 };
-pub use calibration::{calibrate_threshold, CalibrationProfile, CohortThresholds};
+pub use calibration::{
+    calibrate_threshold, calibrate_thresholds, default_calibration_margin, drawdown_distribution,
+    fast_drop_distribution, quantize_calibration, CalibrationProfile, CohortThresholds,
+    CALIBRATION_SCALE, DEFAULT_FAST_QUANTILE, DEFAULT_MED_QUANTILE, DEFAULT_SLOW_QUANTILE,
+};
 pub use gate::{assert_honours_kill_switch, Admission, OrderGate, OrderIntent};
 pub use kill::{KillHandle, KillSwitch};
 pub use limit::{Fraction, Leverage, LimitBreach, LimitKind, LimitOutcome, RiskLimits};

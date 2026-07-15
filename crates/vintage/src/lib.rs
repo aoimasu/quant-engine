@@ -59,6 +59,18 @@ pub struct VintageContent {
 }
 
 impl VintageContent {
+    /// The canonical per-strategy ids the live breaker layer keys its calibration lookup by (QE-416):
+    /// the positional index of each chromosome as a string (`["0", "1", …]`). This is the **single
+    /// source of truth** for the strategy↔calibration mapping — the seal writes the
+    /// [`CalibrationProfile`] `per_strategy` map under exactly these keys, and
+    /// `BreakerLayer::from_calibration` looks them up with the same ids, so every sealed strategy is
+    /// found (no unintended pre-gating of a calibrated member). A method, not a field, so it does not
+    /// enter the content hash.
+    #[must_use]
+    pub fn strategy_ids(&self) -> Vec<String> {
+        (0..self.chromosomes.len()).map(|i| i.to_string()).collect()
+    }
+
     /// Validate the artefact's structural invariants — `weights` aligned one-to-one with `chromosomes`
     /// and every weight finite, and `worst_case_loss` (if present) a finite non-negative fraction.
     /// Called by [`Vintage::seal`], so a silent upstream bug (a non-finite weight that would serialise

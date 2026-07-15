@@ -20,8 +20,15 @@ use std::str::FromStr;
 
 use qe_determinism::{seed_rng, Lineage};
 use qe_domain::{Direction, InstrumentId, Resolution, Timestamp};
+use qe_ensemble::{
+    cap_weights, capacity, default_synthetic_shocks, weighted_combined, worst_case_loss,
+    CapacityModel, StrategyProfile,
+};
 use qe_gate::{evaluate_g1, split_with_embargo, G1Criteria, G1Decision};
-use qe_risk::{CalibrationProfile, Fraction};
+use qe_risk::{
+    calibrate_threshold, calibrate_thresholds, default_calibration_margin, quantize_calibration,
+    CalibrationProfile, DEFAULT_FAST_QUANTILE, DEFAULT_FAST_WINDOW,
+};
 use qe_validation::{
     assess, buy_and_hold_returns, effective_trials, sharpe_ratio, RobustnessReport, SpaConfig,
     VintageStats,
@@ -58,6 +65,36 @@ const MAX_POOL: usize = 10;
 
 /// Binance USDT-M funding cadence: one stamp every 8 hours (QE-403 coverage grid).
 const FUNDING_PERIOD_MS: i64 = 8 * 60 * 60 * 1_000;
+
+/// Target book AUM (USD) the QE-128 capacity model caps the sealed ensemble weights against (QE-416). A
+/// documented default book size — a member whose modelled capacity at this AUM is below its equal-weight
+/// dollar share is scaled down and the freed budget water-filled to higher-capacity members. Not yet a
+/// per-run config input (reviewer sanity-check item).
+const TARGET_AUM_USD: f64 = 1_000_000.0;
+
+/// Basis-point denominator for a genome's `size_bps` position sizing (mirrors the WFO backtest's
+/// `size_frac = size_bps / 10_000`), used to estimate per-member turnover for the capacity model.
+const BPS_DENOMINATOR: f64 = 10_000.0;
+
+/// Scale (`10^12`) the sealed `f64` allocation weights and worst-case-loss figure are rounded to before
+/// hashing (QE-416). The vintage's content hash is the digest of `serde_json`'s output, whose **default**
+/// float parser is not correctly-rounded: a 17-significant-digit `f64` (e.g. a raw capacity weight or
+/// stress loss) can re-parse to a neighbouring `f64` that serialises one ULP differently, breaking the
+/// QE-402 content-hash verify on reload. Rounding to 12 decimal places keeps every hashed `f64` within
+/// the parser's exact range (far finer than any allocation / risk figure needs) so seal → load is
+/// byte-stable.
+const HASH_STABLE_SCALE: f64 = 1e12;
+
+/// Round an `f64` to [`HASH_STABLE_SCALE`] so it serialises to a bounded-precision, round-trip-stable
+/// decimal (see [`HASH_STABLE_SCALE`]). Non-finite inputs pass through (the vintage's `validate` rejects
+/// them at seal).
+fn hash_stable(value: f64) -> f64 {
+    if value.is_finite() {
+        (value * HASH_STABLE_SCALE).round() / HASH_STABLE_SCALE
+    } else {
+        value
+    }
+}
 
 /// Funding coverage over a decision-bar series: `(present, expected)` where `present` counts bars carrying
 /// a funding stamp and `expected` is the number of 8h grid points spanning `[t_first, t_last]`
@@ -165,7 +202,7 @@ pub struct TrainResultDoc {
     pub pool_size: usize,
     /// Indices (into the elite pool) of the chromosomes selected into the ensemble.
     pub selected: Vec<usize>,
-    /// Per-chromosome ensemble weight (equal-weight, aligned to `selected`).
+    /// Per-chromosome ensemble weight (capacity-capped, QE-128/QE-416; aligned to `selected`).
     pub weights: Vec<f64>,
     /// The converged cross-validated robust-basin ensemble score.
     pub ensemble_score: f64,
@@ -355,7 +392,19 @@ pub fn run_train_job(
     // the invariant explicit at the seal boundary.
     check_schema(&chromosomes, &schema)?;
     let k = chromosomes.len();
-    let weights = vec![1.0 / k as f64; k];
+
+    // ---- QE-416: capacity-capped weights + stress worst-case-loss + observed-behaviour calibration ----
+    // Backtest the *selected* members over the train window (deterministic) — the per-member net-return
+    // series and trade counts are the inputs to all three sealed artefacts: the QE-128 capacity model
+    // (weights), the QE-130 stress set (worst-case loss), and the QE-116 calibration model (per-strategy
+    // breaker thresholds). Replaces the equal-weight / `None` / constant placeholders.
+    let selected_bt: Vec<qe_wfo::backtest::BacktestResult> = chromosomes
+        .iter()
+        .map(|g| backtest(g, train_bars, &train_cfg))
+        .collect();
+    let selected_returns: Vec<Vec<f64>> = selected_bt.iter().map(|b| b.returns.clone()).collect();
+    let weights = capacity_capped_weights(&chromosomes, &selected_bt);
+
     emit(ProgressLine::Ensemble {
         pct: 75,
         stage: "ensemble".to_owned(),
@@ -419,18 +468,23 @@ pub fn run_train_job(
     // ---- seal ------------------------------------------------------------------------------------
     progress(emit, 95, "seal", "sealing vintage");
     let vintage_id = params.lineage.id()?;
+
+    // QE-416/QE-130: run the stress set over the capacity-weighted selected members and record the
+    // worst-case capital loss (the figure the vintage carries to G3). Only synthetic shocks — the engine
+    // has no calendar knowledge to supply historical windows.
+    let stress = worst_case_loss(&selected_returns, &weights, &default_synthetic_shocks());
+    // QE-416/QE-116: per-strategy breaker thresholds calibrated from each member's replayed equity, keyed
+    // by the same positional strategy ids the runtime breaker layer looks up — so every sealed strategy
+    // is found (no unintended pre-gating), instead of an empty map that pre-gates the whole vintage.
+    let calibration = calibrate_profile(&selected_returns, &weights);
+
     let content = VintageContent {
         format_version: VINTAGE_FORMAT_VERSION,
         vintage_id: vintage_id.clone(),
         chromosomes,
         weights: weights.clone(),
-        // A default calibration sidecar (0.1 ensemble fast-drop). Observed-behaviour calibration
-        // (QE-116) and the QE-130 worst-case-loss stress figure feed later gates (G3) and are out of
-        // this ticket's scope.
-        calibration: CalibrationProfile::new(
-            Fraction::new(Decimal::new(1, 1)).expect("0.1 is a valid fraction"),
-        ),
-        worst_case_loss: None,
+        calibration,
+        worst_case_loss: Some(hash_stable(stress.worst_case_loss)),
         // Pin the identity of the catalogue these chromosomes were evolved against (QE-402) — the
         // exact-match key the backtest/live load boundary asserts. `schema` is the same
         // `catalogue_schema()` the search/seal ran against, so this is the honest identity.
@@ -587,6 +641,96 @@ fn combine(
         .collect()
 }
 
+/// Capacity-capped ensemble weights (QE-128/QE-416): estimate each selected member's per-period capacity
+/// from its train-window economics and water-fill the equal-weight budget so no member is allocated more
+/// capital than its modelled capacity at [`TARGET_AUM_USD`], replacing the equal-weight overwrite.
+///
+/// Per member: `gross_edge` ≈ the mean per-period **net** return (a conservative gross proxy — using net
+/// understates capacity, never overstates it); `turnover` ≈ round-trip notional per period
+/// (`trades · 2 · size_frac / n`). Both are deterministic functions of the seeded search's members.
+fn capacity_capped_weights(
+    chromosomes: &[Genome],
+    selected_bt: &[qe_wfo::backtest::BacktestResult],
+) -> Vec<f64> {
+    let model = CapacityModel::with_defaults();
+    let capacities: Vec<f64> = chromosomes
+        .iter()
+        .zip(selected_bt)
+        .map(|(g, bt)| {
+            let n = bt.returns.len().max(1) as f64;
+            let gross_edge = bt.returns.iter().sum::<f64>() / n;
+            let size_frac = f64::from(g.risk.size_bps) / BPS_DENOMINATOR;
+            let turnover = (bt.trades as f64 * 2.0 * size_frac) / n;
+            capacity(
+                &StrategyProfile {
+                    gross_edge,
+                    turnover,
+                },
+                &model,
+            )
+        })
+        .collect();
+    cap_or_equal(chromosomes.len(), &capacities)
+}
+
+/// Cap the equal-weight budget by `capacities` at [`TARGET_AUM_USD`], falling back to equal weights when
+/// the capping would zero the entire budget (every member modelled uneconomic at the target AUM) so the
+/// seal still yields a tradeable vintage. Split out from [`capacity_capped_weights`] so the binding /
+/// non-binding / degenerate branches are unit-testable without constructing backtest results.
+fn cap_or_equal(k: usize, capacities: &[f64]) -> Vec<f64> {
+    if k == 0 {
+        return Vec::new();
+    }
+    let equal = vec![1.0 / k as f64; k];
+    let capped = cap_weights(&equal, capacities, TARGET_AUM_USD);
+    let chosen = if capped.iter().sum::<f64>() > 0.0 {
+        capped
+    } else {
+        equal
+    };
+    // Round to a hash-stable precision so the sealed weights round-trip byte-identically (a raw capacity
+    // weight can carry 17 significant digits that serde_json's default parser does not round-trip).
+    chosen.into_iter().map(hash_stable).collect()
+}
+
+/// The unit-capital equity curve of a net-return series: `E_0 = 1`, `E_t = E_{t-1}·(1 + r_t)`, as
+/// `Decimal` ticks for the QE-116 breaker-calibration measures. Length is `returns.len() + 1`.
+fn equity_curve(returns: &[f64]) -> Vec<Decimal> {
+    let mut equity = 1.0_f64;
+    let mut out = Vec::with_capacity(returns.len() + 1);
+    out.push(Decimal::from_f64_retain(equity).unwrap_or(Decimal::ONE));
+    for &r in returns {
+        equity *= 1.0 + r;
+        out.push(Decimal::from_f64_retain(equity).unwrap_or(Decimal::ZERO));
+    }
+    out
+}
+
+/// The per-vintage [`CalibrationProfile`] from replayed equity behaviour (QE-116/QE-416): the ensemble
+/// fast-drop from the capacity-weighted ensemble equity curve, and a per-strategy [`BreakerThresholds`]
+/// entry for **every** member (keyed by its positional strategy id — the same id
+/// [`VintageContent::strategy_ids`] yields and the runtime breaker layer looks up), replacing the
+/// constant sidecar whose empty `per_strategy` map pre-gated the whole vintage live.
+fn calibrate_profile(selected_returns: &[Vec<f64>], weights: &[f64]) -> CalibrationProfile {
+    let margin = default_calibration_margin();
+    // Ensemble fast-drop: calibrated from the capacity-weighted ensemble equity curve's fast-window drops.
+    let ensemble_equity = equity_curve(&weighted_combined(selected_returns, weights));
+    let ensemble_fast_drop = quantize_calibration(calibrate_threshold(
+        &qe_risk::fast_drop_distribution(&ensemble_equity, DEFAULT_FAST_WINDOW),
+        DEFAULT_FAST_QUANTILE,
+        margin,
+    ));
+    let mut profile = CalibrationProfile::new(ensemble_fast_drop);
+    for (i, returns) in selected_returns.iter().enumerate() {
+        let equity = equity_curve(returns);
+        profile.per_strategy.insert(
+            i.to_string(),
+            calibrate_thresholds(&equity, DEFAULT_FAST_WINDOW, margin),
+        );
+    }
+    profile
+}
+
 /// Weight-summed realised funding and net P&L of `genomes` over `bars` (each member backtested with unit
 /// starting capital), as `(funding_pnl, net_pnl)` in `f64`. Both are `Σ_c w_c · x_c`, so an equal-weight
 /// ensemble yields the mean per-member figure — the QE-403 funding-visibility inputs for the sidecar.
@@ -663,5 +807,37 @@ mod tests {
         assert_eq!(search_pct(0, 8), 20);
         assert_eq!(search_pct(8, 8), 70);
         assert!((20..=70).contains(&search_pct(4, 8)));
+    }
+
+    /// QE-416 AC (a): the sealed weights differ from equal-weight when capacity binds, stay equal when it
+    /// does not, and fall back to equal (a tradeable book) when every member is modelled uneconomic.
+    #[test]
+    fn capacity_capped_weights_differ_from_equal_only_when_capacity_binds() {
+        let equal = [0.5, 0.5];
+
+        // Member 0's capacity ($100k) is far below its $500k equal-weight dollar share at the $1M target,
+        // so it is capped down and the freed budget water-fills to the high-capacity member 1.
+        let binding = cap_or_equal(2, &[100_000.0, 1e15]);
+        assert!(
+            (binding[0] - 0.5).abs() > 1e-9,
+            "capacity binds ⇒ weight differs from equal: {binding:?}"
+        );
+        assert!(
+            binding[0] < 0.5 && binding[1] > 0.5,
+            "capped member shrinks, freed budget water-fills the other: {binding:?}"
+        );
+        // Capacities far above the target ⇒ no binding ⇒ equal weights unchanged.
+        let free = cap_or_equal(2, &[1e15, 1e15]);
+        assert!(
+            (free[0] - 0.5).abs() < 1e-12 && (free[1] - 0.5).abs() < 1e-12,
+            "no binding ⇒ equal weights: {free:?}"
+        );
+        // Every member uneconomic (capacity 0) ⇒ fall back to equal so the vintage still trades.
+        let degenerate = cap_or_equal(2, &[0.0, 0.0]);
+        assert_eq!(
+            degenerate,
+            equal.to_vec(),
+            "all-uneconomic ⇒ equal-weight fallback (tradeable): {degenerate:?}"
+        );
     }
 }
