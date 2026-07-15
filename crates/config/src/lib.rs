@@ -166,11 +166,11 @@ impl Config {
             ));
         }
 
-        // QE-415: the selection needs ≥ 2 purged CV folds for a real cross-validated standard error.
+        // QE-415: the selection needs ≥ 2 CV folds for a real cross-validated standard error.
         if self.selection.cv_folds < 2 {
             return Err(invalid(
                 "selection.cv_folds",
-                "must be at least 2 (purged OOS cross-validation needs ≥ 2 folds)",
+                "must be at least 2 (fold-isolation cross-validation needs ≥ 2 folds)",
             ));
         }
 

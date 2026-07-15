@@ -66,7 +66,8 @@ pub use backtest::{
 };
 pub use cv::{Fold, PurgedKFold};
 pub use cv_fitness::{
-    oos_test_ranges, purged_oos_fitness, selection_kfold, DEFAULT_CV_FOLDS, DEFAULT_LABEL_HORIZON,
+    fold_isolation_fitness, fold_test_ranges, selection_kfold, DEFAULT_CV_FOLDS,
+    DEFAULT_LABEL_HORIZON,
 };
 pub use fitness::{geom_return, log_growth, should_replace, NoiseRobustFitness, DEFAULT_K_SIGMA};
 pub use friction::{

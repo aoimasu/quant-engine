@@ -106,11 +106,12 @@ pub struct SelectionConfig {
     /// sensible default that tolerates minor ingest gaps but rejects an empty/sparse funding series.
     #[serde(default = "default_funding_coverage_min")]
     pub funding_coverage_min: f64,
-    /// Number of purged/embargoed out-of-sample cross-validation folds the *selection* fitness scores each
-    /// genome over (QE-415). The MAP-Elites/DE search records an elite's fitness as the mean per-fold
-    /// log-growth over these disjoint OOS folds (isolated, flat-start) rather than a single in-sample number,
-    /// so a genome that only fits one contiguous stretch is demoted. Must be `≥ 2` (a real cross-validated
-    /// standard error); the default is a small-budget-friendly `4`.
+    /// Number of cross-validation folds the *selection* fitness scores each genome over (QE-415). The
+    /// MAP-Elites/DE search records an elite's fitness as the mean per-fold log-growth over these disjoint,
+    /// isolated (flat-start) folds rather than a single whole-window in-sample number, so a genome that only
+    /// fits one contiguous stretch is demoted. The folds tile the train window (nothing is held out) — an
+    /// in-window robustness signal, not a true out-of-sample gate (the G1 terminal holdout remains that).
+    /// Must be `≥ 2` (a real cross-validated standard error); the default is a small-budget-friendly `4`.
     #[serde(default = "default_cv_folds")]
     pub cv_folds: usize,
 }

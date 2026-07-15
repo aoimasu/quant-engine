@@ -3,9 +3,18 @@
 **Ticket:** QE-415 (P2 leakage control). Authoritative spec: `docs/reviews/2026-07-15-team-improvement-review.md`, section `### QE-415`.
 
 **Goal.** `PurgedKFold` (`crates/wfo/src/cv.rs`) and `WalkForward` (`crates/wfo/src/walkforward.rs`) are correct and
-tested but **unused in selection**. Fold purged out-of-sample cross-validation into the *fitness path* that
-MAP-Elites and the DE score on, so an elite's recorded fitness reflects **purged OOS validation** rather than a
-single in-sample geometric-growth number.
+tested but **unused in selection**. Fold cross-validated fold-isolation robustness into the *fitness path* that
+MAP-Elites and the DE score on, so an elite's recorded fitness reflects performance across disjoint, isolated CV
+folds rather than a single whole-window in-sample geometric-growth number.
+
+> **Naming discipline (QE-415 review, non-blocking).** This is **not** a held-out out-of-sample gate. The `k`
+> `PurgedKFold` **test** folds *tile* the train window — their union is the whole train series — so **nothing is
+> held out**, and the purge/embargo only shapes each fold's (here **unused**) *train* partition and defines the
+> `windows_disjoint` invariant; it is **inert on the computed score** (it does not gap or shrink the scored test
+> blocks). The new fitness is therefore an *in-window cross-validation robustness* signal (rewarding genomes
+> consistent across disjoint, isolated folds), not a true OOS validation. The **G1 terminal holdout** remains the
+> **only true out-of-sample gate** in the pipeline. Identifiers are named accordingly (`fold_isolation_fitness`,
+> `fold_test_ranges`), not `purged_oos_*`.
 
 ---
 
@@ -60,7 +69,7 @@ opened in chunk *k−1* carries into chunk *k* (cross-window position/indicator 
 
 ---
 
-## 2. New purged-OOS fitness design
+## 2. New cross-validated fold-isolation fitness design
 
 New module `crates/wfo/src/cv_fitness.rs`:
 
@@ -72,26 +81,28 @@ pub const DEFAULT_LABEL_HORIZON: usize = 1; // QE-120 realises a decision's P&L 
 pub fn selection_kfold(n_folds, lookback, label_horizon) -> PurgedKFold
     = PurgedKFold::with_default_embargo(n_folds.max(2), lookback, label_horizon);
 
-// Precompute the K OOS test ranges once (fold construction is genome-independent — no per-genome realloc).
-pub fn oos_test_ranges(cv: &PurgedKFold, n_bars) -> Vec<Range<usize>>;
+// Precompute the k test ranges once (fold construction is genome-independent — no per-genome realloc).
+// These TILE the window (their union is 0..n_bars) — nothing is held out.
+pub fn fold_test_ranges(cv: &PurgedKFold, n_bars) -> Vec<Range<usize>>;
 
-// Purged OOS fitness: score the genome on each disjoint test fold IN ISOLATION (flat start), then
+// Fold-isolation fitness: score the genome on each disjoint test fold IN ISOLATION (flat start), then
 // reduce the per-fold return series to mean ± SE exactly as the noise-robust evaluator does.
-pub fn purged_oos_fitness(genome, bars, test_ranges: &[Range<usize>], cfg) -> NoiseRobustFitness {
+pub fn fold_isolation_fitness(genome, bars, test_ranges: &[Range<usize>], cfg) -> NoiseRobustFitness {
     let windows = test_ranges.iter()
-        .map(|r| backtest(genome, &bars[r.clone()], cfg).returns) // isolated OOS segment
+        .map(|r| backtest(genome, &bars[r.clone()], cfg).returns) // isolated in-window fold
         .collect::<Vec<_>>();
     NoiseRobustFitness::from_windows(&windows)
 }
 ```
 
-**Selection scalar** = `purged_oos_fitness(...).mean` (same units — mean per-fold `log_growth` — as the old
+**Selection scalar** = `fold_isolation_fitness(...).mean` (same units — mean per-fold `log_growth` — as the old
 `elite_fitness()`, so the archive's scalar comparison and all downstream fitness plumbing are unchanged in type/scale).
 
-### Why this is "purged OOS", and how folds map to `windows_disjoint`
+### Why this is robust cross-validation (not a held-out OOS gate), and how folds map to `windows_disjoint`
 
-The genome is a **fixed rule-set**; there is no per-fold *fitting*, so OOS-ness here is not "train on fold-train,
-test on fold-test". It is achieved by two properties:
+The genome is a **fixed rule-set**; there is no per-fold *fitting*, and the folds **tile** the train window (nothing is
+held out), so this is **not** a true out-of-sample validation — it is an *in-window cross-validation robustness* signal.
+Its discriminating power comes from two properties:
 
 1. **Per-fold isolation.** Each fold's test block is backtested **independently, flat-start**. This removes the
    cross-window **position/indicator carry** that the old contiguous `split_windows` leaked (a position opened in
@@ -107,13 +118,15 @@ Aggregating per-fold `log_growth` with the **SE penalty** (`NoiseRobustFitness`)
 concentrated in one fold (high dispersion across folds, or zero growth in most folds) scores **below** a genome that
 generalises across all K folds — which is exactly AC-(a).
 
-**Methodology note for the reviewer (sanity-check):** with `PurgedKFold` the K test blocks *partition* the window, so
-the purge/embargo parameters shape the (unused-here) *train* partition and define the disjointness invariant we verify;
-they do **not** re-slice the OOS test blocks. We deliberately consume test blocks only, because with the real catalogue
-(`max_lookback = 34`) over the fixture's ~87 train bars the purge zone (35) nearly empties the fold *train* sets — a
-train-based OOS scheme would be degenerate at this budget. The OOS discrimination therefore comes from per-fold
-isolation + SE-penalised aggregation over leakage-free fold geometry, not from re-gapping the test blocks. This is the
-conservative, non-fragile choice and is what AC-(a)/(b) test.
+**Methodology note for the reviewer (sanity-check):** with `PurgedKFold` the k test blocks *partition* (tile) the
+window — **nothing is held out** — so the purge/embargo parameters shape the (unused-here) *train* partition and define
+the disjointness invariant we verify; they are **inert on the computed score** (they do not gap or re-slice the scored
+test blocks). We deliberately consume test blocks only, because with the real catalogue (`max_lookback = 34`) over the
+fixture's ~87 train bars the purge zone (35) nearly empties the fold *train* sets — a genuine held-out/train-based
+scheme would be degenerate at this budget. The discrimination therefore comes from per-fold isolation + SE-penalised
+aggregation over leakage-free fold geometry, not from held-out data or re-gapping the test blocks. This is why the
+fitness is named `fold_isolation_fitness` (in-window robustness), not `purged_oos_*`; the **G1 terminal holdout stays
+the only true OOS gate**. This is the conservative, non-fragile choice and is what AC-(a)/(b) test.
 
 ### Config knob + default
 
@@ -131,7 +144,7 @@ conservative, non-fragile choice and is what AC-(a)/(b) test.
 
 The new fitness is a pure, deterministic function of `(genome, bars, cfg, fold geometry)`:
 
-- Fold boundaries are fixed by `(n_folds, n_bars)` — `oos_test_ranges` is computed **once** before the search,
+- Fold boundaries are fixed by `(n_folds, n_bars)` — `fold_test_ranges` is computed **once** before the search,
   genome-independent.
 - Per-fold `backtest(...).returns` is already a pure function (proved by `backtest_is_pure_and_has_no_same_bar_fill`).
 - Reduction order is fixed (fold index `0..K`), and `NoiseRobustFitness::from_windows` is order-deterministic.
