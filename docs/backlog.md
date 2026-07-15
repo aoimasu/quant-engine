@@ -220,7 +220,7 @@ Authoritative for the P0/P1 tickets below; later phases inherit unless a ticket 
 
 | Ticket | Title | Depends on | Status |
 |--------|-------|------------|:------:|
-| [QE-262](./mds/tickets/QE-262.md) | Persist catalogue version + states in the vintage; assert on load  *(P1 — correctness)* · **→ superseded by [QE-402](#review-r1)** (widened to the schema-registry umbrella) | QE-260, QE-251 | — |
+| [QE-262](./mds/tickets/QE-262.md) | Persist catalogue version + states in the vintage; assert on load  *(P1 — correctness)* · **delivered by [QE-402](#review-r1)** — see [`reviewed/qe-402.md`](./mds/reviewed/qe-402.md) | QE-260, QE-251 | ✅ |
 | [QE-263](./mds/tickets/QE-263.md) | Run-store startup reconciler for orphaned `running` runs  *(P2)* · **→ extended by [QE-407](#review-r1)** (adds the graceful-shutdown / task-registry half) | QE-255 | — |
 | [QE-264](./mds/tickets/QE-264.md) | Enrich read APIs for the admin UI (vintage symbol roster + run metrics summary)  *(P2 — UX completeness)* · *see [QE-410](#review-r1)* (list projection/pagination — coordinate response shape) | QE-257, QE-259 | — |
 | [QE-265](./mds/tickets/QE-265.md) | Auth hardening: OIDC `nonce` + local JWKS/RS256 verification  *(P2 — security defense-in-depth)* · *adjacent to [QE-409](#review-r1)* (SPA 401→re-auth, logout, dev-safe cookies) | QE-256 | — |
@@ -260,7 +260,6 @@ Authoritative for the P0/P1 tickets below; later phases inherit unless a ticket 
 | Ticket | Title | Depends on | Status |
 |--------|-------|------------|:------:|
 | QE-401 | Seed the live drawdown breaker with the reconstructed committed-peak equity  *(P1 — capital safety)* | QE-210, QE-211, QE-212 | — |
-| QE-402 | Pin catalogue identity in the vintage & assert exact schema match on load  *(P1 — correctness)* · **supersedes QE-262** | QE-129, QE-260 | — |
 | QE-403 | Net-of-cost truth: funding-coverage gate + non-zero size-impact in selection  *(P1 — correctness)* | QE-103, QE-109, QE-128 | — |
 | QE-407 | Server run-lifecycle: graceful shutdown, supervised-task registry, honest success  *(P1)* · **extends QE-263/266** | QE-255 | — |
 
