@@ -186,6 +186,56 @@ fn train_over_fixture_store_seals_verifiable_vintage() {
     );
 }
 
+/// QE-416 AC (b) + (c): the sealed vintage carries a real worst-case-loss figure (not `None`), and its
+/// calibration profile has a per-strategy entry for **every** member under the canonical strategy ids —
+/// so `BreakerLayer::from_calibration` finds each one and pre-gates none (the vintage trades live).
+#[test]
+fn sealed_vintage_has_worst_case_loss_and_calibrates_every_strategy() {
+    use qe_risk::DEFAULT_FAST_WINDOW;
+    use qe_runtime::BreakerLayer;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let store_path = copy_store_to(tmp.path());
+    let vintage_root = tmp.path().join("artifacts/vintages");
+
+    let outcome = run_train_job(&params(store_path, vintage_root.clone(), 42), &mut |_| {})
+        .expect("train job runs");
+    let loaded = VintageRepository::new(&vintage_root)
+        .load(&outcome.vintage_id)
+        .expect("sealed vintage loads");
+    let content = &loaded.content;
+
+    // (b) worst_case_loss is Some, and a finite non-negative fraction (validated at seal, re-checked here).
+    let wcl = content
+        .worst_case_loss
+        .expect("QE-416: sealed vintage must carry a worst-case-loss figure (not None)");
+    assert!(
+        wcl.is_finite() && wcl >= 0.0,
+        "worst_case_loss must be a finite non-negative fraction, got {wcl}"
+    );
+
+    // (c) every sealed strategy is present in the calibration profile under its canonical id …
+    let ids = content.strategy_ids();
+    assert_eq!(ids.len(), content.chromosomes.len());
+    for id in &ids {
+        assert!(
+            content.calibration.per_strategy.contains_key(id),
+            "strategy `{id}` is missing from the calibration profile — it would be pre-gated"
+        );
+    }
+
+    // … so `from_calibration` pre-gates none of them (before any equity is observed) and the profile is
+    // wired for the full member set — the opposite of the empty-map placeholder that gated everything.
+    let layer = BreakerLayer::from_calibration(&content.calibration, &ids, DEFAULT_FAST_WINDOW);
+    assert_eq!(layer.strategy_count(), content.chromosomes.len());
+    for i in 0..content.chromosomes.len() {
+        assert!(
+            !layer.is_gated(i),
+            "member {i} was pre-gated despite being calibrated (unintended pre-gate)"
+        );
+    }
+}
+
 #[test]
 fn sealed_vintage_is_backtestable_by_qe251() {
     // Alignment proof: a vintage sealed by `train` loads + runs through the QE-251 backtest job over the
