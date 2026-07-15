@@ -222,9 +222,7 @@ mod tests {
     fn rev(seq: u64, target: &str, t: i64) -> TargetRevision {
         TargetRevision {
             seq,
-            target: TargetPosition {
-                notional: Notional::new(dec(target)),
-            },
+            target: TargetPosition::single(Notional::new(dec(target))),
             event_time_ms: t,
         }
     }

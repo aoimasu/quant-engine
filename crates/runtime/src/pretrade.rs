@@ -82,6 +82,9 @@ impl PreTradeGovernor {
     pub fn check(&self, target: TargetPosition, capital: CapitalView) -> PreTradeDecision {
         let notional = target.notional.get();
         let mag = notional.abs();
+        // True gross exposure (`long + short`), unsigned — what the gross cap must be checked against (QE-418).
+        // For a single instrument this equals `mag`; a hedged book makes it exceed `mag`.
+        let gross = target.gross.get().abs();
         let equity = capital.equity.get();
         let avail = capital.available_margin.get();
         let mmr = self.maintenance_margin_rate.get();
@@ -124,10 +127,11 @@ impl PreTradeGovernor {
         // --- Reject caps: unsafe in a way that must not be silently resized. ---
         if let Some(cap) = self.limits.max_gross_exposure {
             let c = cap.get();
-            if mag > c {
+            // QE-418: check the gross cap against true gross exposure (`long + short`), not the net magnitude.
+            if gross > c {
                 breaches.push(LimitBreach::with_default_outcome(
                     LimitKind::MaxGrossExposure,
-                    format!("gross {mag} > max {c}"),
+                    format!("gross {gross} > max {c}"),
                 ));
             }
         }
@@ -210,7 +214,8 @@ mod tests {
         Leverage::new(dec(s)).unwrap()
     }
     fn target(s: &str) -> TargetPosition {
-        TargetPosition { notional: n(s) }
+        // Single-instrument target: gross == |net| by construction (preserves pre-QE-418 behaviour).
+        TargetPosition::single(n(s))
     }
     fn capital(equity: &str, margin: &str) -> CapitalView {
         CapitalView {
@@ -326,6 +331,71 @@ mod tests {
         .check(target("100000"), capital("100000", "500"));
         assert_eq!(margin.verdict, PreTradeVerdict::Reject);
         assert!(breach_of(&margin, LimitKind::MarginUtilisationCeiling));
+    }
+
+    /// AC (QE-418): a hedged book — `long = short = X`, so net 0 but gross 2X — breaches a `MaxGross < 2X`
+    /// cap while **passing** the net cap. The gross cap must see true gross exposure, not `|net|`.
+    #[test]
+    fn hedged_book_breaches_gross_cap_while_passing_net_cap() {
+        let x = dec("10000");
+        // net 0, gross 2X = 20_000.
+        let hedged = TargetPosition {
+            notional: n("0"),
+            gross: Notional::new(x * dec("2")),
+        };
+        let gov = PreTradeGovernor::new(
+            RiskLimits {
+                max_gross_exposure: Some(n("15000")), // < 2X → breached
+                max_net_exposure: Some(n("1")),       // net 0 ≤ 1 → passes
+                ..RiskLimits::default()
+            },
+            frac("0"),
+        );
+        let decision = gov.check(hedged, capital("100000", "100000"));
+        assert_eq!(decision.verdict, PreTradeVerdict::Reject);
+        assert!(
+            breach_of(&decision, LimitKind::MaxGrossExposure),
+            "gross 2X must breach the MaxGross < 2X cap"
+        );
+        assert!(
+            !breach_of(&decision, LimitKind::MaxNetExposure),
+            "net 0 must pass the net cap — the gross breach is not the net cap firing"
+        );
+
+        // Same gross, but under a cap that admits it → no gross breach (proves the cap, not the magnitude).
+        let loose = PreTradeGovernor::new(
+            RiskLimits {
+                max_gross_exposure: Some(n("25000")), // > 2X → passes
+                ..RiskLimits::default()
+            },
+            frac("0"),
+        )
+        .check(hedged, capital("100000", "100000"));
+        assert!(!breach_of(&loose, LimitKind::MaxGrossExposure));
+    }
+
+    /// Single-instrument parity (QE-418): with `gross == |net|`, the gross cap fires exactly as it did before
+    /// — for both a long and a short — so no existing single-instrument behaviour changes.
+    #[test]
+    fn single_instrument_gross_equals_net_magnitude() {
+        let gov = PreTradeGovernor::new(
+            RiskLimits {
+                max_gross_exposure: Some(n("1000")),
+                ..RiskLimits::default()
+            },
+            frac("0"),
+        );
+        for signed in ["2000", "-2000"] {
+            // `single` sets gross = |net| = 2000 > cap 1000 → breach, regardless of side.
+            let decision = gov.check(target(signed), capital("100000", "100000"));
+            assert_eq!(decision.verdict, PreTradeVerdict::Reject, "side {signed}");
+            assert!(breach_of(&decision, LimitKind::MaxGrossExposure));
+        }
+        // A single-instrument target within the cap does not breach gross.
+        assert!(!breach_of(
+            &gov.check(target("500"), capital("100000", "100000")),
+            LimitKind::MaxGrossExposure
+        ));
     }
 
     /// A `Reject` breach outranks a `Clamp` breach: a target that is both oversized and unsafe is rejected,
