@@ -7,7 +7,10 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use qe_server::auth::{AuthConfig, AuthContext, IdTokenVerifier};
-use qe_server::{build_router, AppState, ServerConfig, DEFAULT_SHUTDOWN_DRAIN};
+use qe_server::{
+    build_router, check_storage_dirs_match, load_app_config, server_storage_dirs, AppState,
+    ServerConfig, StorageDirs, DEFAULT_SHUTDOWN_DRAIN,
+};
 use qe_telemetry::{init as init_telemetry, TelemetryConfig};
 
 #[tokio::main]
@@ -43,12 +46,38 @@ async fn main() -> ExitCode {
         Err(e) => tracing::error!(error = %e, "failed to reconcile orphaned runs on startup"),
     }
 
+    // QE-419: unify the storage dirs. Load `qe-config` (the single source of truth the spawned CLI
+    // reads) and cross-check it against the server's read-state dirs BEFORE opening the store or
+    // binding — a mismatch means the read APIs would scan a different store than training wrote, so we
+    // refuse to boot rather than surface it silently at query time.
+    let app_config = match load_app_config(&cfg.config_path) {
+        Ok(config) => config,
+        Err(e) => {
+            tracing::error!(error = %e, config_path = %cfg.config_path.display(), "failed to load qe-config");
+            return ExitCode::FAILURE;
+        }
+    };
+    // `cli_dirs` = what the spawned `qe-cli` reads (`[storage]`); `server_dirs` = that, with the
+    // deprecated `QE_SERVER_*` overrides applied (each logged as deprecated when present).
+    let cli_dirs = StorageDirs::from_config(&app_config);
+    let server_dirs = server_storage_dirs(&cli_dirs);
+    if let Err(e) = check_storage_dirs_match(&server_dirs, &cli_dirs) {
+        tracing::error!(error = %e, "refusing to boot: server and spawned-CLI storage dirs diverge");
+        return ExitCode::FAILURE;
+    }
+    tracing::info!(
+        config_path = %cfg.config_path.display(),
+        artifacts_dir = %server_dirs.artifacts_dir.display(),
+        market_dir = %server_dirs.market_dir.display(),
+        "storage dirs unified across server and spawned CLI"
+    );
+
     // QE-257 read APIs: open the market store once and build the sealed-vintage repository. A failure
     // to open the store is fatal (mirrors the bind-failure path) — the read endpoints could not serve.
-    let read = match cfg.read_state() {
+    let read = match server_dirs.read_state() {
         Ok(read) => read,
         Err(e) => {
-            tracing::error!(error = %e, market_dir = %cfg.market_dir.display(), "failed to open market store");
+            tracing::error!(error = %e, market_dir = %server_dirs.market_dir.display(), "failed to open market store");
             return ExitCode::FAILURE;
         }
     };

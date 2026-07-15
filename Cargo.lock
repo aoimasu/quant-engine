@@ -1800,6 +1800,7 @@ dependencies = [
  "axum",
  "base64",
  "hmac",
+ "qe-config",
  "qe-run-protocol",
  "qe-storage",
  "qe-telemetry",

@@ -35,6 +35,11 @@ qe-vintage.workspace = true
 # QE-406: the shared run protocol — the `ProgressLine` parse type + the `BacktestParams`/`TrainParams`
 # wire DTOs (re-exported from `runs::model`). A pure serde leaf, so this edge is firewall-neutral.
 qe-run-protocol.workspace = true
+# QE-419: the 12-factor config system. The server loads the shared `[storage]` dirs from here so it and
+# the spawned `qe-cli` share ONE source of truth for `market_dir`/`artifacts_dir`. `qe-config` is a
+# foundational crate (deps: qe-domain/serde/figment/sha2) that reaches neither `qe-runtime` nor
+# `qe-venue`, so this edge is firewall-legal (see crates/architecture/tests/firewall.rs).
+qe-config.workspace = true
 axum.workspace = true
 tokio.workspace = true
 tower-http.workspace = true
