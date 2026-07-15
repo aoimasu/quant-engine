@@ -1636,6 +1636,7 @@ dependencies = [
  "qe-runtime",
  "qe-signal",
  "qe-storage",
+ "qe-telemetry",
  "qe-validation",
  "qe-venue",
  "qe-vintage",
@@ -1645,6 +1646,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror",
+ "tracing",
 ]
 
 [[package]]
@@ -2667,6 +2669,8 @@ dependencies = [
  "tokio-util",
  "tower-layer",
  "tower-service",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

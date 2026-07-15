@@ -13,7 +13,7 @@ use qe_telemetry::{init as init_telemetry, TelemetryConfig};
 #[tokio::main]
 async fn main() -> ExitCode {
     // Telemetry first so config/bind errors are structured-logged. A guard flushes on drop.
-    let _telemetry = match init_telemetry(&TelemetryConfig::default()) {
+    let _telemetry = match init_telemetry(&TelemetryConfig::from_env()) {
         Ok(guard) => guard,
         Err(e) => {
             eprintln!("failed to install telemetry: {e}");
