@@ -60,7 +60,10 @@ tokio = { version = "1", features = [
 ] }
 # `fs` serves static assets (`ServeDir`/`ServeFile`); `trace` provides the QE-413 per-request
 # `TraceLayer`; `request-id` provides `SetRequestIdLayer`/`MakeRequestUuid`/`PropagateRequestIdLayer`.
-tower-http = { version = "0.6", features = ["fs", "trace", "request-id"] }
+# QE-425 `timeout` provides `TimeoutLayer`, the per-request deadline on the `/api` handler routes (a
+# stuck handler short-circuits to a clean `408`); it pulls only `http-body` (already transitive) and
+# `tokio/time` — no new crate enters `Cargo.lock`, so `cargo deny check` stays green.
+tower-http = { version = "0.6", features = ["fs", "trace", "request-id", "timeout"] }
 # Opaque run identifiers (QE-255, ADR D4b). v4 = random (no wall-clock in the id); MIT/Apache-2.0,
 # pulls only the already-present `getrandom` — `cargo deny check` stays green.
 uuid = { version = "1", features = ["v4"] }

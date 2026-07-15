@@ -26,6 +26,7 @@ use serde_json::json;
 use tower::ServiceBuilder;
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::services::{ServeDir, ServeFile};
+use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
 
 pub mod auth;
@@ -137,6 +138,13 @@ pub const DEFAULT_MAX_CONCURRENCY: usize = 2;
 /// QE-407: how long graceful shutdown waits for in-flight run supervisors to finish before aborting
 /// and terminally marking them `failed`. Bounded so a wedged child can never hold the process open.
 pub const DEFAULT_SHUTDOWN_DRAIN: Duration = Duration::from_secs(20);
+
+/// QE-425: per-request deadline on the `/api` **handler** routes (never health/static). A stuck or
+/// slow handler — a wedged `spawn_blocking` fs read, a long coverage scan, a hung OAuth token
+/// exchange — is short-circuited with a clean `408 Request Timeout` rather than tying up a connection
+/// indefinitely. 30s comfortably exceeds every legitimate handler while still bounding a wedged
+/// request; a `const` (not a config knob) keeps Effort-S scope tight — see the QE-425 design note.
+pub const API_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Environment variable naming the bind address (12-factor, `QE_`-prefixed like `qe-config`).
 pub const ENV_ADDR: &str = "QE_SERVER_ADDR";
@@ -342,10 +350,22 @@ pub fn build_router(static_dir: &Path, state: AppState) -> Router {
         )
         .layer(PropagateRequestIdLayer::x_request_id());
 
-    let api = Router::new()
-        .route("/health", get(health))
+    // QE-425: the per-request timeout wraps the `/api` **handler** routes (public auth + the protected
+    // subtree) but NOT `GET /api/health` — a readiness probe must always answer, so it is routed
+    // outside this `hardened` group. Static/SPA serving lives on the outer router (below), entirely
+    // outside `/api`, so no long-lived asset stream is ever killed by an API deadline. A handler that
+    // exceeds `API_REQUEST_TIMEOUT` short-circuits to a clean `408` (infallible; no error mapping).
+    let hardened = Router::new()
         .merge(auth::public_routes())
         .merge(protected)
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            API_REQUEST_TIMEOUT,
+        ));
+
+    let api = Router::new()
+        .route("/health", get(health))
+        .merge(hardened)
         .fallback(api_not_found)
         .with_state(state)
         .layer(trace);
@@ -443,5 +463,49 @@ mod tests {
                 "got {err:?}"
             );
         }
+    }
+
+    /// QE-425: a handler that exceeds its deadline is short-circuited to `408 Request Timeout`.
+    ///
+    /// This exercises the **exact** layer type `build_router` applies to the `/api` handler routes
+    /// ([`TimeoutLayer`]), but with a tiny 50 ms deadline so the test is fast. A real 30 s end-to-end
+    /// timeout is untestable in-process, and no production handler hangs deterministically, so the
+    /// layer's status mapping is asserted directly. Non-vacuous: a fast handler under the *same* layer
+    /// returns `200`, only the slow one returns `408`.
+    #[tokio::test]
+    async fn api_timeout_layer_returns_408_for_a_slow_handler() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt; // for `oneshot`
+
+        let app: Router = Router::new()
+            .route(
+                "/slow",
+                get(|| async {
+                    // Far longer than the deadline below, so the timeout always fires first.
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+                    "unreachable"
+                }),
+            )
+            .route("/fast", get(|| async { "ok" }))
+            .layer(TimeoutLayer::with_status_code(
+                StatusCode::REQUEST_TIMEOUT,
+                Duration::from_millis(50),
+            ));
+
+        // Control (non-vacuous): a fast handler under the SAME layer still returns 200.
+        let fast = app
+            .clone()
+            .oneshot(Request::builder().uri("/fast").body(Body::empty()).unwrap())
+            .await
+            .expect("router responds");
+        assert_eq!(fast.status(), StatusCode::OK);
+
+        // A handler that exceeds the deadline short-circuits to 408.
+        let slow = app
+            .oneshot(Request::builder().uri("/slow").body(Body::empty()).unwrap())
+            .await
+            .expect("router responds");
+        assert_eq!(slow.status(), StatusCode::REQUEST_TIMEOUT);
     }
 }
