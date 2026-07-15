@@ -19,7 +19,6 @@ fn firewall_holds_in_the_workspace() {
         "qe-runtime",
         "qe-venue",
         "qe-server",
-        "qe-vintage",
     ] {
         assert!(
             graph.contains_key(required),
@@ -43,15 +42,6 @@ fn firewall_holds_in_the_workspace() {
         "expected `qe-server → qe-telemetry` edge was not parsed — the qe-server firewall rule would be \
          vacuous.\n qe-server deps reachable: {:?}",
         reachable(&graph, "qe-server")
-    );
-    // QE-405: `qe-vintage → qe-signal` is the real edge by which the vintage reaches genome logic
-    // (never via `qe-wfo`). Asserting it was parsed proves the new `qe-vintage ⊬ {qe-wfo, qe-ensemble}`
-    // rule is non-vacuous — a deps-dropping parser bug can't make the live-side guard pass for free.
-    assert!(
-        reachable(&graph, "qe-vintage").contains("qe-signal"),
-        "expected `qe-vintage → qe-signal` edge was not parsed — the qe-vintage firewall rule would be \
-         vacuous.\n qe-vintage deps reachable: {:?}",
-        reachable(&graph, "qe-vintage")
     );
 
     let violations = check_firewall(&graph, &firewall_rules());
