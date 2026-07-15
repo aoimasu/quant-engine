@@ -206,6 +206,15 @@ pub fn check_session_secret_policy(
     Ok(())
 }
 
+/// Whether boot should emit an **advisory** warning about insecure cookies (QE-409): the server is
+/// bound to a non-loopback address while cookies are minted without `Secure` (the `redirect_uri` is
+/// not https), so a session cookie could traverse the network unprotected — a likely misconfiguration
+/// (wrong `redirect_uri` scheme / TLS-terminating proxy). Advisory only: unlike
+/// [`check_session_secret_policy`], this never refuses boot.
+pub fn should_warn_insecure_cookies(addr: &SocketAddr, cookie_secure: bool) -> bool {
+    !addr.ip().is_loopback() && !cookie_secure
+}
+
 /// Server-side OAuth + session configuration.
 #[derive(Debug, Clone)]
 pub struct AuthConfig {
@@ -703,5 +712,24 @@ mod tests {
         assert!(check_session_secret_policy(&routable, false).is_ok());
         assert!(check_session_secret_policy(&public, false).is_ok());
         assert!(check_session_secret_policy(&loopback, false).is_ok());
+    }
+
+    #[test]
+    fn warns_only_for_non_loopback_insecure_cookies() {
+        let loopback: SocketAddr = "127.0.0.1:8080".parse().unwrap();
+        let loopback_v6: SocketAddr = "[::1]:8080".parse().unwrap();
+        let routable: SocketAddr = "0.0.0.0:8080".parse().unwrap();
+        let public: SocketAddr = "10.0.0.5:8080".parse().unwrap();
+
+        // The one case that warrants an advisory warning: off-loopback AND cookies not Secure.
+        assert!(should_warn_insecure_cookies(&routable, false));
+        assert!(should_warn_insecure_cookies(&public, false));
+        // Loopback dev is expected to serve http without Secure — no warning.
+        assert!(!should_warn_insecure_cookies(&loopback, false));
+        assert!(!should_warn_insecure_cookies(&loopback_v6, false));
+        // Secure cookies off-loopback (https deploy) is the correct config — no warning.
+        assert!(!should_warn_insecure_cookies(&routable, true));
+        assert!(!should_warn_insecure_cookies(&public, true));
+        assert!(!should_warn_insecure_cookies(&loopback, true));
     }
 }

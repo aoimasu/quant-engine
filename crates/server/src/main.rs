@@ -69,6 +69,19 @@ async fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
+    // QE-409 (advisory, non-fatal): bound off-loopback while session cookies are minted without
+    // `Secure` (the `redirect_uri` is not https) — cookies could traverse the network unprotected.
+    // Likely a misconfigured `redirect_uri` scheme or a TLS-terminating proxy the scheme doesn't
+    // reflect. Warn only; unlike the missing-secret case this does NOT refuse boot.
+    if qe_server::auth::should_warn_insecure_cookies(&cfg.addr, auth_config.cookie_secure) {
+        tracing::warn!(
+            addr = %cfg.addr,
+            "bound to a non-loopback address but session cookies are not marked `Secure` \
+             (redirect_uri is not https) — cookies may traverse the network unprotected; \
+             check QE_OAUTH_REDIRECT_URI / TLS termination"
+        );
+    }
+
     #[cfg(feature = "http")]
     let verifier: Arc<dyn IdTokenVerifier> = Arc::new(
         qe_server::auth::google::GoogleOidcVerifier::new(&auth_config),
