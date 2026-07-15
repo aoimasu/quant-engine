@@ -43,4 +43,8 @@ fn dockerfile_runs_the_same_binary() {
     let text = std::fs::read_to_string(path).expect("Dockerfile exists");
     assert!(text.contains("cargo build --release --locked -p qe-cli"));
     assert!(text.contains(r#"ENTRYPOINT ["qe"]"#));
+    // QE-420: the image threads a real build commit in via an ARG and exposes it as the
+    // `QE_CODE_COMMIT` runtime override so the container stamps its build SHA into vintage lineage.
+    assert!(text.contains("ARG QE_CODE_COMMIT"));
+    assert!(text.contains("ENV QE_CODE_COMMIT=$QE_CODE_COMMIT"));
 }
