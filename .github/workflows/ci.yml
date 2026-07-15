@@ -61,3 +61,52 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check
+
+  # QE-404: build + lint + test the feature-gated I/O that the default jobs above never compile.
+  # Every crate parks real I/O behind a default-off feature (`http` REST/auth transport, `arrow`
+  # artefact serialisation), so `clippy -D warnings`, `clippy::unwrap_used = "deny"` and the tests
+  # had never seen the most safety-relevant code. Each matrix leg turns one feature on for one
+  # crate and runs clippy then the (network-free) unit tests, so the panic-freedom gates now bind
+  # that code too. `ubuntu-latest` ships `libssl-dev`, so the native-tls (openssl-sys) build in the
+  # `http` legs resolves with no extra setup. This is additive: the offline clippy/test jobs above
+  # stay the fast default path and are unchanged.
+  feature-gate:
+    name: feature-gate (${{ matrix.crate }} ${{ matrix.features }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - crate: qe-venue
+            features: http
+          - crate: qe-ingest
+            features: http
+          - crate: qe-ingest
+            features: arrow
+          - crate: qe-server
+            features: http
+          - crate: qe-cli
+            features: http
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@67ef31d5b988238dd797d409d6f9574278e20537 # pinned (was @master) for supply-chain determinism
+        with:
+          toolchain: "1.96.0"
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # -D warnings + the workspace `unwrap_used`/`unsafe_code` denies apply to the feature code.
+      - run: cargo clippy -p ${{ matrix.crate }} --features ${{ matrix.features }} --all-targets --locked -- -D warnings
+      # Feature unit tests are network-free (fakes / URL construction); no live Binance/Google call.
+      - run: cargo test -p ${{ matrix.crate }} --features ${{ matrix.features }} --locked
+
+  # QE-404 acceptance criterion: the whole workspace must build with every feature on.
+  all-features-build:
+    name: all-features-build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@67ef31d5b988238dd797d409d6f9574278e20537 # pinned (was @master) for supply-chain determinism
+        with:
+          toolchain: "1.96.0"
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --workspace --all-features --locked
