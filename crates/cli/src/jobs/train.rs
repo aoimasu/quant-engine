@@ -331,6 +331,10 @@ pub fn run_train_job(
             Fraction::new(Decimal::new(1, 1)).expect("0.1 is a valid fraction"),
         ),
         worst_case_loss: None,
+        // Pin the identity of the catalogue these chromosomes were evolved against (QE-402) — the
+        // exact-match key the backtest/live load boundary asserts. `schema` is the same
+        // `catalogue_schema()` the search/seal ran against, so this is the honest identity.
+        catalogue: qe_signal::CatalogueIdentity::from_schema(&schema),
         lineage: params.lineage.clone(),
     };
     let vintage = Vintage::seal(content)?;

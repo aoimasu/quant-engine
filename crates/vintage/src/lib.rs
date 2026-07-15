@@ -16,15 +16,19 @@ use std::path::PathBuf;
 
 use qe_determinism::Lineage;
 use qe_risk::CalibrationProfile;
-use qe_signal::Genome;
+use qe_signal::{CatalogueIdentity, Genome};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+pub mod schema;
+
 /// The vintage artefact format version. Part of the hashed content, so a format change changes the hash.
 ///
-/// `2` (QE-130): added [`VintageContent::worst_case_loss`].
-pub const VINTAGE_FORMAT_VERSION: u16 = 2;
+/// - `2` (QE-130): added [`VintageContent::worst_case_loss`].
+/// - `3` (QE-402): added [`VintageContent::catalogue`] (the pinned catalogue identity), asserted
+///   exactly at the load boundary — see [`schema`].
+pub const VINTAGE_FORMAT_VERSION: u16 = 3;
 
 /// The hashed content of a vintage — everything the content hash covers.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -44,6 +48,12 @@ pub struct VintageContent {
     /// (`qe_ensemble::stress::worst_case_loss`) has been run and its bare figure attached. Stored as a
     /// plain `f64`, not the `StressReport` type, so the vintage keeps no `qe-ensemble` dependency.
     pub worst_case_loss: Option<f64>,
+    /// The pinned identity of the indicator catalogue the `chromosomes` were sealed against (QE-402):
+    /// the `CATALOGUE_VERSION`, per-indicator state count, and an ordered indicator-id hash. Asserted
+    /// **exactly** at the load boundary ([`schema::assert_schema`]) so a catalogue reorder or a
+    /// same-width version bump is caught instead of silently re-addressing a clause to a different
+    /// indicator. Part of the hashed content, so pinning it changes the vintage id.
+    pub catalogue: CatalogueIdentity,
     /// The lineage that produced this vintage (QE-006).
     pub lineage: Lineage,
 }
@@ -191,13 +201,20 @@ impl VintageRepository {
         Ok(path)
     }
 
-    /// Load and verify the vintage `vintage_id` from disk.
+    /// Load and verify the vintage `vintage_id` from disk, then assert its persisted schema identity
+    /// matches this build **exactly** ([`schema::assert_schema`], QE-402) — the fail-closed
+    /// catalogue↔vintage / genome-rep boundary shared by the CLI backtest and the live runtime. A
+    /// vintage sealed against a different (reordered / version-bumped) catalogue is rejected here rather
+    /// than silently re-addressing its clauses.
     ///
     /// # Errors
-    /// [`VintageError::Io`] if the file is missing/unreadable, plus the [`Vintage::load`] errors.
+    /// [`VintageError::Io`] if the file is missing/unreadable, plus the [`Vintage::load`] errors, plus
+    /// [`VintageError::SchemaMismatch`] / [`VintageError::GenomeRepMismatch`] on an identity mismatch.
     pub fn load(&self, vintage_id: &str) -> Result<Vintage, VintageError> {
         let file = std::fs::File::open(self.path_for(vintage_id))?;
-        Vintage::load(file)
+        let vintage = Vintage::load(file)?;
+        schema::assert_schema(&vintage.content)?;
+        Ok(vintage)
     }
 
     /// List every sealed vintage under `root`, **ascending by `vintage_id`** (deterministic order).
@@ -271,6 +288,33 @@ pub enum VintageError {
     InvalidWorstCaseLoss {
         /// The offending value.
         value: f64,
+    },
+    /// The persisted catalogue identity does not match this build's catalogue **exactly** (QE-402): a
+    /// catalogue reorder or a same-width `CATALOGUE_VERSION` bump. Loading is refused — the sealed
+    /// genomes would silently address different indicators.
+    #[error(
+        "catalogue schema mismatch: vintage was sealed against catalogue {found:?}, but this build is \
+         {expected:?} — a reorder or version bump makes every clause index unsafe"
+    )]
+    SchemaMismatch {
+        /// This build's current catalogue identity.
+        expected: CatalogueIdentity,
+        /// The identity the vintage was sealed against.
+        found: CatalogueIdentity,
+    },
+    /// A persisted chromosome's representation version does not match this build's `REP_VERSION`
+    /// (QE-402, vintage↔genome-rep boundary).
+    #[error(
+        "genome representation mismatch: chromosome #{index} is rep version {found}, this build is \
+         {expected}"
+    )]
+    GenomeRepMismatch {
+        /// The offending chromosome index.
+        index: usize,
+        /// This build's genome representation version.
+        expected: u16,
+        /// The version stored in the chromosome.
+        found: u16,
     },
     /// Underlying I/O error.
     #[error("vintage I/O error: {0}")]
@@ -349,6 +393,7 @@ mod tests {
             weights: vec![0.6, 0.4],
             calibration: calibration(),
             worst_case_loss: Some(0.28), // QE-130 stress figure
+            catalogue: CatalogueIdentity::current(), // QE-402 pinned identity
             lineage: lineage(),
         }
     }

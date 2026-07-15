@@ -192,6 +192,9 @@ fn write_sample_vintage(dir: &Path) {
         weights: vec![1.0],
         calibration: CalibrationProfile::new(Fraction::new(Decimal::new(1, 1)).unwrap()),
         worst_case_loss: Some(0.1),
+        // The fixture genome addresses feature 0 of the default catalogue, so the current identity is
+        // its true identity (QE-402).
+        catalogue: qe_signal::CatalogueIdentity::current(),
         lineage: Lineage::new(
             "fixture-config-hash",
             "fixture-snapshot",
