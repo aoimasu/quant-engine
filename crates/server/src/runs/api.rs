@@ -15,7 +15,8 @@ use axum::{Json, Router};
 use serde_json::json;
 
 use super::manager::{CreateError, RunManager};
-use super::model::{CreateRunRequest, RunMeta};
+use super::model::{CreateRunRequest, RunMeta, RunStatus};
+use super::store::RunStore;
 
 /// The run lifecycle routes. Parameterised over [`crate::AppState`]; the handlers still extract
 /// `State<Arc<RunManager>>`, projected out of `AppState` via `FromRef`.
@@ -53,56 +54,109 @@ async fn create_run(
 
 /// `GET /api/runs` — list runs newest-first (index order reversed), each enriched with its
 /// authoritative `meta.json` status/progress.
+///
+/// QE-411: the index read and the per-run `meta.json` reads are blocking `std::fs`, so the whole batch
+/// runs inside a single [`tokio::task::spawn_blocking`] closure (one closure for the whole list, not one
+/// per run) — keeping the async worker free while preserving the newest-first order and the
+/// skip-on-missing-meta semantics.
 async fn list_runs(State(manager): State<Arc<RunManager>>) -> Response {
-    let store = manager.store();
-    let index = match store.read_index() {
-        Ok(index) => index,
-        Err(e) => return internal(format!("failed to read index: {e}")),
-    };
+    let store = manager.store().clone();
+    match tokio::task::spawn_blocking(move || list_runs_blocking(&store)).await {
+        Ok(Ok(runs)) => Json(runs).into_response(),
+        Ok(Err(msg)) => internal(msg),
+        Err(_) => internal("run listing task failed".to_owned()),
+    }
+}
+
+/// The blocking body of [`list_runs`], run off the async executor. Returns the newest-first runs, or a
+/// pre-formatted error message identical to the previous inline error bodies.
+fn list_runs_blocking(store: &RunStore) -> Result<Vec<RunMeta>, String> {
+    let index = store
+        .read_index()
+        .map_err(|e| format!("failed to read index: {e}"))?;
     let mut runs: Vec<RunMeta> = Vec::with_capacity(index.len());
     // Newest first.
     for entry in index.iter().rev() {
         match store.read_meta(&entry.id) {
             Ok(Some(meta)) => runs.push(meta),
             Ok(None) => {} // indexed but meta missing (mid-create race / manual deletion) — skip.
-            Err(e) => return internal(format!("failed to read run `{}`: {e}", entry.id)),
+            Err(e) => return Err(format!("failed to read run `{}`: {e}", entry.id)),
         }
     }
-    Json(runs).into_response()
+    Ok(runs)
 }
 
 /// `GET /api/runs/{id}` — one run's `meta.json` (status + progress), or `404`.
+///
+/// QE-411: the `meta.json` read is blocking `std::fs`, so it runs inside [`tokio::task::spawn_blocking`].
 async fn get_run(State(manager): State<Arc<RunManager>>, Path(id): Path<String>) -> Response {
-    match manager.store().read_meta(&id) {
-        Ok(Some(meta)) => Json(meta).into_response(),
-        Ok(None) => not_found(&id),
-        Err(e) => internal(format!("failed to read run `{id}`: {e}")),
+    let store = manager.store().clone();
+    let task_id = id.clone();
+    match tokio::task::spawn_blocking(move || store.read_meta(&task_id)).await {
+        Ok(Ok(Some(meta))) => Json(meta).into_response(),
+        Ok(Ok(None)) => not_found(&id),
+        Ok(Err(e)) => internal(format!("failed to read run `{id}`: {e}")),
+        Err(_) => internal("run task failed".to_owned()),
     }
+}
+
+/// The outcome of the blocking `get_result` work, mapped to a `Response` on the async side so every
+/// status code and JSON body stays byte-identical to the previous inline implementation.
+enum ResultOutcome {
+    /// The `result.json` bytes to serve (`200`).
+    Body(Vec<u8>),
+    /// The run id is unknown (`404`).
+    NotFound,
+    /// The run exists but is not `succeeded` yet (`409`, carries the status for the body).
+    NotReady(RunStatus),
+    /// The run is `succeeded` but the artefact could not be read (`409`).
+    Missing,
+    /// Reading `meta.json` failed (`500`, carries the formatted message).
+    MetaError(String),
 }
 
 /// `GET /api/runs/{id}/result` — the run's `result.json` once `succeeded`. `404` if the run is
 /// unknown, `409` if it exists but has no result yet.
+///
+/// QE-411: the `meta.json` read and the `result.json` read are blocking `std::fs`, so the whole sequence
+/// runs inside one [`tokio::task::spawn_blocking`] closure; the `Response` is built from its outcome.
 async fn get_result(State(manager): State<Arc<RunManager>>, Path(id): Path<String>) -> Response {
-    let store = manager.store();
-    let meta = match store.read_meta(&id) {
-        Ok(Some(meta)) => meta,
-        Ok(None) => return not_found(&id),
-        Err(e) => return internal(format!("failed to read run `{id}`: {e}")),
-    };
-    if meta.status != super::model::RunStatus::Succeeded {
-        return (
+    let store = manager.store().clone();
+    let task_id = id.clone();
+    match tokio::task::spawn_blocking(move || read_result_outcome(&store, &task_id)).await {
+        Ok(ResultOutcome::Body(bytes)) => {
+            ([(header::CONTENT_TYPE, "application/json")], bytes).into_response()
+        }
+        Ok(ResultOutcome::NotFound) => not_found(&id),
+        Ok(ResultOutcome::NotReady(status)) => (
             StatusCode::CONFLICT,
-            Json(json!({ "error": "result not available", "status": meta.status })),
+            Json(json!({ "error": "result not available", "status": status })),
         )
-            .into_response();
-    }
-    match std::fs::read(store.result_path(&id)) {
-        Ok(bytes) => ([(header::CONTENT_TYPE, "application/json")], bytes).into_response(),
-        Err(_) => (
+            .into_response(),
+        Ok(ResultOutcome::Missing) => (
             StatusCode::CONFLICT,
             Json(json!({ "error": "result artefact missing" })),
         )
             .into_response(),
+        Ok(ResultOutcome::MetaError(msg)) => internal(msg),
+        Err(_) => internal("result task failed".to_owned()),
+    }
+}
+
+/// The blocking body of [`get_result`], run off the async executor: read `meta.json`, gate on
+/// `succeeded`, then read the `result.json` bytes. Mirrors the previous inline control flow exactly.
+fn read_result_outcome(store: &RunStore, id: &str) -> ResultOutcome {
+    let meta = match store.read_meta(id) {
+        Ok(Some(meta)) => meta,
+        Ok(None) => return ResultOutcome::NotFound,
+        Err(e) => return ResultOutcome::MetaError(format!("failed to read run `{id}`: {e}")),
+    };
+    if meta.status != RunStatus::Succeeded {
+        return ResultOutcome::NotReady(meta.status);
+    }
+    match store.read_result(id) {
+        Ok(bytes) => ResultOutcome::Body(bytes),
+        Err(_) => ResultOutcome::Missing,
     }
 }
 
@@ -122,4 +176,29 @@ fn internal(msg: String) -> Response {
         Json(json!({ "error": msg })),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    /// QE-411 AC guard: no blocking `std::fs` call remains on an async handler body. Scans this file's
+    /// handler region (everything before this `#[cfg(test)]` module) and asserts the `std::fs::` token
+    /// is absent — the run-store fs primitives now live in `store.rs` and are reached only through
+    /// `spawn_blocking`. The needle is built at runtime so this assertion line is not a self-match.
+    #[test]
+    fn handlers_do_no_blocking_std_fs() {
+        let src = include_str!("api.rs");
+        // The handler code is everything before the test module attribute.
+        let code = src.split("#[cfg(test)]").next().unwrap_or(src);
+        // Drop line comments so doc/comment mentions of the token never count.
+        let stripped: String = code
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let needle = format!("std{sep}fs{sep}", sep = "::");
+        assert!(
+            !stripped.contains(&needle),
+            "blocking `std::fs` must not appear on an async run handler body (QE-411)"
+        );
+    }
 }
