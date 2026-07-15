@@ -106,18 +106,30 @@ pub struct SelectionConfig {
     /// sensible default that tolerates minor ingest gaps but rejects an empty/sparse funding series.
     #[serde(default = "default_funding_coverage_min")]
     pub funding_coverage_min: f64,
+    /// Number of purged/embargoed out-of-sample cross-validation folds the *selection* fitness scores each
+    /// genome over (QE-415). The MAP-Elites/DE search records an elite's fitness as the mean per-fold
+    /// log-growth over these disjoint OOS folds (isolated, flat-start) rather than a single in-sample number,
+    /// so a genome that only fits one contiguous stretch is demoted. Must be `≥ 2` (a real cross-validated
+    /// standard error); the default is a small-budget-friendly `4`.
+    #[serde(default = "default_cv_folds")]
+    pub cv_folds: usize,
 }
 
 impl Default for SelectionConfig {
     fn default() -> Self {
         Self {
             funding_coverage_min: default_funding_coverage_min(),
+            cv_folds: default_cv_folds(),
         }
     }
 }
 
 fn default_funding_coverage_min() -> f64 {
     0.90
+}
+
+fn default_cv_folds() -> usize {
+    4
 }
 
 /// One point-in-time universe member: an instrument with an optional `[listed, delisted)` window.

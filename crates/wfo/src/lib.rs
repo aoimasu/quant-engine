@@ -39,6 +39,7 @@
 pub mod archive;
 pub mod backtest;
 pub mod cv;
+pub mod cv_fitness;
 pub mod fitness;
 pub mod friction;
 // The strategy genome moved to `qe-signal` (shared train/live signal logic, QE-001 decoupling). It is
@@ -64,6 +65,9 @@ pub use backtest::{
     DEFAULT_MIN_TRADES, DEFAULT_WINDOWS,
 };
 pub use cv::{Fold, PurgedKFold};
+pub use cv_fitness::{
+    oos_test_ranges, purged_oos_fitness, selection_kfold, DEFAULT_CV_FOLDS, DEFAULT_LABEL_HORIZON,
+};
 pub use fitness::{geom_return, log_growth, should_replace, NoiseRobustFitness, DEFAULT_K_SIGMA};
 pub use friction::{
     cost_sweep, simulate, Event, FeeSchedule, Fill, FrictionConfig, FundingStamp, Liquidity,
