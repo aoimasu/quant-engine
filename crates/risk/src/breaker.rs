@@ -21,43 +21,94 @@ use crate::limit::Fraction;
 /// Default fast-drop measurement window, in ticks.
 pub const DEFAULT_FAST_WINDOW: usize = 5;
 
+/// Convert a smoothing coefficient `a: f64` into a `Decimal` clamped to `[0,1]`, panic-free.
+///
+/// Mirrors the QE-116 idiom: a non-finite / unrepresentable `a` falls back to `1.0` (full re-seed, the safe
+/// direction for a risk feed) rather than panicking on the prod path (`clippy::unwrap_used = deny`).
+fn alpha_decimal(a: f64) -> Decimal {
+    Decimal::from_f64_retain(a)
+        .unwrap_or(Decimal::ONE)
+        .clamp(Decimal::ZERO, Decimal::ONE)
+}
+
+/// Per-tick smoothing coefficient for an elapsed `dt_secs` under half-life `half_life_secs`:
+/// `alpha = 1 − 0.5^(Δt / half_life)` (continuous-time EMA; QE-417). `Δt` is clamped to `≥ 0` so a duplicate /
+/// out-of-order / clock-skewed timestamp yields `alpha = 0` (the EMA does not move) instead of misbehaving. A
+/// non-positive half-life ⇒ `alpha = 1` (no smoothing). Deterministic (`f64::powf`), no wall-clock read.
+#[must_use]
+pub fn time_aware_alpha(half_life_secs: f64, dt_secs: f64) -> Decimal {
+    if half_life_secs > 0.0 {
+        let dt = dt_secs.max(0.0);
+        alpha_decimal(1.0 - 0.5_f64.powf(dt / half_life_secs))
+    } else {
+        Decimal::ONE
+    }
+}
+
 /// Exponential moving average over the mark price — the smoothed-mark tick observer (QE-116/D1).
+///
+/// Time-aware since QE-417: [`update_after`](Self::update_after) derives the per-tick `alpha` from the actual
+/// elapsed `Δt`, so a stream gap (wss reconnect) smooths as the real elapsed time rather than a single 1s step.
+/// The fixed-cadence [`update`](Self::update) is retained (uses the nominal `alpha`) and, at `Δt = 1s`, produces a
+/// byte-identical series to `update_after` — steady-state behaviour is unchanged.
 #[derive(Debug, Clone)]
 pub struct MarkEma {
+    /// Per-tick `alpha` at the nominal cadence — used by [`update`](Self::update) and as the fixed-alpha
+    /// fallback in [`update_after`](Self::update_after) when no half-life is known.
     alpha: Decimal,
+    /// Half-life (seconds) for the time-aware alpha, or `None` for an explicit fixed coefficient
+    /// ([`with_alpha`](Self::with_alpha)) that has no half-life to derive from.
+    half_life_secs: Option<f64>,
     value: Option<Decimal>,
 }
 
 impl MarkEma {
-    /// Build an EMA with per-tick smoothing `alpha = 1 − 2^(−tick/half_life)` (so τ½ = 60s at 1s ticks
-    /// per spec). A non-positive half-life ⇒ `alpha = 1` (no smoothing).
+    /// Build an EMA with per-tick smoothing `alpha = 1 − 0.5^(tick/half_life)` (so τ½ = 60s at 1s ticks
+    /// per spec). A non-positive half-life ⇒ `alpha = 1` (no smoothing). The half-life is retained so
+    /// [`update_after`](Self::update_after) can derive a time-aware `alpha` from the actual `Δt` (QE-417).
     #[must_use]
     pub fn with_half_life(half_life_secs: f64, tick_secs: f64) -> Self {
-        let a = if half_life_secs > 0.0 {
-            1.0 - 0.5_f64.powf(tick_secs / half_life_secs)
-        } else {
-            1.0
-        };
-        let alpha = Decimal::from_f64_retain(a)
-            .unwrap_or(Decimal::ONE)
-            .clamp(Decimal::ZERO, Decimal::ONE);
-        MarkEma { alpha, value: None }
-    }
-
-    /// Build an EMA with an explicit smoothing coefficient (clamped to `[0,1]`).
-    #[must_use]
-    pub fn with_alpha(alpha: Decimal) -> Self {
         MarkEma {
-            alpha: alpha.clamp(Decimal::ZERO, Decimal::ONE),
+            alpha: time_aware_alpha(half_life_secs, tick_secs),
+            half_life_secs: (half_life_secs > 0.0).then_some(half_life_secs),
             value: None,
         }
     }
 
-    /// Push a mark `price`, returning the updated smoothed value. The first sample seeds the EMA.
+    /// Build an EMA with an explicit smoothing coefficient (clamped to `[0,1]`). No half-life is known, so
+    /// [`update_after`](Self::update_after) applies this fixed `alpha` regardless of `Δt`.
+    #[must_use]
+    pub fn with_alpha(alpha: Decimal) -> Self {
+        MarkEma {
+            alpha: alpha.clamp(Decimal::ZERO, Decimal::ONE),
+            half_life_secs: None,
+            value: None,
+        }
+    }
+
+    /// Push a mark `price` at the **nominal** cadence, returning the updated smoothed value. The first sample
+    /// seeds the EMA. Equivalent to `update_after(nominal_tick_secs, price)`; retained for fixed-cadence callers.
     pub fn update(&mut self, price: Decimal) -> Decimal {
+        self.apply(self.alpha, price)
+    }
+
+    /// Push a mark `price` observed `dt_secs` after the previous sample, deriving the per-tick `alpha` from that
+    /// elapsed time (QE-417). The first sample seeds the EMA (`Δt` irrelevant). `Δt ≤ 0` is clamped to `0` (the
+    /// EMA does not move). At `Δt = 1s` under a τ½=60s half-life this reproduces [`update`](Self::update) exactly;
+    /// a multi-minute gap yields an `alpha → 1` that nearly re-seeds to the fresh sample. Panic-free, deterministic.
+    pub fn update_after(&mut self, dt_secs: f64, price: Decimal) -> Decimal {
+        let alpha = match self.half_life_secs {
+            Some(hl) => time_aware_alpha(hl, dt_secs),
+            None => self.alpha,
+        };
+        self.apply(alpha, price)
+    }
+
+    /// Apply one EMA step with a given `alpha`; the first sample seeds the value.
+    fn apply(&mut self, alpha: Decimal, price: Decimal) -> Decimal {
         let v = match self.value {
             None => price,
-            Some(prev) => prev + self.alpha * (price - prev),
+            Some(prev) => prev + alpha * (price - prev),
         };
         self.value = Some(v);
         v
@@ -248,6 +299,53 @@ mod tests {
         assert!(
             (v - d("150")).abs() < d("2"),
             "EMA after one half-life = {v}"
+        );
+    }
+
+    /// QE-417: at the nominal 1s spacing the time-aware `update_after` reproduces the fixed-cadence `update`
+    /// exactly (backward-compat — the steady-state series is unchanged).
+    #[test]
+    fn update_after_at_one_second_matches_fixed_update() {
+        let prices = [d("100"), d("120"), d("120"), d("80"), d("95"), d("95")];
+        let mut fixed = MarkEma::with_half_life(60.0, 1.0);
+        let mut timed = MarkEma::with_half_life(60.0, 1.0);
+        for p in prices {
+            assert_eq!(fixed.update(p), timed.update_after(1.0, p));
+        }
+    }
+
+    /// QE-417: after a 300s gap the per-tick alpha (≈0.969) nearly re-seeds — the EMA jumps almost to the fresh
+    /// sample, far past the ~1% move a single 1s step would give.
+    #[test]
+    fn update_after_large_gap_nearly_reseeds() {
+        let mut ema = MarkEma::with_half_life(60.0, 1.0);
+        ema.update_after(1.0, d("100")); // seed
+        let after_gap = ema.update_after(300.0, d("200"));
+        // alpha(300s) = 1 - 0.5^5 = 0.96875 -> 100 + 0.96875*100 = 196.875.
+        assert!(
+            after_gap > d("195"),
+            "300s gap should nearly reseed: {after_gap}"
+        );
+        // A single 1s step from 100 would only reach ~101.15 — the gap-aware value is far higher.
+        assert!(after_gap > d("190"));
+    }
+
+    /// QE-417: a non-positive Δt (duplicate / out-of-order / clock-skew) is clamped to 0 — the EMA does not move.
+    #[test]
+    fn update_after_non_positive_dt_does_not_move() {
+        let mut ema = MarkEma::with_half_life(60.0, 1.0);
+        ema.update_after(1.0, d("100")); // seed
+        let v0 = ema.update_after(1.0, d("100")); // still 100
+        assert_eq!(v0, d("100"));
+        assert_eq!(
+            ema.update_after(0.0, d("500")),
+            d("100"),
+            "Δt=0 must not move the EMA"
+        );
+        assert_eq!(
+            ema.update_after(-5.0, d("500")),
+            d("100"),
+            "Δt<0 clamps to 0, no move"
         );
     }
 
