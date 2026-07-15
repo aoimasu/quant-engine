@@ -8,6 +8,8 @@ to empty**. No running "Completed" list is kept here — the traceable history l
 
 > **Branch protection note (since QE-005):** `main` requires CI checks (`fmt`/`clippy`/`test`/`deny`)
 > with `enforce_admins=true`, which blocks direct pushes. Archive bookkeeping for a merged ticket is
-> therefore committed on the *next* ticket's branch so it flows through a PR + CI.
+> committed on the PR branch itself *before* merge, so it rides in the same PR's squash through CI.
 
 ---
+
+_No PR currently under review._

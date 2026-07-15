@@ -262,7 +262,6 @@ Authoritative for the P0/P1 tickets below; later phases inherit unless a ticket 
 | QE-401 | Seed the live drawdown breaker with the reconstructed committed-peak equity  *(P1 — capital safety)* | QE-210, QE-211, QE-212 | — |
 | QE-402 | Pin catalogue identity in the vintage & assert exact schema match on load  *(P1 — correctness)* · **supersedes QE-262** | QE-129, QE-260 | — |
 | QE-403 | Net-of-cost truth: funding-coverage gate + non-zero size-impact in selection  *(P1 — correctness)* | QE-103, QE-109, QE-128 | — |
-| QE-404 | CI must build/lint/test the feature-gated code (`http` / `arrow`)  *(P1 — safety gate)* | — | — |
 | QE-405 | Extend the firewall guard: `qe-runtime` / `qe-vintage` ⊬ training crates  *(P1 — invariant)* | QE-132 | — |
 | QE-406 | Single-source the CLI ↔ server ↔ SPA run protocol (`qe-run-protocol` + version + agreement test)  *(P1 — contract)* | QE-255, QE-261 | — |
 | QE-407 | Server run-lifecycle: graceful shutdown, supervised-task registry, honest success  *(P1)* · **extends QE-263/266** | QE-255 | — |
