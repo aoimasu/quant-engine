@@ -270,7 +270,6 @@ Authoritative for the P0/P1 tickets below; later phases inherit unless a ticket 
 | QE-410 | Run-list read path: shared polling hook, live list refresh, server pagination/projection/filter  *(P2)* · *coordinate QE-264* | QE-255, QE-259 | — |
 | QE-411 | Take run-store / read blocking `std::fs` off the async executor  *(P2)* · **extends QE-266** | QE-255 | — |
 | QE-412 | Coverage query without full `Bar` decode (key-only LMDB cursor)  *(P2 — efficiency)* | QE-253, QE-257 | — |
-| QE-418 | Pre-trade gross cap checked against true gross exposure, not net notional  *(P2 — risk)* | QE-213, QE-215 | — |
 | QE-419 | Unify config: single source of truth for storage dirs across server + spawned CLI  *(P2)* | QE-002, QE-254 | — |
 
 | QE-428 | Route reported-backtest impact through the selection cost model / a CLI flag (QE-128) so reporting PnL matches selection  *(P3 — follow-up from QE-403 review)* | QE-403, QE-128 | — |
