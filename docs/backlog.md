@@ -274,7 +274,6 @@ Authoritative for the P0/P1 tickets below; later phases inherit unless a ticket 
 | QE-410 | Run-list read path: shared polling hook, live list refresh, server pagination/projection/filter  *(P2)* · *coordinate QE-264* | QE-255, QE-259 | — |
 | QE-411 | Take run-store / read blocking `std::fs` off the async executor  *(P2)* · **extends QE-266** | QE-255 | — |
 | QE-412 | Coverage query without full `Bar` decode (key-only LMDB cursor)  *(P2 — efficiency)* | QE-253, QE-257 | — |
-| QE-413 | Observability: env-driven telemetry, per-request tracing, CLI telemetry init  *(P2)* | QE-003, QE-254 | — |
 | QE-414 | Deflated-Sharpe trial variance from the full trial population, not the selected top-N  *(P2 — validation rigor)* | QE-131 | — |
 | QE-415 | Wire the purged/embargoed CV into selection fitness (exists but unused)  *(P2 — leakage)* | QE-117, QE-113 | — |
 | QE-416 | Seal capacity-weighted allocation + worst-case-loss + real breaker calibration  *(P2)* | QE-128, QE-130, QE-116 | — |

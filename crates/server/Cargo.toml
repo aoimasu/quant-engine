@@ -52,6 +52,9 @@ url.workspace = true
 # avoids ring's non-allowlisted licence; only compiled under `http`.
 ureq = { version = "2", default-features = false, features = ["native-tls"], optional = true }
 
-[dev-dependencies]
+# QE-413: `ServiceBuilder` composes the request-id + trace + propagate layers in a
+# well-defined outermost→innermost order on the `/api` router. Already in the lockfile.
 tower.workspace = true
+
+[dev-dependencies]
 tempfile.workspace = true

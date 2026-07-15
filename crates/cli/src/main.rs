@@ -11,6 +11,7 @@ use qe_cli::jobs::backtest::{run_backtest, BacktestParams};
 use qe_cli::jobs::{emit_done, emit_error, emit_progress, emit_train_done, ProgressLine};
 use qe_cli::{parse_args, run_train, Command, TrainOptions};
 use qe_config::{Config, Profile};
+use qe_telemetry::{init as init_telemetry, OutputStream, TelemetryConfig, TelemetryGuard};
 
 /// Code provenance folded into the vintage id (QE-420). Resolution precedence:
 ///
@@ -37,11 +38,34 @@ fn code_commit() -> String {
 }
 
 fn main() -> ExitCode {
+    // QE-413: install telemetry ONCE, before dispatch, so the job pipeline's `tracing` spans are
+    // recorded. Held for the whole run; the guard flushes on drop.
+    let _telemetry = init_cli_telemetry();
+
     match run() {
         Ok(code) => code,
         Err(e) => {
             eprintln!("error: {e}");
             ExitCode::FAILURE
+        }
+    }
+}
+
+/// Initialise telemetry for the CLI, env-driven ([`TelemetryConfig::from_env`]) but forced onto
+/// **stderr**: the parent `qe-server` reads this process's **stdout** as the `ProgressLine` JSON run
+/// protocol, so telemetry must never touch stdout. Init failure (e.g. a bad `RUST_LOG` directive, or
+/// a subscriber already installed) is non-fatal — the CLI logs a note to stderr and runs without
+/// telemetry rather than aborting a user's job.
+fn init_cli_telemetry() -> Option<TelemetryGuard> {
+    let cfg = TelemetryConfig {
+        writer: OutputStream::Stderr,
+        ..TelemetryConfig::from_env()
+    };
+    match init_telemetry(&cfg) {
+        Ok(guard) => Some(guard),
+        Err(e) => {
+            eprintln!("warning: telemetry disabled: {e}");
+            None
         }
     }
 }
@@ -132,6 +156,16 @@ struct BacktestCli {
 /// (`QE_CONFIG` or `config.toml`, `runtime-sim` profile): `storage.market_dir` and
 /// `storage.artifacts_dir/vintages`.
 fn run_backtest_command(cmd: BacktestCli) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    // QE-413: a top-level stage span so a CLI run emits structured telemetry (to stderr — never
+    // stdout, which carries the ProgressLine protocol the server parses).
+    let _span = tracing::info_span!(
+        "cli.backtest",
+        vintage = %cmd.vintage,
+        resolution = %cmd.resolution,
+    )
+    .entered();
+    tracing::info!(start = %cmd.start, end = %cmd.end, "backtest command started");
+
     let config_path = std::env::var("QE_CONFIG").unwrap_or_else(|_| "config.toml".to_owned());
     let cfg = Config::load(Profile::RuntimeSim, &PathBuf::from(config_path))?;
 
@@ -200,6 +234,10 @@ struct TrainCli {
 /// pipeline, stream JSON-line progress to stdout, write `result.json` into `--run-dir`, and set the exit
 /// code. The terminal `{"t":"done",...}` names the sealed vintage id.
 fn run_train_command(cmd: TrainCli) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    // QE-413: a top-level stage span so a CLI run emits structured telemetry (to stderr).
+    let _span = tracing::info_span!("cli.train", profile = ?cmd.profile).entered();
+    tracing::info!(run_dir = %cmd.run_dir.display(), "train command started");
+
     let cfg = Config::load(cmd.profile, &cmd.config)?;
 
     // Progress sink: JSON lines on stdout when `--json`, else a terse human line on stderr.
@@ -304,6 +342,10 @@ fn run_ingest_command(
     end: &str,
     resolution: &str,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    // QE-413: a top-level stage span so a CLI run emits structured telemetry (to stderr).
+    let _span = tracing::info_span!("cli.ingest", resolution = %resolution).entered();
+    tracing::info!(start = %start, end = %end, "ingest command started");
+
     let detail = format!("window {start}..{end} at {resolution}");
     #[cfg(feature = "http")]
     let msg = format!(

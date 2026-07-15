@@ -46,6 +46,17 @@ pub enum LogFormat {
     Pretty,
 }
 
+/// Destination stream for log records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputStream {
+    /// Standard output. The default; used by the server composition root.
+    Stdout,
+    /// Standard error. The CLI **must** use this: the server reads the CLI
+    /// child's stdout as the `ProgressLine` run protocol, so telemetry writing to
+    /// stdout would corrupt it. Routing to stderr keeps stdout a clean channel.
+    Stderr,
+}
+
 /// Telemetry settings.
 #[derive(Debug, Clone)]
 pub struct TelemetryConfig {
@@ -61,6 +72,9 @@ pub struct TelemetryConfig {
     /// relevant for audit. Only the *disabled* hot-path (zero-I/O) case has a test; the enabled
     /// non-blocking path is guaranteed by construction.
     pub non_blocking: bool,
+    /// Destination stream for records. Defaults to [`OutputStream::Stdout`]; the
+    /// CLI overrides it to [`OutputStream::Stderr`] to protect its stdout protocol.
+    pub writer: OutputStream,
 }
 
 impl Default for TelemetryConfig {
@@ -69,7 +83,51 @@ impl Default for TelemetryConfig {
             level: "info".to_owned(),
             format: LogFormat::Json,
             non_blocking: true,
+            writer: OutputStream::Stdout,
         }
+    }
+}
+
+impl TelemetryConfig {
+    /// Build a config from the environment, so operators can retune logging
+    /// without recompiling. Fields not backed by an env var keep their
+    /// [`Default`] value.
+    ///
+    /// - **level** — the first non-empty of `RUST_LOG`, then `QE_LOG`, else
+    ///   `"info"`. The standard `RUST_LOG` wins; `QE_LOG` is a project-specific
+    ///   fallback. The value is an `EnvFilter` directive
+    ///   (e.g. `"info,qe_wfo=debug"`); [`init`] validates it.
+    /// - **format** — `QE_LOG_FORMAT`: `"pretty"` (case-insensitive) selects
+    ///   [`LogFormat::Pretty`]; anything else (including unset) selects
+    ///   [`LogFormat::Json`].
+    ///
+    /// `non_blocking` and `writer` keep their defaults; callers override `writer`
+    /// (the CLI forces [`OutputStream::Stderr`]).
+    #[must_use]
+    pub fn from_env() -> Self {
+        let default = Self::default();
+        let level = env_non_empty("RUST_LOG")
+            .or_else(|| env_non_empty("QE_LOG"))
+            .unwrap_or(default.level);
+        let format = match env_non_empty("QE_LOG_FORMAT") {
+            Some(v) if v.eq_ignore_ascii_case("pretty") => LogFormat::Pretty,
+            _ => LogFormat::Json,
+        };
+        Self {
+            level,
+            format,
+            non_blocking: default.non_blocking,
+            writer: default.writer,
+        }
+    }
+}
+
+/// Read an env var, returning `None` when it is unset or empty (so an empty value
+/// falls through to the next source rather than becoming a bogus directive).
+fn env_non_empty(key: &str) -> Option<String> {
+    match std::env::var(key) {
+        Ok(v) if !v.is_empty() => Some(v),
+        _ => None,
     }
 }
 
@@ -131,12 +189,19 @@ pub fn init(cfg: &TelemetryConfig) -> Result<TelemetryGuard, TelemetryError> {
         message: e.to_string(),
     })?;
 
-    let (writer, worker): (BoxMakeWriter, Option<WorkerGuard>) = if cfg.non_blocking {
-        let (nb, guard) = tracing_appender::non_blocking(std::io::stdout());
-        (BoxMakeWriter::new(nb), Some(guard))
-    } else {
-        (BoxMakeWriter::new(std::io::stdout), None)
-    };
+    let (writer, worker): (BoxMakeWriter, Option<WorkerGuard>) =
+        match (cfg.non_blocking, cfg.writer) {
+            (true, OutputStream::Stdout) => {
+                let (nb, guard) = tracing_appender::non_blocking(std::io::stdout());
+                (BoxMakeWriter::new(nb), Some(guard))
+            }
+            (true, OutputStream::Stderr) => {
+                let (nb, guard) = tracing_appender::non_blocking(std::io::stderr());
+                (BoxMakeWriter::new(nb), Some(guard))
+            }
+            (false, OutputStream::Stdout) => (BoxMakeWriter::new(std::io::stdout), None),
+            (false, OutputStream::Stderr) => (BoxMakeWriter::new(std::io::stderr), None),
+        };
 
     let builder = fmt::Subscriber::builder()
         .with_env_filter(filter)
@@ -297,7 +362,73 @@ mod tests {
             level: "qe=not_a_level".to_owned(),
             format: LogFormat::Json,
             non_blocking: false,
+            writer: OutputStream::Stdout,
         };
         assert!(matches!(init(&cfg), Err(TelemetryError::Filter { .. })));
+    }
+
+    /// Restores (or clears) an env var on drop, so env-mutating assertions don't
+    /// leak into each other. Env access is process-global; these cases run
+    /// sequenced in one test so cargo's parallel harness can't race them.
+    struct EnvGuard {
+        key: &'static str,
+        prev: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let prev = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, prev }
+        }
+        fn clear(key: &'static str) -> Self {
+            let prev = std::env::var(key).ok();
+            std::env::remove_var(key);
+            Self { key, prev }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(v) => std::env::set_var(self.key, v),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    #[test]
+    fn from_env_resolves_level_format_and_defaults() {
+        // Defaults when nothing is set.
+        {
+            let _r = EnvGuard::clear("RUST_LOG");
+            let _q = EnvGuard::clear("QE_LOG");
+            let _f = EnvGuard::clear("QE_LOG_FORMAT");
+            let cfg = TelemetryConfig::from_env();
+            assert_eq!(cfg.level, "info");
+            assert_eq!(cfg.format, LogFormat::Json);
+            assert_eq!(cfg.writer, OutputStream::Stdout);
+            assert!(cfg.non_blocking);
+        }
+
+        // `RUST_LOG` wins over `QE_LOG`; `QE_LOG_FORMAT=pretty` selects Pretty.
+        {
+            let _r = EnvGuard::set("RUST_LOG", "warn,qe_wfo=debug");
+            let _q = EnvGuard::set("QE_LOG", "trace");
+            let _f = EnvGuard::set("QE_LOG_FORMAT", "PRETTY");
+            let cfg = TelemetryConfig::from_env();
+            assert_eq!(cfg.level, "warn,qe_wfo=debug");
+            assert_eq!(cfg.format, LogFormat::Pretty);
+        }
+
+        // Empty `RUST_LOG` falls through to `QE_LOG`; unknown format ⇒ Json.
+        {
+            let _r = EnvGuard::set("RUST_LOG", "");
+            let _q = EnvGuard::set("QE_LOG", "error");
+            let _f = EnvGuard::set("QE_LOG_FORMAT", "yaml");
+            let cfg = TelemetryConfig::from_env();
+            assert_eq!(cfg.level, "error");
+            assert_eq!(cfg.format, LogFormat::Json);
+        }
     }
 }

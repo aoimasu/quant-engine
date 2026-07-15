@@ -15,13 +15,18 @@
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
-use axum::extract::FromRef;
+use axum::extract::{FromRef, Request};
+use axum::response::Response;
 use axum::{http::StatusCode, routing::get, Json, Router};
 use qe_storage::{MarketStore, StorageError, DEFAULT_MAP_SIZE};
 use qe_vintage::VintageRepository;
 use serde_json::json;
+use tower::ServiceBuilder;
+use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::services::{ServeDir, ServeFile};
+use tower_http::trace::TraceLayer;
 
 pub mod auth;
 pub mod read;
@@ -286,6 +291,45 @@ async fn api_not_found() -> StatusCode {
     StatusCode::NOT_FOUND
 }
 
+/// The request-id header name used by the QE-413 tracing stack (set on the request, propagated onto
+/// the response, and folded into the per-request span).
+const REQUEST_ID_HEADER: &str = "x-request-id";
+
+/// Open the per-request span for the `/api` [`TraceLayer`] (QE-413).
+///
+/// Carries `method`, `path`, and `request_id`; the response event ([`on_http_response`]) adds
+/// `status` and `latency_ms`. `/api/health` is polled continuously (readiness probes), so its span
+/// is opened at `debug` — a production `info` filter suppresses that per-request spam while every
+/// other route logs at `info`. Matching the trailing `/health` is robust to axum nesting (the inner
+/// router may see `/health` or the full `/api/health`).
+fn make_http_span(req: &Request) -> tracing::Span {
+    let method = req.method().as_str();
+    let path = req.uri().path();
+    let request_id = req
+        .headers()
+        .get(REQUEST_ID_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("-");
+    if path.ends_with("/health") {
+        tracing::debug_span!("http.request", method = %method, path = %path, request_id = %request_id)
+    } else {
+        tracing::info_span!("http.request", method = %method, path = %path, request_id = %request_id)
+    }
+}
+
+/// Emit the single completion event for a request, carrying `status` and `latency_ms`. The event is
+/// parented on the request span (so it inherits `method`/`path`/`request_id`) and is emitted at the
+/// span's own level — so `/api/health` stays at `debug` and is filtered out in production.
+fn on_http_response(res: &Response, latency: Duration, span: &tracing::Span) {
+    let status = res.status().as_u16();
+    let latency_ms = latency.as_secs_f64() * 1000.0;
+    if span.metadata().map(|m| *m.level()) == Some(tracing::Level::INFO) {
+        tracing::info!(parent: span, status, latency_ms, "http request completed");
+    } else {
+        tracing::debug!(parent: span, status, latency_ms, "http request completed");
+    }
+}
+
 /// Build the application [`Router`] serving `static_dir` at `/`.
 ///
 /// Layout:
@@ -307,12 +351,26 @@ pub fn build_router(static_dir: &Path, state: AppState) -> Router {
 
     let protected = auth::protected_routes(Arc::clone(&state.auth));
 
+    // QE-413 per-request tracing, applied to the `/api` router only (static-file serving stays
+    // quiet). Order is outermost→innermost: stamp `x-request-id` first (so the span and downstream
+    // handlers see it), open the trace span, then propagate the id onto the response.
+    let trace = ServiceBuilder::new()
+        .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(make_http_span)
+                .on_request(())
+                .on_response(on_http_response),
+        )
+        .layer(PropagateRequestIdLayer::x_request_id());
+
     let api = Router::new()
         .route("/health", get(health))
         .merge(auth::public_routes())
         .merge(protected)
         .fallback(api_not_found)
-        .with_state(state);
+        .with_state(state)
+        .layer(trace);
 
     Router::new()
         .nest("/api", api)

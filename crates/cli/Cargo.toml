@@ -22,6 +22,10 @@ name = "qe"
 path = "src/main.rs"
 
 [dependencies]
+# QE-413: initialise the tracing subscriber in `main` so the job pipeline's spans are recorded, and
+# emit top-level stage spans. Firewall-legal — `qe-cli` is a composition root; both are leaf/shared.
+qe-telemetry.workspace = true
+tracing.workspace = true
 qe-config.workspace = true
 qe-determinism.workspace = true
 qe-domain.workspace = true
