@@ -13,7 +13,7 @@ use std::str::FromStr;
 use qe_domain::{Direction, InstrumentId, Resolution, Timestamp};
 use qe_vintage::VintageRepository;
 use qe_wfo::backtest::{backtest_with_trades, BacktestConfig, TradeFill};
-use qe_wfo::friction::{FeeSchedule, FrictionConfig};
+use qe_wfo::friction::{FeeSchedule, FrictionConfig, SlippageModel};
 use qe_wfo::Genome;
 use rust_decimal::Decimal;
 
@@ -198,6 +198,15 @@ fn backtest_config(taker_fee_bps: f64) -> BacktestConfig {
     BacktestConfig {
         friction: FrictionConfig {
             fees,
+            // QE-403: the *selection* friction default now carries a non-zero size-impact, but the QE-251
+            // reporting backtest is parametrised by CLI flags (fees + a slippage-model *label*), not the
+            // selection model. Pin slippage explicitly so this reporting path keeps its prior numeric
+            // behaviour (impact off) — the golden is stable and unrelated to the selection change. Routing
+            // the reported impact through a CLI flag / the QE-128 capacity model is a follow-up.
+            slippage: SlippageModel {
+                impact: Decimal::ZERO,
+                ..SlippageModel::default()
+            },
             ..FrictionConfig::default()
         },
         ..BacktestConfig::default()

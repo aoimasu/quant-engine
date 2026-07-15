@@ -69,7 +69,12 @@ impl Default for SlippageModel {
     fn default() -> Self {
         SlippageModel {
             half_spread: Decimal::new(1, 4), // 0.0001 = 1bp half-spread
-            impact: Decimal::ZERO,           // off by default; opt-in size impact
+            // QE-403: a non-zero default size-impact so **selection** (the train search runs on
+            // `BacktestConfig::default().friction`) prices size-dependent slippage instead of ignoring it.
+            // Per unit qty, same order as the half-spread; the size term `notional·impact·qty` is quadratic
+            // in position size, so large-`size_bps`/high-turnover genomes pay more. Conservative default;
+            // override with an explicit `SlippageModel` where a different regime is warranted.
+            impact: Decimal::new(1, 4), // 0.0001
         }
     }
 }
@@ -308,11 +313,12 @@ mod tests {
         let events = vec![buy("1", "100"), sell("1", "100")];
         let pnl = simulate(&events, &FrictionConfig::default());
         assert_eq!(pnl.gross, Decimal::ZERO);
-        // fees = 2 × (100 × 0.0005) = 0.10; slippage = 2 × (100 × 0.0001) = 0.02.
+        // fees = 2 × (100 × 0.0005) = 0.10;
+        // slippage = 2 × (100 × (0.0001 half-spread + 0.0001 impact × 1 qty)) = 2 × (100 × 0.0002) = 0.04.
         assert_eq!(pnl.fees, d("0.10"));
-        assert_eq!(pnl.slippage, d("0.02"));
+        assert_eq!(pnl.slippage, d("0.04"));
         assert!(pnl.net() < Decimal::ZERO);
-        assert_eq!(pnl.net(), d("-0.12"));
+        assert_eq!(pnl.net(), d("-0.14"));
     }
 
     #[test]

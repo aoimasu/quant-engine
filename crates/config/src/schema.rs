@@ -97,6 +97,29 @@ pub struct DeterminismConfig {
     pub seed: u64,
 }
 
+/// Strategy-selection settings (QE-403 net-of-cost enforcement).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SelectionConfig {
+    /// Minimum fraction (`0.0..=1.0`) of the expected 8h funding stamps that must be present over the
+    /// training window before a vintage may be sealed. Below this the train job fails with an explicit
+    /// "funding coverage X%" error rather than selecting/validating/gating on funding-free returns. A
+    /// sensible default that tolerates minor ingest gaps but rejects an empty/sparse funding series.
+    #[serde(default = "default_funding_coverage_min")]
+    pub funding_coverage_min: f64,
+}
+
+impl Default for SelectionConfig {
+    fn default() -> Self {
+        Self {
+            funding_coverage_min: default_funding_coverage_min(),
+        }
+    }
+}
+
+fn default_funding_coverage_min() -> f64 {
+    0.90
+}
+
 /// One point-in-time universe member: an instrument with an optional `[listed, delisted)` window.
 ///
 /// `listed`/`delisted` are ISO `YYYY-MM-DD` (UTC midnight). An omitted `listed` means "since
@@ -114,7 +137,10 @@ pub struct UniverseMemberConfig {
 }
 
 /// Top-level resolved configuration.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Not `Eq`: `selection.funding_coverage_min` is an `f64` (QE-403). `PartialEq` is retained for tests;
+/// the reproducibility contract is [`crate::Config::content_hash`], not structural equality.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Config {
     /// Operating profile.
     #[serde(default = "default_profile")]
@@ -140,6 +166,9 @@ pub struct Config {
     /// Determinism settings.
     #[serde(default)]
     pub determinism: DeterminismConfig,
+    /// Strategy-selection settings (QE-403 funding-coverage gate).
+    #[serde(default)]
+    pub selection: SelectionConfig,
 }
 
 fn default_true() -> bool {

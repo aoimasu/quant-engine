@@ -53,6 +53,26 @@ const ENSEMBLE_GENERATIONS: usize = 12;
 /// pick from anyway.
 const MAX_POOL: usize = 10;
 
+/// Binance USDT-M funding cadence: one stamp every 8 hours (QE-403 coverage grid).
+const FUNDING_PERIOD_MS: i64 = 8 * 60 * 60 * 1_000;
+
+/// Funding coverage over a decision-bar series: `(present, expected)` where `present` counts bars carrying
+/// a funding stamp and `expected` is the number of 8h grid points spanning `[t_first, t_last]`
+/// (`floor(span / 8h) + 1`). Computed over the *actual* bar span (not the requested window, which can
+/// exceed the data on hand). Empty / single-bar inputs yield `expected = 1`.
+fn funding_coverage(bars: &[DecisionBar]) -> (usize, usize) {
+    let present = bars.iter().filter(|b| b.funding_rate.is_some()).count();
+    let expected = match (bars.first(), bars.last()) {
+        (Some(first), Some(last)) => {
+            let span = last.features.time_ms - first.features.time_ms;
+            let periods = span.max(0) / FUNDING_PERIOD_MS;
+            (periods as usize) + 1
+        }
+        _ => 1,
+    };
+    (present, expected.max(1))
+}
+
 /// Everything the [`run_train_job`] needs. Built by `main`/`lib` from a parsed `Command::Train` (+ the
 /// store/artefacts roots + the config-derived [`Lineage`]) and directly in tests (pointing at the
 /// committed fixtures).
@@ -82,6 +102,11 @@ pub struct TrainParams {
     pub holdout: usize,
     /// Embargo bars purged between the train window and the holdout.
     pub embargo: usize,
+    /// Minimum fraction (`0.0..=1.0`) of the expected 8h funding stamps that must be present over the
+    /// training window before a vintage may be sealed (QE-403). Below this the job fails with
+    /// [`RunError::FundingCoverage`] rather than selecting on funding-free returns. Sourced from
+    /// `config.selection.funding_coverage_min`.
+    pub funding_coverage_min: f64,
     /// The config-derived lineage (config hash + snapshot + code commit + seed). Its [`Lineage::id`] is
     /// the sealed vintage id — deterministic and independent of the stochastic search.
     pub lineage: Lineage,
@@ -135,6 +160,12 @@ pub struct TrainResultDoc {
     pub weights: Vec<f64>,
     /// The converged cross-validated robust-basin ensemble score.
     pub ensemble_score: f64,
+    /// Realised funding cashflow (signed) of the selected ensemble over the train window (QE-403
+    /// net-of-cost visibility). Weight-summed across chromosomes; unit starting capital per member.
+    pub funding_pnl: f64,
+    /// Realised funding as a fraction of the ensemble's net P&L over the train window (`funding_pnl /
+    /// net_pnl`; `0.0` when net P&L is zero). A funding-free run shows `0.0`, making the gap visible.
+    pub funding_fraction_of_net: f64,
     /// The robustness diagnostics (DSR / PBO / SPA).
     pub robustness: RobustnessReport,
     /// The recorded G1 decision (promotion verdict + per-criterion evidence).
@@ -200,6 +231,23 @@ pub fn run_train_job(
     );
     let schema = catalogue_schema();
     let decision_bars = to_decision_bars(&bars, &funding, &premium);
+
+    // ---- funding-coverage gate (QE-403) ----------------------------------------------------------
+    // Funding accrues only on bars carrying a stamp; a sparse/empty series would have every genome
+    // selected, DSR/SPA-assessed, and G1-gated on FUNDING-FREE returns — exactly the funding-negative
+    // strategies QE-109 exists to reject. Assert a minimum fraction of the expected 8h stamps over the
+    // actual bar span BEFORE the search, so an inadequate window errors rather than sealing.
+    let (present, expected) = funding_coverage(&decision_bars);
+    let funding_frac = present as f64 / expected as f64;
+    let floor = params.funding_coverage_min;
+    if funding_frac < floor {
+        return Err(RunError::FundingCoverage {
+            present,
+            expected,
+            coverage_pct: (funding_frac * 100.0).floor() as u32,
+            threshold_pct: (floor * 100.0).round() as u32,
+        });
+    }
 
     // The holdout is the final `holdout` bars; `embargo` purges the boundary so no train information
     // leaks into the untouched G1 slice.
@@ -291,6 +339,16 @@ pub fn run_train_job(
     // ---- validation + G1 gate --------------------------------------------------------------------
     let in_sample_returns = combine(&chromosomes, &weights, train_bars, &train_cfg);
     let holdout_returns = combine(&chromosomes, &weights, holdout_bars, &train_cfg);
+
+    // QE-403 net-of-cost visibility: realised funding of the selected ensemble over the train window, and
+    // its share of net P&L. A funding-free run reads 0.0 — visible in the sidecar QE-261 consumes.
+    let (funding_pnl, net_pnl) =
+        ensemble_funding_net(&chromosomes, &weights, train_bars, &train_cfg);
+    let funding_fraction_of_net = if net_pnl != 0.0 {
+        funding_pnl / net_pnl
+    } else {
+        0.0
+    };
     let n_trials = effective_trials(archive.occupied_cells(), generations, train_cfg.windows);
 
     let robustness =
@@ -364,6 +422,8 @@ pub fn run_train_job(
         selected,
         weights,
         ensemble_score: ens.score,
+        funding_pnl,
+        funding_fraction_of_net,
         robustness,
         g1,
     };
@@ -456,6 +516,26 @@ fn combine(
                 .sum()
         })
         .collect()
+}
+
+/// Weight-summed realised funding and net P&L of `genomes` over `bars` (each member backtested with unit
+/// starting capital), as `(funding_pnl, net_pnl)` in `f64`. Both are `Σ_c w_c · x_c`, so an equal-weight
+/// ensemble yields the mean per-member figure — the QE-403 funding-visibility inputs for the sidecar.
+fn ensemble_funding_net(
+    genomes: &[Genome],
+    weights: &[f64],
+    bars: &[DecisionBar],
+    cfg: &BacktestConfig,
+) -> (f64, f64) {
+    genomes
+        .iter()
+        .zip(weights.iter())
+        .fold((0.0, 0.0), |(f_acc, n_acc), (g, &w)| {
+            let res = backtest(g, bars, cfg);
+            let funding = res.funding.to_f64().unwrap_or(0.0);
+            let net = res.net_pnl.to_f64().unwrap_or(0.0);
+            (f_acc + w * funding, n_acc + w * net)
+        })
 }
 
 /// Assess robustness (DSR / PBO / SPA) for the candidate over the elite `pool`. Falls back to a

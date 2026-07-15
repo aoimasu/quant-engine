@@ -86,6 +86,26 @@ pub enum RunError {
     #[error("ensemble search selected no strategies")]
     EmptyEnsemble,
 
+    /// Funding coverage over the training window is below the configured floor (QE-403). Selecting,
+    /// validating, and G1-gating on funding-free returns would admit exactly the funding-negative
+    /// strategies QE-109 exists to reject, so the job refuses to seal.
+    #[error(
+        "funding coverage {coverage_pct}% over the training window is below the required \
+         {threshold_pct}% (present {present} of expected {expected} 8h stamps): refusing to seal on \
+         funding-free returns — ingest funding for this window (QE-103) or lower \
+         `selection.funding_coverage_min`"
+    )]
+    FundingCoverage {
+        /// Funding stamps actually present over the decision-bar span.
+        present: usize,
+        /// Expected 8h funding stamps over the decision-bar span.
+        expected: usize,
+        /// Realised coverage, as a whole-number percent (`present/expected`).
+        coverage_pct: u32,
+        /// The configured minimum coverage, as a whole-number percent.
+        threshold_pct: u32,
+    },
+
     /// A historical-source fetch/decode failure during ingest (the injectable `HistoricalSource`
     /// seam surfaced an error).
     #[error("ingest source failure: {0}")]
