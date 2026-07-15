@@ -259,7 +259,6 @@ Authoritative for the P0/P1 tickets below; later phases inherit unless a ticket 
 
 | Ticket | Title | Depends on | Status |
 |--------|-------|------------|:------:|
-| QE-401 | Seed the live drawdown breaker with the reconstructed committed-peak equity  *(P1 — capital safety)* | QE-210, QE-211, QE-212 | — |
 | QE-407 | Server run-lifecycle: graceful shutdown, supervised-task registry, honest success  *(P1)* · **extends QE-263/266** | QE-255 | — |
 
 ### R1.b — P2 (before wider exposure / load)
@@ -277,7 +276,7 @@ Authoritative for the P0/P1 tickets below; later phases inherit unless a ticket 
 
 | QE-428 | Route reported-backtest impact through the selection cost model / a CLI flag (QE-128) so reporting PnL matches selection  *(P3 — follow-up from QE-403 review)* | QE-403, QE-128 | — |
 
-| QE-429 | Wire `from_calibration` into the live evaluator/bootstrap (BreakerLayer from sealed `content.strategy_ids()`) + make capacity/calibration modelling constants per-run config  *(P2 — follow-up from QE-416 review; realizes the sealed calibration live)* | QE-416, QE-211, QE-212 | — |
+| QE-429 | Wire the live BreakerLayer at cutover: construct from sealed `content.strategy_ids()` calibration (`from_calibration`) AND call `seed_committed_peaks(&ReconstructedState)` before the first live tick + make capacity/calibration modelling constants per-run config  *(P2 — follow-up from QE-416 + QE-401 reviews; realizes the sealed calibration + committed-peak seed live)* | QE-416, QE-401, QE-211, QE-212 | — |
 
 ### R1.c — P3 (opportunistic quality)
 
