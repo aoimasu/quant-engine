@@ -1,7 +1,6 @@
-import { useEffect, useRef, useState } from 'react';
-import { Badge, Button, Callout, Card, Icon } from '../../design';
+import { Badge, Button, Callout, Card, Icon, RunProgress, StatusBadge } from '../../design';
 import { injectCss } from '../../design/injectCss';
-import { getRun, type RunMeta } from '../../api/runs';
+import { usePollingRun } from '../../api/usePollingRun';
 
 /* Composed from the ported design tokens/primitives (CSP-safe: injectCss, no runtime CDN). */
 const CSS = `
@@ -14,9 +13,6 @@ const CSS = `
 .qe-tm__stat .k { font: 500 10px var(--font-mono); text-transform: uppercase; letter-spacing: .08em; color: var(--text-muted); }
 .qe-tm__stat .v { font-family: var(--font-mono); font-variant-numeric: tabular-nums; font-size: 22px; font-weight: 600; color: var(--text-primary); }
 .qe-tm__stats { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; }
-.qe-run { display: flex; flex-direction: column; gap: 10px; }
-.qe-run__bar { height: 6px; background: var(--surface-inset); border-radius: var(--radius-full); overflow: hidden; }
-.qe-run__fill { height: 100%; background: var(--accent); transition: width 0.15s linear; }
 .qe-cov { display: flex; flex-direction: column; gap: 10px; }
 .qe-cov__row { display: flex; flex-direction: column; gap: 6px; }
 .qe-cov__lbl { display: flex; align-items: center; justify-content: space-between; font: 500 11px var(--font-mono); color: var(--text-tertiary); }
@@ -36,10 +32,6 @@ const CSS = `
 
 injectCss('qe-tm-css', CSS);
 
-/** Poll cadence while a run is queued/running (ms). */
-const POLL_MS = 2000;
-/** Consecutive poll failures tolerated before giving up with a fatal error (resilience). */
-const MAX_POLL_FAILURES = 4;
 /** Max coverage cells drawn per direction in the archive grid (visual cap; a `+N` note covers overflow). */
 const MAX_CELLS = 60;
 
@@ -48,35 +40,6 @@ const MINUS = '−';
 function fmt(v: number | null | undefined, digits = 3): string {
   if (v == null || !Number.isFinite(v)) return '—';
   return v < 0 ? `${MINUS}${Math.abs(v).toFixed(digits)}` : v.toFixed(digits);
-}
-
-function statusBadge(status: RunMeta['status']) {
-  switch (status) {
-    case 'succeeded':
-      return (
-        <Badge variant="up" dot>
-          SUCCEEDED
-        </Badge>
-      );
-    case 'running':
-      return (
-        <Badge variant="info" dot>
-          RUNNING
-        </Badge>
-      );
-    case 'queued':
-      return (
-        <Badge variant="neutral" dot>
-          QUEUED
-        </Badge>
-      );
-    case 'failed':
-      return (
-        <Badge variant="down" dot>
-          FAILED
-        </Badge>
-      );
-  }
 }
 
 /** One direction's occupied-cell strip of the MAP-Elites archive-coverage grid. */
@@ -108,7 +71,7 @@ export interface TrainingMonitorProps {
   onBack: () => void;
   /** Deep-link into the New-backtest flow for the sealed vintage id. */
   onBacktestVintage: (vintage: string) => void;
-  /** Poll cadence while queued/running (ms). Overridable for tests; defaults to {@link POLL_MS}. */
+  /** Poll cadence while queued/running (ms). Overridable for tests; the hook default applies otherwise. */
   pollMs?: number;
 }
 
@@ -119,57 +82,12 @@ export interface TrainingMonitorProps {
  * best-so-far fitness, and the G1 gate verdict. On completion it shows the verdict and links to the
  * produced vintage's backtest.
  */
-export function TrainingMonitor({ runId, onBack, onBacktestVintage, pollMs = POLL_MS }: TrainingMonitorProps) {
-  const [meta, setMeta] = useState<RunMeta | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [retrying, setRetrying] = useState(false);
-  const terminal = useRef(false);
-
-  useEffect(() => {
-    terminal.current = false;
-    setMeta(null);
-    setError(null);
-    setRetrying(false);
-
-    let cancelled = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    let failures = 0;
-
-    const tick = async () => {
-      try {
-        const m = await getRun(runId);
-        if (cancelled) return;
-        setMeta(m);
-        failures = 0;
-        setRetrying(false);
-        if (m.status === 'succeeded') {
-          terminal.current = true;
-          return; // terminal — stop polling
-        }
-        if (m.status === 'failed') {
-          terminal.current = true;
-          setError(m.error ?? 'The training run failed.');
-          return; // terminal
-        }
-        timer = setTimeout(tick, pollMs); // queued | running — keep polling
-      } catch (e) {
-        if (cancelled) return;
-        failures += 1;
-        if (failures > MAX_POLL_FAILURES) {
-          setError(e instanceof Error ? e.message : 'Failed to load the training run.');
-          return;
-        }
-        setRetrying(true);
-        timer = setTimeout(tick, pollMs);
-      }
-    };
-
-    void tick();
-    return () => {
-      cancelled = true;
-      if (timer) clearTimeout(timer);
-    };
-  }, [runId, pollMs]);
+export function TrainingMonitor({ runId, onBack, onBacktestVintage, pollMs }: TrainingMonitorProps) {
+  // Shared bounded-retry / terminal-stop polling (QE-410) — identical logic to the backtest result view.
+  const { meta, error, retrying } = usePollingRun(runId, {
+    pollMs,
+    failedFallback: 'The training run failed.',
+  });
 
   const running = meta != null && (meta.status === 'running' || meta.status === 'queued');
   // `train` (rich QE-261 progress) lives only on the `train` variant — narrow on the discriminated
@@ -196,7 +114,7 @@ export function TrainingMonitor({ runId, onBack, onBacktestVintage, pollMs = POL
       <div className="qe-tm__hd">
         <div className="qe-tm__title">
           <h2>Training run</h2>
-          {meta && statusBadge(meta.status)}
+          {meta && <StatusBadge status={meta.status} />}
           {gate && (
             <Badge variant={gate.promoted ? 'up' : 'down'}>{gate.promoted ? 'G1 PASS' : 'G1 FAIL'}</Badge>
           )}
@@ -224,34 +142,7 @@ export function TrainingMonitor({ runId, onBack, onBacktestVintage, pollMs = POL
         </Callout>
       )}
 
-      {running && meta && (
-        <Card>
-          <div className="qe-run">
-            <div
-              style={{
-                display: 'flex',
-                justifyContent: 'space-between',
-                fontFamily: 'var(--font-mono)',
-                fontSize: 12,
-                color: 'var(--text-secondary)',
-              }}
-            >
-              <span>{meta.progress.msg || `${meta.status}…`}</span>
-              <span>{`${meta.progress.pct}%`}</span>
-            </div>
-            <div className="qe-run__bar">
-              <div
-                className="qe-run__fill"
-                role="progressbar"
-                aria-valuenow={meta.progress.pct}
-                aria-valuemin={0}
-                aria-valuemax={100}
-                style={{ width: `${meta.progress.pct}%` }}
-              />
-            </div>
-          </div>
-        </Card>
-      )}
+      {running && meta && <RunProgress status={meta.status} progress={meta.progress} />}
 
       <div className="qe-tm__grid">
         <Card title="Evolution">

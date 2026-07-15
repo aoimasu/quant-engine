@@ -1,8 +1,8 @@
-import { useEffect, useState } from 'react';
-import { Badge, Button, Callout, Card, DataTable, Icon } from '../../design';
+import { Badge, Button, Callout, Card, DataTable, Icon, StatusBadge, formatRunDate } from '../../design';
 import type { Column } from '../../design';
 import { injectCss } from '../../design/injectCss';
-import { listRuns, isTrainRun, type RunStatus, type TrainRunMeta } from '../../api/runs';
+import { useRunListPolling } from '../../api/useRunListPolling';
+import type { RunListItem } from '../../api/runs';
 
 const CSS = `
 .qe-tl { max-width: var(--content-max); margin: 0 auto; padding: 24px; display: flex; flex-direction: column; gap: 16px; }
@@ -14,56 +14,25 @@ const CSS = `
 
 injectCss('qe-tl-css', CSS);
 
-function statusVariant(status: RunStatus): 'up' | 'info' | 'neutral' | 'down' {
-  switch (status) {
-    case 'succeeded':
-      return 'up';
-    case 'running':
-      return 'info';
-    case 'queued':
-      return 'neutral';
-    case 'failed':
-      return 'down';
-  }
-}
-
-function fmtDate(ms: number): string {
-  const d = new Date(ms);
-  const y = d.getUTCFullYear();
-  const m = String(d.getUTCMonth() + 1).padStart(2, '0');
-  const day = String(d.getUTCDate()).padStart(2, '0');
-  const hh = String(d.getUTCHours()).padStart(2, '0');
-  const mm = String(d.getUTCMinutes()).padStart(2, '0');
-  return `${y}-${m}-${day} ${hh}:${mm}`;
-}
-
 export interface TrainingListProps {
   onOpen: (id: string) => void;
   onNew: () => void;
+  /** Live-poll cadence while any row is queued/running (ms). Overridable for tests. */
+  pollMs?: number;
 }
 
-/** Training-runs list — the `type:"train"` rows from `GET /api/runs`. Row click opens the monitor. */
-export function TrainingList({ onOpen, onNew }: TrainingListProps) {
-  const [runs, setRuns] = useState<TrainRunMeta[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
+/**
+ * Training-runs list — the `type:"train"` rows from `GET /api/runs?type=train` (the slim QE-410
+ * projection). Polls live via {@link useRunListPolling} while any row is queued/running (so the
+ * `RUNNING {pct}%`, Generation, and G1 cells update without navigating) and stops once all rows are
+ * terminal. The window column reads the server's slim `label`; Generation/G1 read the live `train`
+ * progress; the heavy `params` are deferred to the monitor.
+ */
+export function TrainingList({ onOpen, onNew, pollMs }: TrainingListProps) {
+  const { runs: allRuns, error } = useRunListPolling({ type: 'train', pollMs });
+  const runs = allRuns?.filter((r) => r.type === 'train') ?? null;
 
-  useEffect(() => {
-    let cancelled = false;
-    listRuns()
-      .then((r) => {
-        // `isTrainRun` is a type-predicate, so the filtered array narrows to `TrainRunMeta[]` — the
-        // columns can read `params` (TrainParams) and `train` without a cast.
-        if (!cancelled) setRuns(r.filter(isTrainRun));
-      })
-      .catch((e) => {
-        if (!cancelled) setError(e instanceof Error ? e.message : 'Failed to load runs.');
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  const columns: Column<TrainRunMeta & Record<string, unknown>>[] = [
+  const columns: Column<RunListItem & Record<string, unknown>>[] = [
     {
       key: 'id',
       header: 'Run',
@@ -74,19 +43,13 @@ export function TrainingList({ onOpen, onNew }: TrainingListProps) {
       ),
     },
     {
-      key: 'window',
+      key: 'label',
       header: 'Window',
       render: (_v, row) => (
         <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-secondary)' }}>
-          {row.params.start} → {row.params.end}
+          {row.label || '—'}
         </span>
       ),
-    },
-    {
-      key: 'resolution',
-      header: 'Res',
-      align: 'num',
-      render: (_v, row) => row.params.resolution || '—',
     },
     {
       key: 'gen',
@@ -113,17 +76,13 @@ export function TrainingList({ onOpen, onNew }: TrainingListProps) {
     {
       key: 'status',
       header: 'Status',
-      render: (_v, row) => (
-        <Badge variant={statusVariant(row.status)} dot>
-          {row.status === 'running' ? `RUNNING ${row.progress.pct}%` : row.status.toUpperCase()}
-        </Badge>
-      ),
+      render: (_v, row) => <StatusBadge status={row.status} pct={row.progress.pct} />,
     },
     {
       key: 'created_ms',
       header: 'Created',
       align: 'num',
-      render: (v) => <span style={{ color: 'var(--text-tertiary)' }}>{fmtDate(Number(v))}</span>,
+      render: (v) => <span style={{ color: 'var(--text-tertiary)' }}>{formatRunDate(Number(v))}</span>,
     },
   ];
 
@@ -156,7 +115,7 @@ export function TrainingList({ onOpen, onNew }: TrainingListProps) {
         {runs != null && runs.length > 0 && (
           <DataTable
             columns={columns}
-            rows={runs as (TrainRunMeta & Record<string, unknown>)[]}
+            rows={runs as (RunListItem & Record<string, unknown>)[]}
             keyField="id"
             onRowClick={(row) => onOpen(row.id)}
           />

@@ -1,16 +1,15 @@
 import { useEffect, useRef, useState } from 'react';
-import { Badge, Button, Callout, Card, DataTable, Icon, Input, Pnl, Tabs, Tag } from '../../design';
+import { Badge, Button, Callout, Card, DataTable, Icon, Input, Pnl, RunProgress, StatusBadge, Tabs, Tag } from '../../design';
 import type { Column } from '../../design';
 import { injectCss } from '../../design/injectCss';
 import {
   ApiError,
   createRun,
-  getRun,
   getRunResult,
   type BacktestResult as ResultContract,
-  type RunMeta,
   type Trade,
 } from '../../api/runs';
+import { usePollingRun } from '../../api/usePollingRun';
 
 /* Layout CSS ported verbatim from the Claude Design "Quant Engine Design System"
    (ui_kits/strategy-research/BacktestResearch.jsx), then made data-driven. */
@@ -30,21 +29,12 @@ const CSS = `
 .qe-heat__cell { aspect-ratio: 1.4; border-radius: var(--radius-xs); display: flex; align-items: center; justify-content: center; font-size: 9px; color: rgba(255,255,255,0.85); }
 .qe-chart2 svg { display: block; width: 100%; }
 .qe-side-lbl { font: 500 10px var(--font-mono); text-transform: uppercase; letter-spacing: .08em; color: var(--text-muted); margin-bottom: 8px; }
-.qe-run { display: flex; flex-direction: column; gap: 10px; }
-.qe-run__bar { height: 6px; background: var(--surface-inset); border-radius: var(--radius-full); overflow: hidden; }
-.qe-run__fill { height: 100%; background: var(--accent); transition: width 0.1s linear; }
 .qe-bt__back { margin-bottom: 4px; }
 `;
 
 injectCss('qe-bt-css', CSS);
 
 const MONTHS = ['J', 'F', 'M', 'A', 'M', 'J', 'J', 'A', 'S', 'O', 'N', 'D'];
-
-/** Poll cadence while a run is queued/running (ms). */
-const POLL_MS = 2000;
-
-/** Consecutive poll failures tolerated before giving up with a fatal error (resilience). */
-const MAX_POLL_FAILURES = 4;
 
 const MINUS = '−'; // − typographic minus
 
@@ -112,42 +102,13 @@ function AreaChart({
   );
 }
 
-function statusBadge(status: RunMeta['status']) {
-  switch (status) {
-    case 'succeeded':
-      return (
-        <Badge variant="up" dot>
-          SUCCEEDED
-        </Badge>
-      );
-    case 'running':
-      return (
-        <Badge variant="info" dot>
-          RUNNING
-        </Badge>
-      );
-    case 'queued':
-      return (
-        <Badge variant="neutral" dot>
-          QUEUED
-        </Badge>
-      );
-    case 'failed':
-      return (
-        <Badge variant="down" dot>
-          FAILED
-        </Badge>
-      );
-  }
-}
-
 export interface BacktestResultProps {
   runId: string;
   /** Go back to the runs list. */
   onBack: () => void;
   /** Navigate to a freshly cloned run (Re-run). */
   onReRun: (newId: string) => void;
-  /** Poll cadence while queued/running (ms). Overridable for tests; defaults to {@link POLL_MS}. */
+  /** Poll cadence while queued/running (ms). Overridable for tests; the hook default applies otherwise. */
   pollMs?: number;
 }
 
@@ -157,75 +118,48 @@ export interface BacktestResultProps {
  * full contract; on failure it surfaces the error. Genome params are read-only (D1). "Re-run" clones
  * the run's params into a new POST.
  */
-export function BacktestResult({ runId, onBack, onReRun, pollMs = POLL_MS }: BacktestResultProps) {
-  const [meta, setMeta] = useState<RunMeta | null>(null);
+export function BacktestResult({ runId, onBack, onReRun, pollMs }: BacktestResultProps) {
+  // Shared bounded-retry / terminal-stop polling (QE-410); the backtest-specific result fetch below is
+  // keyed off the meta the hook exposes.
+  const { meta, error: pollError, retrying } = usePollingRun(runId, {
+    pollMs,
+    failedFallback: 'The backtest run failed.',
+  });
   const [result, setResult] = useState<ResultContract | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [retrying, setRetrying] = useState(false);
+  const [resultError, setResultError] = useState<string | null>(null);
   const [tab, setTab] = useState<'overview' | 'trades' | 'config'>('overview');
   const [rerunning, setRerunning] = useState(false);
   const [rerunError, setRerunError] = useState<string | null>(null);
   const resultFetched = useRef(false);
 
+  // Reset the result view when the run changes.
   useEffect(() => {
-    // Reset when the run changes.
     resultFetched.current = false;
-    setMeta(null);
     setResult(null);
-    setError(null);
-    setRetrying(false);
+    setResultError(null);
     setTab('overview');
+  }, [runId]);
 
+  // Once the run succeeds, fetch its full §8.1 result contract exactly once — the backtest-specific
+  // follow-on the shared polling hook deliberately leaves to the screen.
+  useEffect(() => {
+    if (meta?.status !== 'succeeded' || resultFetched.current) return;
+    resultFetched.current = true;
     let cancelled = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    // Consecutive poll failures (network/fetch). Reset only on a *fully* clean tick, so a run stuck
-    // erroring — e.g. a succeeded run whose result endpoint keeps failing — still hits the cap.
-    let failures = 0;
-
-    const tick = async () => {
-      try {
-        const m = await getRun(runId);
-        if (cancelled) return;
-        setMeta(m);
-        if (m.status === 'succeeded') {
-          if (!resultFetched.current) {
-            const r = await getRunResult(runId);
-            if (cancelled) return;
-            resultFetched.current = true;
-            setResult(r);
-          }
-          failures = 0;
-          setRetrying(false);
-          return; // terminal — stop polling
-        }
-        if (m.status === 'failed') {
-          setError(m.error ?? 'The backtest run failed.');
-          return; // terminal
-        }
-        // queued | running — a clean poll: reset the failure streak and keep polling.
-        failures = 0;
-        setRetrying(false);
-        timer = setTimeout(tick, pollMs);
-      } catch (e) {
-        if (cancelled) return;
-        // Resilience: a transient fetch error must not freeze the progress view. Keep polling up to a
-        // bounded streak, surfacing a non-fatal "retrying" note; only give up (fatal) past the cap.
-        failures += 1;
-        if (failures > MAX_POLL_FAILURES) {
-          setError(e instanceof Error ? e.message : 'Failed to load the run.');
-          return;
-        }
-        setRetrying(true);
-        timer = setTimeout(tick, pollMs);
-      }
-    };
-
-    void tick();
+    getRunResult(runId)
+      .then((r) => {
+        if (!cancelled) setResult(r);
+      })
+      .catch((e) => {
+        if (!cancelled) setResultError(e instanceof Error ? e.message : 'Failed to load the result.');
+      });
     return () => {
       cancelled = true;
-      if (timer) clearTimeout(timer);
     };
-  }, [runId, pollMs]);
+  }, [meta?.status, runId]);
+
+  // A failed run's reason (or a fatal poll error) and a result-fetch error surface in the same banner.
+  const error = pollError ?? resultError;
 
   const reRun = async () => {
     if (!meta || rerunning) return;
@@ -307,7 +241,7 @@ export function BacktestResult({ runId, onBack, onReRun, pollMs = POLL_MS }: Bac
             <div>
               <div className="qe-bt__title">
                 <h2>{title}</h2>
-                {meta && statusBadge(meta.status)}
+                {meta && <StatusBadge status={meta.status} />}
                 {result && <Badge variant="neutral">{result.strategy.tags.join(' · ')}</Badge>}
               </div>
               {result && (
@@ -343,34 +277,7 @@ export function BacktestResult({ runId, onBack, onReRun, pollMs = POLL_MS }: Bac
             </Callout>
           )}
 
-          {running && meta && (
-            <Card>
-              <div className="qe-run">
-                <div
-                  style={{
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    fontFamily: 'var(--font-mono)',
-                    fontSize: 12,
-                    color: 'var(--text-secondary)',
-                  }}
-                >
-                  <span>{meta.progress.msg || `${meta.status}…`}</span>
-                  <span>{`${meta.progress.pct}%`}</span>
-                </div>
-                <div className="qe-run__bar">
-                  <div
-                    className="qe-run__fill"
-                    role="progressbar"
-                    aria-valuenow={meta.progress.pct}
-                    aria-valuemin={0}
-                    aria-valuemax={100}
-                    style={{ width: `${meta.progress.pct}%` }}
-                  />
-                </div>
-              </div>
-            </Card>
-          )}
+          {running && meta && <RunProgress status={meta.status} progress={meta.progress} />}
 
           {error && (
             <Callout variant="danger" title="Backtest failed">

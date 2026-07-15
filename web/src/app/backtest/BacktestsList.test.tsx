@@ -2,67 +2,46 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { BacktestsList } from './BacktestsList';
-import type { BacktestRunMeta, RunMeta, TrainRunMeta } from '../../api/runs';
+import type { RunListItem } from '../../api/runs';
 
-function meta(over: Partial<BacktestRunMeta>): RunMeta {
+/** A slim `type:"backtest"` list row (the QE-410 projection `GET /api/runs` returns). */
+function item(over: Partial<RunListItem>): RunListItem {
   return {
     id: 'run-aaaaaaaa-1',
     type: 'backtest',
+    label: 'v-2024-q4',
     status: 'succeeded',
-    params: {
-      vintage: 'v-2024-q4',
-      start: '2021-01-01',
-      end: '2024-12-31',
-      resolution: '1h',
-      universe: ['BTCUSDT'],
-      taker_fee_bps: 2,
-      slippage_model: 'square-root-impact',
-    },
     progress: { pct: 100, stage: 'report', msg: 'Scoring' },
     created_ms: 1_700_000_000_000,
-    started_ms: 1_700_000_001_000,
-    finished_ms: 1_700_000_002_000,
-    exit: 0,
-    error: null,
-    artifacts: ['result.json'],
     ...over,
   };
 }
 
-/** A `type:"train"` run — the kind that must NOT leak into the Backtests table (QE-408). */
-function trainMeta(over: Partial<TrainRunMeta>): RunMeta {
+/** A slim `type:"train"` row — the kind that must NOT leak into the Backtests table (QE-408). */
+function trainItem(over: Partial<RunListItem>): RunListItem {
   return {
     id: 'train-zzzzzzzz-9',
     type: 'train',
+    label: 'train 2019-06-06→2019-09-09',
     status: 'succeeded',
-    params: {
-      start: '2019-06-06',
-      end: '2019-09-09',
-      resolution: '4h',
-    },
     progress: { pct: 100, stage: 'done', msg: 'Sealed' },
     created_ms: 1_700_000_003_000,
-    started_ms: 1_700_000_004_000,
-    finished_ms: 1_700_000_005_000,
-    exit: 0,
-    error: null,
-    artifacts: ['result.json'],
     ...over,
   };
 }
 
-// Match on the `/api/runs` pathname (query-agnostic) so the `?type=backtest` the list now sends still
-// resolves; the mock deliberately returns the SAME payload regardless of the query so a test can prove
-// the client-side `isBacktestRun` filter (defense-in-depth), not just the server filter.
-function mockRuns(runs: RunMeta[]) {
+/** A `GET /api/runs` page envelope from a set of slim rows (query-agnostic path match). */
+function page(rows: RunListItem[], nextCursor: string | null = null) {
+  return new Response(JSON.stringify({ runs: rows, next_cursor: nextCursor }), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
+
+function mockRuns(rows: RunListItem[]) {
   return vi.fn(async (input: RequestInfo | URL) => {
     const url = typeof input === 'string' ? input : input.toString();
-    if (new URL(url, 'http://localhost').pathname === '/api/runs') {
-      return new Response(JSON.stringify(runs), {
-        status: 200,
-        headers: { 'Content-Type': 'application/json' },
-      });
-    }
+    if (new URL(url, 'http://localhost').pathname === '/api/runs') return page(rows);
     return new Response(null, { status: 404 });
   });
 }
@@ -70,19 +49,24 @@ function mockRuns(runs: RunMeta[]) {
 describe('BacktestsList', () => {
   afterEach(() => vi.restoreAllMocks());
 
-  it('renders rows from GET /api/runs (vintage, window, status)', async () => {
-    vi.stubGlobal('fetch', mockRuns([meta({}), meta({ id: 'run-bbbb', status: 'running', progress: { pct: 42, stage: 'simulate', msg: '…' } })]));
+  it('renders rows from the slim GET /api/runs page (vintage label, live status/percent)', async () => {
+    vi.stubGlobal(
+      'fetch',
+      mockRuns([
+        item({}),
+        item({ id: 'run-bbbb', status: 'running', progress: { pct: 42, stage: 'simulate', msg: '…' } }),
+      ]),
+    );
     render(<BacktestsList onOpen={() => {}} onNew={() => {}} />);
 
     expect((await screen.findAllByText('v-2024-q4')).length).toBe(2);
-    expect(screen.getAllByText(/2021-01-01 → 2024-12-31/).length).toBe(2);
     expect(screen.getByText('SUCCEEDED')).toBeInTheDocument();
     expect(screen.getByText('RUNNING 42%')).toBeInTheDocument();
   });
 
   it('opens a run on row click', async () => {
     const onOpen = vi.fn();
-    vi.stubGlobal('fetch', mockRuns([meta({ id: 'run-xyz' })]));
+    vi.stubGlobal('fetch', mockRuns([item({ id: 'run-xyz' })]));
     render(<BacktestsList onOpen={onOpen} onNew={() => {}} />);
     await userEvent.click(await screen.findByText('v-2024-q4'));
     expect(onOpen).toHaveBeenCalledWith('run-xyz');
@@ -90,12 +74,11 @@ describe('BacktestsList', () => {
 
   it('renders only backtest rows from a mixed payload; no training run is reachable (QE-408)', async () => {
     const onOpen = vi.fn();
-    // A mixed `listRuns` response: one backtest, one training run. The training run must not leak.
     vi.stubGlobal(
       'fetch',
       mockRuns([
-        meta({ id: 'bktst-11-aaaa', params: { ...meta({}).params, vintage: 'v-keeper' } as BacktestRunMeta['params'] }),
-        trainMeta({ id: 'train-99-bbbb' }),
+        item({ id: 'bktst-11-aaaa', label: 'v-keeper' }),
+        trainItem({ id: 'train-99-bbbb' }),
       ]),
     );
     render(<BacktestsList onOpen={onOpen} onNew={() => {}} />);
@@ -104,16 +87,13 @@ describe('BacktestsList', () => {
     expect(await screen.findByText('v-keeper')).toBeInTheDocument();
     expect(screen.getByText('bktst-11')).toBeInTheDocument();
 
-    // …and the training run is filtered out entirely — its id, its distinctive window, and its
-    // resolution are all absent, so there is nothing to click through to a 409/404 result screen.
+    // …and the training run is filtered out entirely — its id and distinctive label are absent.
     expect(screen.queryByText('train-99')).not.toBeInTheDocument();
-    expect(screen.queryByText(/2019-06-06 → 2019-09-09/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/2019-06-06→2019-09-09/)).not.toBeInTheDocument();
 
-    // Exactly one data row is rendered (one <tbody> row).
-    const bodyRows = document.querySelectorAll('tbody tr');
-    expect(bodyRows.length).toBe(1);
+    // Exactly one data row is rendered.
+    expect(document.querySelectorAll('tbody tr').length).toBe(1);
 
-    // Clicking the only row opens the backtest — the training run is never reachable.
     await userEvent.click(screen.getByText('v-keeper'));
     expect(onOpen).toHaveBeenCalledExactlyOnceWith('bktst-11-aaaa');
     expect(onOpen).not.toHaveBeenCalledWith('train-99-bbbb');
@@ -126,5 +106,41 @@ describe('BacktestsList', () => {
     await waitFor(() => expect(screen.getByText(/no backtests yet/i)).toBeInTheDocument());
     await userEvent.click(screen.getByRole('button', { name: /new backtest/i }));
     expect(onNew).toHaveBeenCalledOnce();
+  });
+
+  it('live-refreshes a running row and stops polling once it is terminal (QE-410)', async () => {
+    // The list polls `GET /api/runs` while any row is queued/running: the running row's percent
+    // advances on the next poll, and once it reaches a terminal status the list stops fetching.
+    let phase: 'running-42' | 'running-73' | 'done' = 'running-42';
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      if (new URL(url, 'http://localhost').pathname !== '/api/runs') {
+        return new Response(null, { status: 404 });
+      }
+      const pct = phase === 'running-42' ? 42 : phase === 'running-73' ? 73 : 100;
+      const status = phase === 'done' ? 'succeeded' : 'running';
+      return page([
+        item({ id: 'run-live', status, progress: { pct, stage: 'simulate', msg: '…' } }),
+      ]);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(<BacktestsList onOpen={() => {}} onNew={() => {}} pollMs={15} />);
+
+    // First poll: 42% while running.
+    expect(await screen.findByText('RUNNING 42%')).toBeInTheDocument();
+
+    // Next poll picks up the advanced percent WITHOUT any navigation.
+    phase = 'running-73';
+    expect(await screen.findByText('RUNNING 73%')).toBeInTheDocument();
+
+    // Terminal: the row settles and polling stops (no further fetches after it is drawn).
+    phase = 'done';
+    expect(await screen.findByText('SUCCEEDED')).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByText(/RUNNING/)).not.toBeInTheDocument());
+
+    const callsAfterTerminal = fetchMock.mock.calls.length;
+    await new Promise((r) => setTimeout(r, 60)); // ~4 poll intervals
+    expect(fetchMock.mock.calls.length).toBe(callsAfterTerminal);
   });
 });
