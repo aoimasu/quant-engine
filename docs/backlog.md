@@ -220,13 +220,87 @@ Authoritative for the P0/P1 tickets below; later phases inherit unless a ticket 
 
 | Ticket | Title | Depends on | Status |
 |--------|-------|------------|:------:|
-| [QE-262](./mds/tickets/QE-262.md) | Persist catalogue version + states in the vintage; assert on load  *(P1 — correctness)* | QE-260, QE-251 | — |
-| [QE-263](./mds/tickets/QE-263.md) | Run-store startup reconciler for orphaned `running` runs  *(P2)* | QE-255 | — |
-| [QE-264](./mds/tickets/QE-264.md) | Enrich read APIs for the admin UI (vintage symbol roster + run metrics summary)  *(P2 — UX completeness)* | QE-257, QE-259 | — |
-| [QE-265](./mds/tickets/QE-265.md) | Auth hardening: OIDC `nonce` + local JWKS/RS256 verification  *(P2 — security defense-in-depth)* | QE-256 | — |
-| [QE-266](./mds/tickets/QE-266.md) | qe-server non-blocking I/O + run-supervision robustness nits  *(P3 — quality/scale)* | QE-255, QE-257 | — |
+| [QE-262](./mds/tickets/QE-262.md) | Persist catalogue version + states in the vintage; assert on load  *(P1 — correctness)* · **→ superseded by [QE-402](#review-r1)** (widened to the schema-registry umbrella) | QE-260, QE-251 | — |
+| [QE-263](./mds/tickets/QE-263.md) | Run-store startup reconciler for orphaned `running` runs  *(P2)* · **→ extended by [QE-407](#review-r1)** (adds the graceful-shutdown / task-registry half) | QE-255 | — |
+| [QE-264](./mds/tickets/QE-264.md) | Enrich read APIs for the admin UI (vintage symbol roster + run metrics summary)  *(P2 — UX completeness)* · *see [QE-410](#review-r1)* (list projection/pagination — coordinate response shape) | QE-257, QE-259 | — |
+| [QE-265](./mds/tickets/QE-265.md) | Auth hardening: OIDC `nonce` + local JWKS/RS256 verification  *(P2 — security defense-in-depth)* · *adjacent to [QE-409](#review-r1)* (SPA 401→re-auth, logout, dev-safe cookies) | QE-256 | — |
+| [QE-266](./mds/tickets/QE-266.md) | qe-server non-blocking I/O + run-supervision robustness nits  *(P3 — quality/scale)* · **→ extended by [QE-407](#review-r1) + [QE-411](#review-r1)** (honest success + `list_runs` N-reads) | QE-255, QE-257 | — |
 | [QE-267](./mds/tickets/QE-267.md) | Enforce the no-`unwrap` convention with `clippy::unwrap_used = "deny"`  *(P3 — quality/hardening)* | — | ✅ |
 | [QE-268](./mds/tickets/QE-268.md) | Extend the panic-freedom `deny` attribute from the demonstrator to the live order-emission path  *(P2 — live-trading safety)* | QE-267 | ✅ |
+
+---
+
+<a id="review-r1"></a>
+# Review R1 — Cross-cutting hardening & refactor (QE-4xx)
+
+> **Provenance.** A four-discipline improvement/refactor review (Senior Frontend, Senior Backend,
+> Trading Expert, Architect) on 2026-07-15. Findings, evidence (`file:line`), and the facilitated
+> synthesis — including the discussion outcomes and per-ticket cross-domain flags — are in
+> [`docs/reviews/2026-07-15-team-improvement-review.md`](./reviews/2026-07-15-team-improvement-review.md).
+>
+> **Band.** The phase bands (1xx–3xx) and the PreP3 25x/26x band are full, so these cross-cutting
+> items use a dedicated **QE-4xx "review / hardening"** band. They are not new spec features and do
+> not change the P0–P2 gates. Priority tags follow the house convention (**P1** correctness/safety ·
+> **P2** before wider exposure/load · **P3** opportunistic quality).
+>
+> **Numbering reconciliation with the open PreP3 follow-ups** (no duplicate IDs — the 4xx ticket owns
+> the widened work, the 26x row is annotated above):
+>
+> | 4xx | relation | existing open ticket |
+> |-----|----------|----------------------|
+> | QE-402 | **supersedes** | QE-262 (catalogue version → schema-registry umbrella) |
+> | QE-407 | **extends** | QE-263 (startup reconciler → + shutdown/task-registry) & QE-266 (honest success) |
+> | QE-411 | **extends** | QE-266 (non-blocking I/O → `list_runs` N-reads) |
+> | QE-409 | **adjacent** | QE-265 (auth hardening) |
+> | QE-410 | **coordinate** | QE-264 (read-API enrichment / list shape) |
+> | QE-421 | **complements** | QE-268 (panic-freedom → error-recoverability taxonomy) |
+
+### R1.a — P1 (lead the queue: before trusting output / before live capital)
+
+| Ticket | Title | Depends on | Status |
+|--------|-------|------------|:------:|
+| QE-401 | Seed the live drawdown breaker with the reconstructed committed-peak equity  *(P1 — capital safety)* | QE-210, QE-211, QE-212 | — |
+| QE-402 | Pin catalogue identity in the vintage & assert exact schema match on load  *(P1 — correctness)* · **supersedes QE-262** | QE-129, QE-260 | — |
+| QE-403 | Net-of-cost truth: funding-coverage gate + non-zero size-impact in selection  *(P1 — correctness)* | QE-103, QE-109, QE-128 | — |
+| QE-404 | CI must build/lint/test the feature-gated code (`http` / `arrow`)  *(P1 — safety gate)* | — | — |
+| QE-405 | Extend the firewall guard: `qe-runtime` / `qe-vintage` ⊬ training crates  *(P1 — invariant)* | QE-132 | — |
+| QE-406 | Single-source the CLI ↔ server ↔ SPA run protocol (`qe-run-protocol` + version + agreement test)  *(P1 — contract)* | QE-255, QE-261 | — |
+| QE-407 | Server run-lifecycle: graceful shutdown, supervised-task registry, honest success  *(P1)* · **extends QE-263/266** | QE-255 | — |
+
+### R1.b — P2 (before wider exposure / load)
+
+| Ticket | Title | Depends on | Status |
+|--------|-------|------------|:------:|
+| QE-408 | Backtests list must filter to backtest runs (client filter + server `?type=`)  *(P2 — correctness)* | QE-259 | — |
+| QE-409 | Auth completeness: SPA 401→re-auth, logout endpoint, dev-safe cookies, fail-closed secret  *(P2)* · *adjacent QE-265* | QE-256 | — |
+| QE-410 | Run-list read path: shared polling hook, live list refresh, server pagination/projection/filter  *(P2)* · *coordinate QE-264* | QE-255, QE-259 | — |
+| QE-411 | Take run-store / read blocking `std::fs` off the async executor  *(P2)* · **extends QE-266** | QE-255 | — |
+| QE-412 | Coverage query without full `Bar` decode (key-only LMDB cursor)  *(P2 — efficiency)* | QE-253, QE-257 | — |
+| QE-413 | Observability: env-driven telemetry, per-request tracing, CLI telemetry init  *(P2)* | QE-003, QE-254 | — |
+| QE-414 | Deflated-Sharpe trial variance from the full trial population, not the selected top-N  *(P2 — validation rigor)* | QE-131 | — |
+| QE-415 | Wire the purged/embargoed CV into selection fitness (exists but unused)  *(P2 — leakage)* | QE-117, QE-113 | — |
+| QE-416 | Seal capacity-weighted allocation + worst-case-loss + real breaker calibration  *(P2)* | QE-128, QE-130, QE-116 | — |
+| QE-417 | Time-aware mark EMA (gap-aware) for the drawdown-breaker feed  *(P2 — runtime-risk)* | QE-202, QE-208 | — |
+| QE-418 | Pre-trade gross cap checked against true gross exposure, not net notional  *(P2 — risk)* | QE-213, QE-215 | — |
+| QE-419 | Unify config: single source of truth for storage dirs across server + spawned CLI  *(P2)* | QE-002, QE-254 | — |
+| QE-420 | Real code-commit provenance in vintage lineage (build-time git SHA)  *(P2 — determinism)* | QE-006, QE-013 | — |
+
+### R1.c — P3 (opportunistic quality)
+
+| Ticket | Title | Depends on | Status |
+|--------|-------|------------|:------:|
+| QE-421 | Adopt the `qe-error` recoverability taxonomy on the runtime order path  *(P3)* · *complements QE-268* | QE-268 | — |
+| QE-422 | Keyboard / screen-reader access for clickable table rows and universe chips  *(P3 — a11y)* | QE-258 | — |
+| QE-423 | `DataTable` generic typing — drop the `Record<string, unknown>` casts  *(P3 — type-safety)* | QE-258 | — |
+| QE-424 | Frontend resilience: error boundary + tests for the list/401/deep-link seams  *(P3)* | QE-259, QE-261 | — |
+| QE-425 | Harden the axum router: request timeout, body cap, concurrency limit  *(P3)* | QE-254 | — |
+| QE-426 | Split the `qe-runtime` god-crate along the spec's process seams  *(P3 — refactor)* · **blocked by QE-401/417/418** | QE-401, QE-417, QE-418 | — |
+| QE-427 | Container/deploy path for the admin server + SPA; fail closed  *(P3 — deployment)* | QE-013, QE-254, QE-258 | — |
+
+> **Suggested first slice:** the small high-leverage guards **QE-402, QE-403, QE-404, QE-405** and the
+> trading correctness P1s **QE-401, QE-414, QE-415, QE-416**; land the tri-team contract **QE-406**
+> early because QE-408/409/410/424 depend on its shape; defer **QE-426** until after the runtime
+> correctness fixes.
 
 ---
 
