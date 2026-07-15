@@ -194,7 +194,7 @@ export function BacktestResult({ runId, onBack, onReRun, pollMs }: BacktestResul
   const btParams = meta?.type === 'backtest' ? meta.params : undefined;
   const title = result?.strategy.name ?? btParams?.vintage ?? runId;
 
-  const tradeCols: Column<Trade & Record<string, unknown>>[] = [
+  const tradeCols: Column<Trade>[] = [
     {
       key: 'id',
       header: 'Trade',
@@ -368,7 +368,7 @@ export function BacktestResult({ runId, onBack, onReRun, pollMs }: BacktestResul
                   )}
                   {tab === 'trades' && (
                     <div style={{ margin: -16 }}>
-                      <DataTable columns={tradeCols} rows={result.trades as (Trade & Record<string, unknown>)[]} keyField="id" />
+                      <DataTable columns={tradeCols} rows={result.trades} keyField="id" />
                     </div>
                   )}
                   {tab === 'config' && (

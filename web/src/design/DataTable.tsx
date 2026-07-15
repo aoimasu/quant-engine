@@ -16,9 +16,6 @@ const CSS = `
 }
 .qe-table th.is-num, .qe-table td.is-num { text-align: right; font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 .qe-table th.is-center, .qe-table td.is-center { text-align: center; }
-.qe-table th.is-sortable { cursor: pointer; }
-.qe-table th.is-sortable:hover { color: var(--text-secondary); }
-.qe-table__sort { opacity: 0.5; margin-left: 4px; font-size: 9px; }
 .qe-table tbody td {
   padding: 10px var(--pad-cell); border-bottom: var(--border-w) solid var(--border-subtle);
   color: var(--text-primary); white-space: nowrap;
@@ -39,19 +36,48 @@ injectCss('qe-table-css', CSS);
 
 export type ColumnAlign = 'left' | 'right' | 'num' | 'center';
 
-export interface Column<Row> {
-  key: string;
+interface ColumnBase {
   header: ReactNode;
   align?: ColumnAlign;
   width?: string | number;
-  render?: (value: unknown, row: Row, index: number) => ReactNode;
 }
 
-export interface DataTableProps<Row extends Record<string, unknown>>
+/**
+ * A column bound to a real key `K` of `Row`. `key` is constrained to `keyof Row & string`, so a typo is
+ * a compile error (QE-423 AC), and `render` receives the correctly-typed cell value `Row[K]` (not
+ * `unknown`). With no `render`, the cell renders `row[key]` directly.
+ */
+type KeyedColumn<Row, K extends keyof Row & string> = ColumnBase & {
+  key: K;
+  id?: never;
+  render?: (value: Row[K], row: Row, index: number) => ReactNode;
+};
+
+/**
+ * A derived/computed column with no backing key — identified by a stable `id` (used only for the React
+ * key on `<th>`/`<td>`) and rendered from the whole `row` (`value` is always `undefined`). Use this for
+ * cells that don't map to a single `Row` field (e.g. a value read from a nested/optional sub-object).
+ */
+type DerivedColumn<Row> = ColumnBase & {
+  key?: never;
+  id: string;
+  render: (value: undefined, row: Row, index: number) => ReactNode;
+};
+
+/**
+ * A `DataTable` column: either a {@link KeyedColumn} for each real key of `Row` (distributive union, so
+ * `render`'s value is exactly `Row[key]` and a non-existent key fails to compile) or a
+ * {@link DerivedColumn} for computed cells.
+ */
+export type Column<Row> =
+  | { [K in keyof Row & string]: KeyedColumn<Row, K> }[keyof Row & string]
+  | DerivedColumn<Row>;
+
+export interface DataTableProps<Row>
   extends Omit<HTMLAttributes<HTMLDivElement>, 'children'> {
   columns?: Column<Row>[];
   rows?: Row[];
-  keyField?: string;
+  keyField?: keyof Row & string;
   hover?: boolean;
   striped?: boolean;
   compact?: boolean;
@@ -59,7 +85,7 @@ export interface DataTableProps<Row extends Record<string, unknown>>
 }
 
 /** DataTable — configurable dense table for positions, orders, results. */
-export function DataTable<Row extends Record<string, unknown>>({
+export function DataTable<Row>({
   columns = [],
   rows = [],
   keyField,
@@ -87,7 +113,7 @@ export function DataTable<Row extends Record<string, unknown>>({
           <tr>
             {columns.map((c) => (
               <th
-                key={c.key}
+                key={String(c.key ?? c.id)}
                 className={alignCls(c.align)}
                 style={c.width ? { width: c.width } : undefined}
               >
@@ -118,11 +144,22 @@ export function DataTable<Row extends Record<string, unknown>>({
                   : undefined
               }
             >
-              {columns.map((c) => (
-                <td key={c.key} className={alignCls(c.align)}>
-                  {c.render ? c.render(row[c.key], row, i) : (row[c.key] as ReactNode)}
-                </td>
-              ))}
+              {columns.map((c) => {
+                // Keyed column → the cell value is `row[key]` (typed `Row[key]`); a derived column has
+                // no backing key, so its value is `undefined` and it renders from `row`.
+                const value = c.key !== undefined ? row[c.key] : undefined;
+                // `Column<Row>` is a union of per-key render signatures; a single `value` cannot satisfy
+                // all of them at once, so invoke through one localized unifying cast. Call-site typing
+                // stays precise — this cast is confined to the generic component (QE-423).
+                const render = c.render as
+                  | ((value: unknown, row: Row, index: number) => ReactNode)
+                  | undefined;
+                return (
+                  <td key={String(c.key ?? c.id)} className={alignCls(c.align)}>
+                    {render ? render(value, row, i) : (value as ReactNode)}
+                  </td>
+                );
+              })}
             </tr>
           ))}
         </tbody>
