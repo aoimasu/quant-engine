@@ -2,7 +2,8 @@
  * Runs / vintages / market-data API client — the QE-259 backtest screens talk to
  * the session-gated, same-origin qe-server (QE-255 run lifecycle, QE-257 read APIs).
  *
- *   GET  /api/runs                 → RunMeta[] (newest first)
+ *   GET  /api/runs                 → { runs: RunListItem[], next_cursor } (QE-410 slim page, newest
+ *                                    first; wire `next_cursor` is mapped to `nextCursor` client-side)
  *   POST /api/runs                 → 201 { id } | 400 { error }
  *   GET  /api/runs/:id             → RunMeta (status + progress) | 404
  *   GET  /api/runs/:id/result      → BacktestResult (§8.1) | 409 (not ready) | 404
@@ -292,7 +293,9 @@ export async function listRuns(query: RunListQuery = {}): Promise<RunPage> {
   const params = new URLSearchParams();
   if (query.type) params.set('type', query.type);
   if (query.status) params.set('status', query.status);
-  if (query.limit != null) params.set('limit', String(query.limit));
+  // Only forward a positive limit; a non-positive value is nonsensical on the wire (the server would
+  // clamp it to 1 anyway), so omit it and let the server default apply.
+  if (query.limit != null && query.limit > 0) params.set('limit', String(query.limit));
   if (query.cursor) params.set('cursor', query.cursor);
   const qs = params.toString();
   const wire = await getJson<RunPageWire>(qs ? `/api/runs?${qs}` : '/api/runs');
