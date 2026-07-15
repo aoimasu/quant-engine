@@ -18,8 +18,14 @@ const CSS = `
 .qe-new__row { display: flex; flex-direction: column; gap: 6px; }
 .qe-new__lbl { font-family: var(--font-sans); font-size: var(--fs-sm); font-weight: var(--fw-medium); color: var(--text-secondary); }
 .qe-new__uni { display: flex; gap: 6px; flex-wrap: wrap; }
-.qe-new__chip { cursor: pointer; }
+.qe-new__chip { display: inline-flex; cursor: pointer; border-radius: var(--radius-sm); }
 .qe-new__chip--off { opacity: 0.45; }
+/* Visually-hidden but still focusable native checkbox (QE-422): NOT display:none. */
+.qe-new__chip-input {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+.qe-new__chip:focus-within { box-shadow: var(--ring); }
 .qe-new__hint { font-size: var(--fs-caption); color: var(--text-muted); margin-top: 2px; }
 .qe-new__actions { display: flex; justify-content: flex-end; gap: 10px; }
 `;
@@ -206,18 +212,30 @@ export function NewBacktest({ onCreated, onCancel, initialVintage }: NewBacktest
                 <div className="qe-new__uni" role="group" aria-label="Universe symbols">
                   {symbols.map((s) => {
                     const on = selected.has(s);
+                    // Real focusable checkbox (QE-422): the visual `Tag` is decorative; a
+                    // native <input type="checkbox"> carries the role/checked/label and
+                    // keyboard toggling. `Tag` itself stays a non-interactive label.
                     return (
-                      <Tag
+                      <label
                         key={s}
-                        mono
                         className={`qe-new__chip ${on ? '' : 'qe-new__chip--off'}`}
-                        role="checkbox"
-                        aria-checked={on}
-                        aria-label={s}
-                        onClick={() => toggleSymbol(s)}
                       >
-                        {s}
-                      </Tag>
+                        <input
+                          type="checkbox"
+                          className="qe-new__chip-input"
+                          checked={on}
+                          aria-label={s}
+                          onChange={() => toggleSymbol(s)}
+                          onKeyDown={(e) => {
+                            // Native checkboxes toggle on Space; also honor Enter.
+                            if (e.key === 'Enter') {
+                              e.preventDefault();
+                              toggleSymbol(s);
+                            }
+                          }}
+                        />
+                        <Tag mono>{s}</Tag>
+                      </label>
                     );
                   })}
                 </div>

@@ -100,6 +100,58 @@ describe('NewBacktest', () => {
     expect(screen.getByText(/v1 backtests the first selected symbol \(BTCUSDT\)/i)).toBeInTheDocument();
   });
 
+  it('exposes universe chips as real checkboxes and toggles one via keyboard (QE-422)', async () => {
+    vi.stubGlobal(
+      'fetch',
+      mockApi(() => json({ id: 'x' }, 201)),
+    );
+    render(<NewBacktest onCreated={() => {}} onCancel={() => {}} />);
+    await waitFor(() => expect(screen.getByLabelText('Vintage')).toHaveValue('v-2024-q4'));
+
+    // Each chip announces as a checkbox named by its symbol, checked by default.
+    const btc = screen.getByRole('checkbox', { name: 'BTCUSDT' });
+    const eth = screen.getByRole('checkbox', { name: 'ETHUSDT' });
+    expect(btc).toBeChecked();
+    expect(eth).toBeChecked();
+
+    // Keyboard alone: focus + Space toggles BTC off (selection state follows checked).
+    btc.focus();
+    expect(btc).toHaveFocus();
+    await userEvent.keyboard(' ');
+    expect(btc).not.toBeChecked();
+    expect(eth).toBeChecked(); // independent — only the focused chip changed.
+
+    // Enter toggles it back on (native checkboxes ignore Enter; wired explicitly).
+    await userEvent.keyboard('{Enter}');
+    expect(btc).toBeChecked();
+  });
+
+  it('drops a keyboard-deselected symbol from the submitted universe (QE-422)', async () => {
+    const onCreated = vi.fn();
+    const fetchMock = mockApi(() => json({ id: 'run-new-2' }, 201));
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(<NewBacktest onCreated={onCreated} onCancel={() => {}} />);
+    await waitFor(() => expect(screen.getByLabelText('Vintage')).toHaveValue('v-2024-q4'));
+    await userEvent.type(screen.getByLabelText('Start'), '2021-01-01');
+    await userEvent.type(screen.getByLabelText('End'), '2024-12-31');
+
+    // Deselect ETHUSDT purely by keyboard, then submit.
+    const eth = screen.getByRole('checkbox', { name: 'ETHUSDT' });
+    eth.focus();
+    await userEvent.keyboard(' ');
+    expect(eth).not.toBeChecked();
+
+    await userEvent.click(screen.getByRole('button', { name: /run backtest/i }));
+    await waitFor(() => expect(onCreated).toHaveBeenCalledWith('run-new-2'));
+
+    const postCall = fetchMock.mock.calls.find(
+      ([, init]) => (init as RequestInit | undefined)?.method === 'POST',
+    );
+    const body = JSON.parse((postCall![1] as RequestInit).body as string);
+    expect(body.params.universe).toEqual(['BTCUSDT']);
+  });
+
   it('blocks submit with a client-side validation message when the window is missing', async () => {
     const onCreated = vi.fn();
     const fetchMock = mockApi(() => json({ id: 'x' }, 201));

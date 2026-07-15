@@ -72,6 +72,26 @@ describe('BacktestsList', () => {
     expect(onOpen).toHaveBeenCalledWith('run-xyz');
   });
 
+  it('opens a run from the list via keyboard alone — Enter and Space (QE-422)', async () => {
+    const onOpen = vi.fn();
+    vi.stubGlobal('fetch', mockRuns([item({ id: 'run-xyz' })]));
+    render(<BacktestsList onOpen={onOpen} onNew={() => {}} />);
+    await screen.findByText('v-2024-q4');
+
+    // The clickable row is a focusable button; keyboard alone opens the run.
+    const row = screen.getByRole('button', { name: /run-xyz/i });
+    row.focus();
+    expect(row).toHaveFocus();
+
+    await userEvent.keyboard('{Enter}');
+    expect(onOpen).toHaveBeenCalledWith('run-xyz');
+
+    onOpen.mockClear();
+    row.focus();
+    await userEvent.keyboard(' ');
+    expect(onOpen).toHaveBeenCalledWith('run-xyz');
+  });
+
   it('renders only backtest rows from a mixed payload; no training run is reachable (QE-408)', async () => {
     const onOpen = vi.fn();
     vi.stubGlobal(
