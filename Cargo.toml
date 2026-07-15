@@ -71,6 +71,9 @@ url = "2"
 tower = { version = "0.5", features = ["util"] }
 
 # Internal crates (path deps) — referenced by member crates as `qe-domain.workspace = true`.
+# QE-406: the dependency-free run-protocol leaf (serde only) shared by `qe-cli` (emit) and `qe-server`
+# (parse). A pure leaf → no firewall edge; `cargo deny` adds no new external crate.
+qe-run-protocol = { path = "crates/run-protocol" }
 qe-domain = { path = "crates/domain" }
 qe-error = { path = "crates/error" }
 qe-config = { path = "crates/config" }

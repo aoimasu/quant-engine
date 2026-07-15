@@ -35,108 +35,12 @@ pub struct Progress {
     pub msg: String,
 }
 
-/// Default taker fee (bps) — mirrors the `qe-cli backtest` default so an omitted field behaves the
-/// same as the CLI's own default.
-fn default_taker_fee_bps() -> f64 {
-    2.0
-}
-
-/// Default slippage-model label — mirrors the `qe-cli backtest` default.
-fn default_slippage_model() -> String {
-    "square-root-impact".to_owned()
-}
-
-/// Backtest parameters — the `params` object of a create-run request, persisted verbatim in
-/// `meta.json` and mapped 1:1 onto the `qe-cli backtest` flags.
-///
-/// **Every** field is `#[serde(default)]` so the body parses **leniently**: a missing required field
-/// deserialises to an empty value rather than a serde reject (which axum would surface as `422`). All
-/// required-ness is then enforced in one place (`manager::validate`), which returns a uniform `400`
-/// with a clear message for any missing/invalid param (nit 2).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct BacktestParams {
-    /// Vintage id to backtest (required; `--vintage`).
-    #[serde(default)]
-    pub vintage: String,
-    /// Optional single-chromosome selector (`--strategy`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub strategy: Option<String>,
-    /// Inclusive window start `YYYY-MM-DD` (required; `--start`).
-    #[serde(default)]
-    pub start: String,
-    /// Exclusive window end `YYYY-MM-DD` (required; `--end`).
-    #[serde(default)]
-    pub end: String,
-    /// Bar resolution (required; `--resolution`).
-    #[serde(default)]
-    pub resolution: String,
-    /// Instrument symbols (`--universe`, repeated). Must be non-empty (the job needs ≥1 instrument).
-    #[serde(default)]
-    pub universe: Vec<String>,
-    /// Taker fee, basis points (`--taker-fee-bps`).
-    #[serde(default = "default_taker_fee_bps")]
-    pub taker_fee_bps: f64,
-    /// Slippage-model label (`--slippage-model`).
-    #[serde(default = "default_slippage_model")]
-    pub slippage_model: String,
-}
-
-impl Default for BacktestParams {
-    fn default() -> Self {
-        Self {
-            vintage: String::new(),
-            strategy: None,
-            start: String::new(),
-            end: String::new(),
-            resolution: String::new(),
-            universe: Vec::new(),
-            taker_fee_bps: default_taker_fee_bps(),
-            slippage_model: default_slippage_model(),
-        }
-    }
-}
-
-/// Training parameters — the `params` object of a `type:"train"` create-run request (QE-261),
-/// persisted verbatim in `meta.json` and mapped onto the `qe-cli train` flags.
-///
-/// Like [`BacktestParams`], every field is `#[serde(default)]` so the body parses **leniently**; the
-/// required-ness of the window (`start`/`end`/`resolution`) is enforced in one place
-/// (`manager::validate`) as a uniform `400`. The budget knobs are optional — `qe train` supplies its
-/// own defaults when a flag is omitted. The **instrument/universe** is not a flag: `qe train` resolves
-/// it from the config file (`--config`), so it is deliberately absent here (the QE-260 CLI is unchanged).
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct TrainParams {
-    /// Inclusive training-window start `YYYY-MM-DD` (required; `--start`).
-    #[serde(default)]
-    pub start: String,
-    /// Exclusive training-window end `YYYY-MM-DD` (required; `--end`).
-    #[serde(default)]
-    pub end: String,
-    /// Bar resolution (required; `--resolution`).
-    #[serde(default)]
-    pub resolution: String,
-    /// Master search seed override (`--seed`); omitted ⇒ the config seed.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub seed: Option<u64>,
-    /// MAP-Elites search generations (`--generations`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub generations: Option<usize>,
-    /// Variation steps per direction per generation (`--population`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub population: Option<usize>,
-    /// Final bars reserved as the untouched G1 holdout (`--holdout`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub holdout: Option<usize>,
-    /// Embargo bars purged between the train window and the holdout (`--embargo`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub embargo: Option<usize>,
-    /// Optional config-file path override (`--config`); omitted ⇒ the CLI default (`config.toml`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub config: Option<String>,
-    /// Optional operating profile override (`--profile`); omitted ⇒ the CLI default (`train`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub profile: Option<String>,
-}
+/// The run-param **wire DTOs** now live in the dependency-free `qe-run-protocol` leaf crate (QE-406) so
+/// there is one definition shared across the CLI ↔ server ↔ SPA boundary. Re-exported here so the
+/// existing `super::model::{BacktestParams, TrainParams}` import paths (and the `meta.params` wire
+/// shape they define) are unchanged. Their `#[serde(default)]` leniency and the CLI-mirroring defaults
+/// (`taker_fee_bps` / `slippage_model`) are preserved verbatim on the shared types.
+pub use qe_run_protocol::{BacktestParams, TrainParams};
 
 /// Typed, **non-serialized** run parameters that drive subprocess spawning. Built by `manager::create`
 /// from the validated request; the spawner matches on it to build either the `backtest` or `train`

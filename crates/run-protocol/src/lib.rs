@@ -1,0 +1,348 @@
+//! qe-run-protocol (QE-406) — the single source of truth for the CLI ↔ server ↔ SPA **run protocol**.
+//!
+//! The admin server spawns the deterministic `qe-cli` pipelines as subprocesses (ADR D4c). Each job
+//! writes artefacts into a `--run-dir` and streams JSON-line **progress** on stdout: a sequence of
+//! `progress`/`gen`/`ensemble`/`gate` lines followed by exactly one terminal `done` or `error` line.
+//! The server tails that stream and folds it into `meta.json`; the SPA renders `meta.json`.
+//!
+//! Historically this contract was defined **three** times — emit (`qe-cli`), parse (`qe-server`), and
+//! the SPA — with no shared schema and no version. This crate holds the wire types **once**:
+//!
+//! * [`ProgressLine`] — the progress-line enum, used for both `Serialize` (cli emit) and `Deserialize`
+//!   (server parse). Float fields are `Option<f64>` so the server's tolerance of non-finite floats is
+//!   preserved (see the type docs); the emitted bytes are unchanged.
+//! * [`emit_progress`] / [`emit_done`] / [`emit_train_done`] / [`emit_error`] — the byte-exact writers.
+//! * [`BacktestParams`] / [`TrainParams`] — the run-param **wire DTOs** (the `params` object of a
+//!   create-run request, persisted verbatim into `meta.params`).
+//! * [`PROTOCOL_VERSION`] — the contract version the CLI stamps on the terminal `done` line and the
+//!   server checks.
+//!
+//! **Firewall.** This crate depends on `serde`/`serde_json` only — no `qe-*` crate — so `qe-server`
+//! depending on it introduces no forbidden edge (QE-132). The SPA mirror (`web/src/api/runs.ts`) is
+//! hand-kept in lockstep with these types.
+
+use std::io::{self, Write};
+
+use serde::{Deserialize, Serialize};
+
+/// The run-protocol wire version. The CLI stamps it on the terminal [`ProgressLine::Done`] line and the
+/// server checks it (logging a warning on mismatch — see `qe_server::runs::manager`). Bump this on any
+/// backward-incompatible change to the wire shapes below.
+pub const PROTOCOL_VERSION: u32 = 1;
+
+/// The `protocol_version` a terminal `done` line that predates QE-406 (or any line that omits the
+/// field) deserializes to — distinct from every real [`PROTOCOL_VERSION`] so the server can detect and
+/// warn on it without failing to parse the line.
+const LEGACY_PROTOCOL_VERSION: u32 = 0;
+
+/// The default for a missing `protocol_version` on deserialize (a legacy/omitted field).
+fn legacy_protocol_version() -> u32 {
+    LEGACY_PROTOCOL_VERSION
+}
+
+/// One JSON-line progress record on stdout. The stream is a sequence of progress lines followed by
+/// exactly one terminal `done` or `error` line (see [`emit_progress`], [`emit_done`], [`emit_error`]).
+///
+/// This single type is **both** serialized (the `qe-cli` emit side) and deserialized (the `qe-server`
+/// parse side). Its float fields are `Option<f64>` so the parse side tolerates non-finite floats:
+/// `serde_json` renders a non-finite `f64` (e.g. a `-inf` best-so-far before any accepted elite) as
+/// JSON `null` on **serialize**, and a required `f64` would fail to **deserialize** that `null` and
+/// drop the whole line. The emit side wraps its finite values in `Some(..)`, which serialize to the
+/// same numbers, so the on-wire bytes are unchanged.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "t", rename_all = "snake_case")]
+pub enum ProgressLine {
+    /// An intermediate progress update.
+    Progress {
+        /// Completion percentage `0..=100`.
+        pct: u8,
+        /// Coarse stage label (`load|scan|features|simulate|report`).
+        stage: String,
+        /// Human-readable line.
+        msg: String,
+    },
+    /// One MAP-Elites search generation (QE-260 train job). Carries the archive coverage and best-so-far
+    /// fitness so the training monitor (QE-261) can render the generation → coverage → fitness trace.
+    Gen {
+        /// Completion percentage `0..=100`.
+        pct: u8,
+        /// Stage label (always `"search"`).
+        stage: String,
+        /// The generation just completed (`1..=generations`).
+        generation: usize,
+        /// Total generations in the budget.
+        generations: usize,
+        /// Total occupied MAP-Elites cells across both directions (`qe_wfo::regularise::coverage` sum).
+        coverage: usize,
+        /// Occupied cells in the Long archive.
+        coverage_long: usize,
+        /// Occupied cells in the Short archive.
+        coverage_short: usize,
+        /// Best archive fitness seen so far. `None` on the wire (`null`) while it is still non-finite
+        /// (`-inf` before any accepted elite); the emit side passes `Some(fitness)`.
+        #[serde(default)]
+        best_fitness: Option<f64>,
+    },
+    /// The ensemble (portfolio) construction result (QE-260). Carries the CV fold count.
+    Ensemble {
+        /// Completion percentage `0..=100`.
+        pct: u8,
+        /// Stage label (always `"ensemble"`).
+        stage: String,
+        /// Cross-validation folds the portfolio search scored over.
+        folds: usize,
+        /// Number of chromosomes selected into the ensemble.
+        members: usize,
+        /// The converged cross-validated robust-basin score (`None`/`null` if non-finite).
+        #[serde(default)]
+        score: Option<f64>,
+    },
+    /// The G1 gate verdict (QE-260/QE-134). `promoted` is the pass/fail; `failed` names the blocking
+    /// criteria (empty iff promoted).
+    Gate {
+        /// Completion percentage `0..=100`.
+        pct: u8,
+        /// Stage label (always `"gate"`).
+        stage: String,
+        /// Whether the vintage cleared every G1 criterion.
+        promoted: bool,
+        /// The names of the criteria that failed (empty iff promoted).
+        #[serde(default)]
+        failed: Vec<String>,
+        /// In-sample (train-window) net-of-cost Sharpe (`None`/`null` if non-finite).
+        #[serde(default)]
+        in_sample_sharpe: Option<f64>,
+        /// Holdout (untouched OOS) net-of-cost Sharpe (`None`/`null` if non-finite).
+        #[serde(default)]
+        holdout_sharpe: Option<f64>,
+        /// Deflated Sharpe Ratio the DSR criterion evaluated (`None`/`null` if non-finite).
+        #[serde(default)]
+        dsr: Option<f64>,
+        /// White's Reality Check / SPA p-value (`None`/`null` if non-finite).
+        #[serde(default)]
+        spa_pvalue: Option<f64>,
+        /// Effective number of trials the DSR deflated against.
+        n_trials: usize,
+    },
+    /// Terminal success: the artefact filename written into the run dir.
+    Done {
+        /// The result artefact name (`result.json`).
+        result: String,
+        /// The run-protocol version this line was emitted under ([`PROTOCOL_VERSION`]). A line that
+        /// predates QE-406 (or omits the field) deserializes to [`LEGACY_PROTOCOL_VERSION`] (`0`).
+        #[serde(default = "legacy_protocol_version")]
+        protocol_version: u32,
+        /// The sealed vintage id, when a terminal produces one (train job). Omitted for the backtest job
+        /// so its `{"t":"done",…}` shape carries no `vintage` key.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        vintage: Option<String>,
+    },
+    /// Terminal failure.
+    Error {
+        /// The failure message.
+        msg: String,
+    },
+}
+
+/// Write one `progress` line to `w`, newline-terminated. Deterministic (no timestamp).
+///
+/// # Errors
+/// Propagates any write / serialisation failure.
+pub fn emit_progress(w: &mut impl Write, pct: u8, stage: &str, msg: &str) -> io::Result<()> {
+    let line = ProgressLine::Progress {
+        pct,
+        stage: stage.to_owned(),
+        msg: msg.to_owned(),
+    };
+    write_line(w, &line)
+}
+
+/// Write the terminal `done` line (no vintage — the backtest/ingest form), stamped with the current
+/// [`PROTOCOL_VERSION`].
+///
+/// # Errors
+/// Propagates any write / serialisation failure.
+pub fn emit_done(w: &mut impl Write, result: &str) -> io::Result<()> {
+    write_line(
+        w,
+        &ProgressLine::Done {
+            result: result.to_owned(),
+            protocol_version: PROTOCOL_VERSION,
+            vintage: None,
+        },
+    )
+}
+
+/// Write the terminal `done` line naming the sealed `vintage` (the train form), stamped with the
+/// current [`PROTOCOL_VERSION`].
+///
+/// # Errors
+/// Propagates any write / serialisation failure.
+pub fn emit_train_done(w: &mut impl Write, result: &str, vintage: &str) -> io::Result<()> {
+    write_line(
+        w,
+        &ProgressLine::Done {
+            result: result.to_owned(),
+            protocol_version: PROTOCOL_VERSION,
+            vintage: Some(vintage.to_owned()),
+        },
+    )
+}
+
+/// Write the terminal `error` line.
+///
+/// # Errors
+/// Propagates any write / serialisation failure.
+pub fn emit_error(w: &mut impl Write, msg: &str) -> io::Result<()> {
+    write_line(
+        w,
+        &ProgressLine::Error {
+            msg: msg.to_owned(),
+        },
+    )
+}
+
+fn write_line(w: &mut impl Write, line: &ProgressLine) -> io::Result<()> {
+    let json = serde_json::to_string(line).map_err(io::Error::other)?;
+    writeln!(w, "{json}")
+}
+
+/// Default taker fee (bps) — mirrors the `qe-cli backtest` default so an omitted field behaves the
+/// same as the CLI's own default.
+fn default_taker_fee_bps() -> f64 {
+    2.0
+}
+
+/// Default slippage-model label — mirrors the `qe-cli backtest` default.
+fn default_slippage_model() -> String {
+    "square-root-impact".to_owned()
+}
+
+/// Backtest parameters — the `params` object of a create-run request, persisted verbatim in
+/// `meta.json` and mapped 1:1 onto the `qe-cli backtest` flags.
+///
+/// **Every** field is `#[serde(default)]` so the body parses **leniently**: a missing required field
+/// deserialises to an empty value rather than a serde reject (which axum would surface as `422`). All
+/// required-ness is then enforced in one place (`qe_server::runs::manager`), which returns a uniform
+/// `400` with a clear message for any missing/invalid param.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BacktestParams {
+    /// Vintage id to backtest (required; `--vintage`).
+    #[serde(default)]
+    pub vintage: String,
+    /// Optional single-chromosome selector (`--strategy`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strategy: Option<String>,
+    /// Inclusive window start `YYYY-MM-DD` (required; `--start`).
+    #[serde(default)]
+    pub start: String,
+    /// Exclusive window end `YYYY-MM-DD` (required; `--end`).
+    #[serde(default)]
+    pub end: String,
+    /// Bar resolution (required; `--resolution`).
+    #[serde(default)]
+    pub resolution: String,
+    /// Instrument symbols (`--universe`, repeated). Must be non-empty (the job needs ≥1 instrument).
+    #[serde(default)]
+    pub universe: Vec<String>,
+    /// Taker fee, basis points (`--taker-fee-bps`).
+    #[serde(default = "default_taker_fee_bps")]
+    pub taker_fee_bps: f64,
+    /// Slippage-model label (`--slippage-model`).
+    #[serde(default = "default_slippage_model")]
+    pub slippage_model: String,
+}
+
+impl Default for BacktestParams {
+    fn default() -> Self {
+        Self {
+            vintage: String::new(),
+            strategy: None,
+            start: String::new(),
+            end: String::new(),
+            resolution: String::new(),
+            universe: Vec::new(),
+            taker_fee_bps: default_taker_fee_bps(),
+            slippage_model: default_slippage_model(),
+        }
+    }
+}
+
+/// Training parameters — the `params` object of a `type:"train"` create-run request (QE-261),
+/// persisted verbatim in `meta.json` and mapped onto the `qe-cli train` flags.
+///
+/// Like [`BacktestParams`], every field is `#[serde(default)]` so the body parses **leniently**; the
+/// required-ness of the window (`start`/`end`/`resolution`) is enforced in one place
+/// (`qe_server::runs::manager`) as a uniform `400`. The budget knobs are optional — `qe train` supplies
+/// its own defaults when a flag is omitted. The **instrument/universe** is not a flag: `qe train`
+/// resolves it from the config file (`--config`), so it is deliberately absent here.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct TrainParams {
+    /// Inclusive training-window start `YYYY-MM-DD` (required; `--start`).
+    #[serde(default)]
+    pub start: String,
+    /// Exclusive training-window end `YYYY-MM-DD` (required; `--end`).
+    #[serde(default)]
+    pub end: String,
+    /// Bar resolution (required; `--resolution`).
+    #[serde(default)]
+    pub resolution: String,
+    /// Master search seed override (`--seed`); omitted ⇒ the config seed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed: Option<u64>,
+    /// MAP-Elites search generations (`--generations`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generations: Option<usize>,
+    /// Variation steps per direction per generation (`--population`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub population: Option<usize>,
+    /// Final bars reserved as the untouched G1 holdout (`--holdout`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub holdout: Option<usize>,
+    /// Embargo bars purged between the train window and the holdout (`--embargo`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embargo: Option<usize>,
+    /// Optional config-file path override (`--config`); omitted ⇒ the CLI default (`config.toml`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config: Option<String>,
+    /// Optional operating profile override (`--profile`); omitted ⇒ the CLI default (`train`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn progress_line_serialises_with_t_tag() {
+        let mut buf = Vec::new();
+        emit_progress(&mut buf, 50, "features", "assembling").unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert_eq!(
+            s.trim_end(),
+            r#"{"t":"progress","pct":50,"stage":"features","msg":"assembling"}"#
+        );
+    }
+
+    #[test]
+    fn done_stamps_protocol_version_and_error_line() {
+        let mut buf = Vec::new();
+        emit_done(&mut buf, "result.json").unwrap();
+        emit_error(&mut buf, "boom").unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        let mut lines = s.lines();
+        assert_eq!(
+            lines.next().unwrap(),
+            r#"{"t":"done","result":"result.json","protocol_version":1}"#
+        );
+        assert_eq!(lines.next().unwrap(), r#"{"t":"error","msg":"boom"}"#);
+    }
+
+    #[test]
+    fn backtest_params_defaults_match_cli() {
+        let p = BacktestParams::default();
+        assert_eq!(p.taker_fee_bps, 2.0);
+        assert_eq!(p.slippage_model, "square-root-impact");
+    }
+}

@@ -74,7 +74,13 @@ export function BacktestsList({ onOpen, onNew }: BacktestsListProps) {
     {
       key: 'params',
       header: 'Vintage',
-      render: (_v, row) => <span style={{ fontWeight: 600 }}>{row.params.vintage || '—'}</span>,
+      // `vintage` is backtest-only — narrow on the discriminated `type` before reading it (a train run
+      // in the list has no vintage).
+      render: (_v, row) => (
+        <span style={{ fontWeight: 600 }}>
+          {row.type === 'backtest' ? row.params.vintage || '—' : '—'}
+        </span>
+      ),
     },
     {
       key: 'window',

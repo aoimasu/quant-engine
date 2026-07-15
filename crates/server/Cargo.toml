@@ -32,6 +32,9 @@ qe-telemetry.workspace = true
 # repository the `/api/vintages` list reads.
 qe-storage.workspace = true
 qe-vintage.workspace = true
+# QE-406: the shared run protocol — the `ProgressLine` parse type + the `BacktestParams`/`TrainParams`
+# wire DTOs (re-exported from `runs::model`). A pure serde leaf, so this edge is firewall-neutral.
+qe-run-protocol.workspace = true
 axum.workspace = true
 tokio.workspace = true
 tower-http.workspace = true

@@ -10,7 +10,7 @@ use std::io::Write as _;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde::Deserialize;
+use qe_run_protocol::{ProgressLine, PROTOCOL_VERSION};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{Mutex, Semaphore};
 
@@ -186,65 +186,6 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// One subprocess progress line (mirror of the `qe-cli` `§5.3` protocol — mirrored here rather than
-/// depending on `qe-cli`, which would risk a firewall edge and pull the whole training tree).
-///
-/// QE-261 adds the QE-260 training variants (`gen`/`ensemble`/`gate`) and the sealed `vintage` id on
-/// the terminal `done`. Every float is `Option<f64>`: `serde_json` renders a non-finite `f64` (e.g. a
-/// `-inf` best-so-far) as `null`, and a required `f64` would fail the whole line's parse.
-#[derive(Debug, Deserialize)]
-#[serde(tag = "t", rename_all = "snake_case")]
-enum ProgressLine {
-    Progress {
-        pct: u8,
-        stage: String,
-        msg: String,
-    },
-    Gen {
-        pct: u8,
-        generation: usize,
-        generations: usize,
-        coverage: usize,
-        coverage_long: usize,
-        coverage_short: usize,
-        #[serde(default)]
-        best_fitness: Option<f64>,
-    },
-    Ensemble {
-        pct: u8,
-        folds: usize,
-        members: usize,
-        #[serde(default)]
-        score: Option<f64>,
-    },
-    Gate {
-        pct: u8,
-        promoted: bool,
-        #[serde(default)]
-        failed: Vec<String>,
-        #[serde(default)]
-        in_sample_sharpe: Option<f64>,
-        #[serde(default)]
-        holdout_sharpe: Option<f64>,
-        #[serde(default)]
-        dsr: Option<f64>,
-        #[serde(default)]
-        spa_pvalue: Option<f64>,
-        n_trials: usize,
-    },
-    Done {
-        #[allow(dead_code)]
-        result: String,
-        /// The sealed vintage id (train job); absent for backtest.
-        #[serde(default)]
-        vintage: Option<String>,
-    },
-    Error {
-        #[allow(dead_code)]
-        msg: String,
-    },
-}
-
 /// Supervise one run end-to-end: acquire a pool slot, spawn the subprocess, tail stdout progress
 /// into `meta.json` + `stdout.log`, capture a stderr tail, and record the terminal outcome.
 async fn supervise(
@@ -347,6 +288,9 @@ async fn drain_stdout(
             }
             Ok(ProgressLine::Gen {
                 pct,
+                // `stage` is fixed (`"search"`) on this variant — the server derives its own coarse
+                // stage label below, so the emitted one is intentionally ignored.
+                stage: _,
                 generation,
                 generations,
                 coverage,
@@ -371,6 +315,7 @@ async fn drain_stdout(
             }
             Ok(ProgressLine::Ensemble {
                 pct,
+                stage: _,
                 folds,
                 members,
                 score,
@@ -389,6 +334,7 @@ async fn drain_stdout(
             }
             Ok(ProgressLine::Gate {
                 pct,
+                stage: _,
                 promoted,
                 failed,
                 in_sample_sharpe,
@@ -413,8 +359,25 @@ async fn drain_stdout(
                 });
                 let _ = store.write_meta(meta);
             }
-            Ok(ProgressLine::Done { vintage, .. }) => {
+            Ok(ProgressLine::Done {
+                protocol_version,
+                vintage,
+                ..
+            }) => {
                 done_seen = true;
+                // QE-406: the terminal line carries the run-protocol version. On mismatch we log and
+                // continue (never reject) — dropping a completed run's terminal line would regress live
+                // monitoring; a warning gives the operability signal without any behaviour loss. A
+                // legacy `done` with no version deserializes to `0`, which trips this too.
+                if protocol_version != PROTOCOL_VERSION {
+                    tracing::warn!(
+                        run_id = %meta.id,
+                        emitted = protocol_version,
+                        expected = PROTOCOL_VERSION,
+                        "run subprocess emitted a mismatched run-protocol version; \
+                         continuing (progress may be interpreted on a best-effort basis)"
+                    );
+                }
                 if let Some(vintage) = vintage {
                     train_mut(meta).vintage = Some(vintage);
                     let _ = store.write_meta(meta);

@@ -229,6 +229,12 @@ export function BacktestResult({ runId, onBack, onReRun, pollMs = POLL_MS }: Bac
 
   const reRun = async () => {
     if (!meta || rerunning) return;
+    // Re-run clones the run's params into a new backtest POST; `createRun` needs `BacktestParams`, so
+    // narrow on the discriminated `type` first (this screen only ever opens backtest runs).
+    if (meta.type !== 'backtest') {
+      setRerunError('Only backtest runs can be re-run here.');
+      return;
+    }
     setRerunning(true);
     setRerunError(null);
     try {
@@ -249,7 +255,10 @@ export function BacktestResult({ runId, onBack, onReRun, pollMs = POLL_MS }: Bac
   );
 
   const running = meta != null && (meta.status === 'running' || meta.status === 'queued');
-  const title = result?.strategy.name ?? meta?.params.vintage ?? runId;
+  // Narrow the run's params to the backtest DTO (this screen renders backtest runs); the fallbacks
+  // below read backtest-only fields (`vintage`/`universe`/costs) that a train run doesn't carry.
+  const btParams = meta?.type === 'backtest' ? meta.params : undefined;
+  const title = result?.strategy.name ?? btParams?.vintage ?? runId;
 
   const tradeCols: Column<Trade & Record<string, unknown>>[] = [
     {
@@ -483,20 +492,20 @@ export function BacktestResult({ runId, onBack, onReRun, pollMs = POLL_MS }: Bac
               <div>
                 <div className="qe-side-lbl">Universe</div>
                 <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                  {(result?.universe.symbols ?? meta?.params.universe ?? []).slice(0, 6).map((s) => (
+                  {(result?.universe.symbols ?? btParams?.universe ?? []).slice(0, 6).map((s) => (
                     <Tag key={s} mono>
                       {s}
                     </Tag>
                   ))}
                   {(() => {
-                    const syms = result?.universe.symbols ?? meta?.params.universe ?? [];
+                    const syms = result?.universe.symbols ?? btParams?.universe ?? [];
                     return syms.length > 6 ? <Tag mono>+{syms.length - 6}</Tag> : null;
                   })()}
                 </div>
               </div>
-              <Input label="Resolution" defaultValue={result?.window.resolution ?? meta?.params.resolution ?? ''} readOnly disabled />
-              <Input label="Start" defaultValue={result?.window.start ?? meta?.params.start ?? ''} readOnly disabled />
-              <Input label="End" defaultValue={result?.window.end ?? meta?.params.end ?? ''} readOnly disabled />
+              <Input label="Resolution" defaultValue={result?.window.resolution ?? btParams?.resolution ?? ''} readOnly disabled />
+              <Input label="Start" defaultValue={result?.window.start ?? btParams?.start ?? ''} readOnly disabled />
+              <Input label="End" defaultValue={result?.window.end ?? btParams?.end ?? ''} readOnly disabled />
             </div>
           </Card>
           <Callout variant="accent" title="Point-in-time data">
@@ -507,13 +516,13 @@ export function BacktestResult({ runId, onBack, onReRun, pollMs = POLL_MS }: Bac
               <Input
                 label="Taker fee (bps)"
                 mono
-                defaultValue={String(result?.costs.taker_fee_bps ?? meta?.params.taker_fee_bps ?? '')}
+                defaultValue={String(result?.costs.taker_fee_bps ?? btParams?.taker_fee_bps ?? '')}
                 readOnly
                 disabled
               />
               <Input
                 label="Slippage model"
-                defaultValue={result?.costs.slippage_model ?? meta?.params.slippage_model ?? ''}
+                defaultValue={result?.costs.slippage_model ?? btParams?.slippage_model ?? ''}
                 readOnly
                 disabled
               />

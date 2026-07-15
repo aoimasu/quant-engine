@@ -40,6 +40,9 @@ qe-risk.workspace = true
 qe-venue.workspace = true
 qe-runtime.workspace = true
 qe-vintage.workspace = true
+# QE-406: the shared run protocol — the `ProgressLine` emit types + the `emit_*` writers live here now
+# (re-exported from `jobs`), so the server parses exactly what this binary emits.
+qe-run-protocol.workspace = true
 rust_decimal.workspace = true
 serde.workspace = true
 serde_json.workspace = true

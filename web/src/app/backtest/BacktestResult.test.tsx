@@ -2,9 +2,9 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { BacktestResult } from './BacktestResult';
-import type { BacktestResult as ResultContract, RunMeta } from '../../api/runs';
+import type { BacktestParams, BacktestResult as ResultContract, RunMeta } from '../../api/runs';
 
-const PARAMS: RunMeta['params'] = {
+const PARAMS: BacktestParams = {
   vintage: 'v-2024-q4',
   start: '2021-01-01',
   end: '2024-12-31',

@@ -1633,6 +1633,7 @@ dependencies = [
  "qe-gate",
  "qe-ingest",
  "qe-risk",
+ "qe-run-protocol",
  "qe-runtime",
  "qe-signal",
  "qe-storage",
@@ -1770,6 +1771,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "qe-run-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "qe-runtime"
 version = "0.1.0"
 dependencies = [
@@ -1791,6 +1800,7 @@ dependencies = [
  "axum",
  "base64",
  "hmac",
+ "qe-run-protocol",
  "qe-storage",
  "qe-telemetry",
  "qe-vintage",
