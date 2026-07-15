@@ -7,6 +7,7 @@ import { TrainingArea } from './training/TrainingArea';
 import { MarketData } from './MarketData';
 import { fetchMe, logout, detectRejection, type Me } from '../api/session';
 import { onUnauthorized } from '../api/authEvents';
+import { ErrorBoundary } from './ErrorBoundary';
 
 type Status = 'loading' | 'unauth' | 'auth';
 
@@ -94,30 +95,36 @@ export function App() {
   }
 
   const title = SCREEN_TITLES[active] ?? SCREEN_TITLES.backtest;
+  // QE-424: a top-level error boundary around the authed shell — a render throw in any screen shows a
+  // recoverable fallback instead of blanking the whole SPA. `resetKeys` clears a stale error on an
+  // auth/session change (a new signed-in identity). The unauth/Login shell is returned above, so it is
+  // never wrapped and can't be blanked by a screen throw.
   return (
-    <AppShell
-      active={active}
-      onNav={navigate}
-      title={title}
-      userEmail={me?.email}
-      onSignOut={() => {
-        void logout();
-      }}
-    >
-      {active === 'data' ? (
-        <MarketData />
-      ) : active === 'strategies' ? (
-        <Placeholder
-          icon="git-branch"
-          title="Strategies"
-          description="Sealed vintages and the evolved genomes within them. The strategies browser is on the way."
-          ticket="a later ticket"
-        />
-      ) : active === 'training' ? (
-        <TrainingArea onBacktestVintage={openBacktestForVintage} />
-      ) : (
-        <BacktestsArea initialVintage={backtestVintage} />
-      )}
-    </AppShell>
+    <ErrorBoundary resetKeys={[me?.email]}>
+      <AppShell
+        active={active}
+        onNav={navigate}
+        title={title}
+        userEmail={me?.email}
+        onSignOut={() => {
+          void logout();
+        }}
+      >
+        {active === 'data' ? (
+          <MarketData />
+        ) : active === 'strategies' ? (
+          <Placeholder
+            icon="git-branch"
+            title="Strategies"
+            description="Sealed vintages and the evolved genomes within them. The strategies browser is on the way."
+            ticket="a later ticket"
+          />
+        ) : active === 'training' ? (
+          <TrainingArea onBacktestVintage={openBacktestForVintage} />
+        ) : (
+          <BacktestsArea initialVintage={backtestVintage} />
+        )}
+      </AppShell>
+    </ErrorBoundary>
   );
 }
