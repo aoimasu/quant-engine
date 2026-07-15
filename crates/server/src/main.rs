@@ -57,6 +57,31 @@ async fn main() -> ExitCode {
     // verifier is only available under the `http` feature; otherwise a disabled verifier keeps the
     // server bootable (health/static work) but login cannot complete.
     let auth_config = AuthConfig::from_env();
+
+    // QE-409 (AR-9): the random ephemeral session-secret fallback is safe only on loopback. Refuse to
+    // boot when bound to a non-loopback address without an explicit QE_SESSION_SECRET, rather than
+    // silently guarding a network-exposed deployment with a restart-invalidated secret.
+    if let Err(e) = qe_server::auth::check_session_secret_policy(
+        &cfg.addr,
+        auth_config.session_secret_is_ephemeral,
+    ) {
+        tracing::error!(error = %e, "refusing to boot");
+        return ExitCode::FAILURE;
+    }
+
+    // QE-409 (advisory, non-fatal): bound off-loopback while session cookies are minted without
+    // `Secure` (the `redirect_uri` is not https) — cookies could traverse the network unprotected.
+    // Likely a misconfigured `redirect_uri` scheme or a TLS-terminating proxy the scheme doesn't
+    // reflect. Warn only; unlike the missing-secret case this does NOT refuse boot.
+    if qe_server::auth::should_warn_insecure_cookies(&cfg.addr, auth_config.cookie_secure) {
+        tracing::warn!(
+            addr = %cfg.addr,
+            "bound to a non-loopback address but session cookies are not marked `Secure` \
+             (redirect_uri is not https) — cookies may traverse the network unprotected; \
+             check QE_OAUTH_REDIRECT_URI / TLS termination"
+        );
+    }
+
     #[cfg(feature = "http")]
     let verifier: Arc<dyn IdTokenVerifier> = Arc::new(
         qe_server::auth::google::GoogleOidcVerifier::new(&auth_config),

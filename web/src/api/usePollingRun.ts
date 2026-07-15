@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { getRun, type RunMeta } from './runs';
+import { getRun, UnauthorizedError, type RunMeta } from './runs';
 
 /** Default poll cadence while a run is queued/running (ms). */
 export const DEFAULT_POLL_MS = 2000;
@@ -65,6 +65,11 @@ export function usePollingRun(runId: string, options: UsePollingRunOptions = {})
         timer = setTimeout(tick, pollMs); // queued | running — keep polling
       } catch (e) {
         if (cancelled) return;
+        // Terminal-auth (QE-409): a 401 means the session expired. Stop immediately — do NOT consume
+        // the retry budget, set no fatal `error` (no "Backtest failed" surface), and do not
+        // reschedule. The API client already emitted the app-level `unauthorized` signal, which flips
+        // the shell back to Login; the poller's only job here is to stop cleanly.
+        if (e instanceof UnauthorizedError) return;
         // Resilience: a transient fetch error must not freeze the view — keep polling up to a bounded
         // streak, surfacing a non-fatal "retrying" note; only give up (fatal) past the cap.
         failures += 1;

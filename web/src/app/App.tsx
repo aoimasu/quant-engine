@@ -6,6 +6,7 @@ import { BacktestsArea } from './backtest/BacktestsArea';
 import { TrainingArea } from './training/TrainingArea';
 import { MarketData } from './MarketData';
 import { fetchMe, logout, detectRejection, type Me } from '../api/session';
+import { onUnauthorized } from '../api/authEvents';
 
 type Status = 'loading' | 'unauth' | 'auth';
 
@@ -56,6 +57,15 @@ export function App() {
     return () => {
       cancelled = true;
     };
+  }, []);
+
+  // QE-409: any 401 seen by the API client mid-session (an expired/cleared cookie) flips the shell
+  // back to the unauth state and remounts Login — without a full-page reload. Subscribe once.
+  useEffect(() => {
+    return onUnauthorized(() => {
+      setMe(null);
+      setStatus('unauth');
+    });
   }, []);
 
   if (status === 'loading') {

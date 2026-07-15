@@ -1,6 +1,7 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import { usePollingRun } from './usePollingRun';
+import { onUnauthorized } from './authEvents';
 import type { RunMeta } from './runs';
 
 function meta(status: RunMeta['status'], pct = 0, error: string | null = null): RunMeta {
@@ -94,5 +95,25 @@ describe('usePollingRun', () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response(null, { status: 500 })));
     render(<Probe pollMs={10} />);
     await waitFor(() => expect(screen.getByTestId('error').textContent).not.toBe(''), { timeout: 2000 });
+  });
+
+  it('treats a 401 as terminal-auth: stops immediately, no retry, no fatal error, fires unauthorized (QE-409)', async () => {
+    const fetchMock = vi.fn(async () => json({ error: 'authentication required' }, 401));
+    vi.stubGlobal('fetch', fetchMock);
+    const seen = vi.fn();
+    const off = onUnauthorized(seen);
+
+    render(<Probe pollMs={10} />);
+
+    // The app-level unauthorized signal fires (the shell flips to Login elsewhere).
+    await waitFor(() => expect(seen).toHaveBeenCalled());
+
+    // Terminal-auth: exactly one fetch (no retry budget consumed), no "retrying", no fatal error.
+    await new Promise((r) => setTimeout(r, 60));
+    expect(fetchMock.mock.calls.length).toBe(1);
+    expect(screen.getByTestId('retrying').textContent).toBe('no');
+    expect(screen.getByTestId('error').textContent).toBe('');
+    expect(screen.getByTestId('status').textContent).toBe('none');
+    off();
   });
 });

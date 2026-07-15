@@ -2,6 +2,7 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import { useRunListPolling } from './useRunListPolling';
 import type { UseRunListPollingOptions } from './useRunListPolling';
+import { onUnauthorized } from './authEvents';
 import type { RunListItem } from './runs';
 
 function item(over: Partial<RunListItem>): RunListItem {
@@ -82,5 +83,21 @@ describe('useRunListPolling', () => {
     await waitFor(() => expect(screen.getByTestId('rows').textContent).toBe('z:succeeded:100'));
     await new Promise((r) => setTimeout(r, 60));
     expect(fetchMock.mock.calls.length).toBe(1);
+  });
+
+  it('treats a 401 as terminal-auth: stops, no retry, no fatal error, fires unauthorized (QE-409)', async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ error: 'authentication required' }), { status: 401, headers: { 'Content-Type': 'application/json' } }));
+    vi.stubGlobal('fetch', fetchMock);
+    const seen = vi.fn();
+    const off = onUnauthorized(seen);
+
+    render(<Probe pollMs={10} />);
+    await waitFor(() => expect(seen).toHaveBeenCalled());
+
+    await new Promise((r) => setTimeout(r, 60));
+    expect(fetchMock.mock.calls.length).toBe(1); // no retry budget burned
+    expect(screen.getByTestId('error').textContent).toBe(''); // no fatal "failed" surface
+    expect(screen.getByTestId('rows').textContent).toBe('null');
+    off();
   });
 });
