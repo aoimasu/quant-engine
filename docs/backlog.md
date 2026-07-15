@@ -259,7 +259,6 @@ Authoritative for the P0/P1 tickets below; later phases inherit unless a ticket 
 
 | Ticket | Title | Depends on | Status |
 |--------|-------|------------|:------:|
-| QE-407 | Server run-lifecycle: graceful shutdown, supervised-task registry, honest success  *(P1)* · **extends QE-263/266** | QE-255 | — |
 
 ### R1.b — P2 (before wider exposure / load)
 
