@@ -264,7 +264,6 @@ Authoritative for the P0/P1 tickets below; later phases inherit unless a ticket 
 
 | Ticket | Title | Depends on | Status |
 |--------|-------|------------|:------:|
-| QE-409 | Auth completeness: SPA 401→re-auth, logout endpoint, dev-safe cookies, fail-closed secret  *(P2)* · *adjacent QE-265* | QE-256 | — |
 | QE-419 | Unify config: single source of truth for storage dirs across server + spawned CLI  *(P2)* | QE-002, QE-254 | — |
 
 | QE-428 | Route reported-backtest impact through the selection cost model / a CLI flag (QE-128) so reporting PnL matches selection  *(P3 — follow-up from QE-403 review)* | QE-403, QE-128 | — |
