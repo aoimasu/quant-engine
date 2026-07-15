@@ -13,6 +13,13 @@ RUN cargo build --release --locked -p qe-cli
 # ---- runtime ------------------------------------------------------------------------------------
 FROM debian:bookworm-slim AS runtime
 WORKDIR /app
+# Code-commit provenance (QE-420): the build context may not ship `.git`, so `build.rs` can't resolve
+# the SHA inside the image. Thread the real commit in at build time and expose it as an env override
+# that `qe` reads at runtime (takes precedence over the compiled-in QE_BUILD_GIT_SHA):
+#   docker build --build-arg QE_CODE_COMMIT="$(git rev-parse --short=12 HEAD)" .
+# Unset ARG => empty env => `qe` falls back to the compiled SHA, then the crate version.
+ARG QE_CODE_COMMIT=""
+ENV QE_CODE_COMMIT=$QE_CODE_COMMIT
 # The same binary the local run uses.
 COPY --from=builder /build/target/release/qe /usr/local/bin/qe
 # A default config; override by mounting your own and/or `QE_`-prefixed env vars.

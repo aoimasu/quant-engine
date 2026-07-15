@@ -281,7 +281,6 @@ Authoritative for the P0/P1 tickets below; later phases inherit unless a ticket 
 | QE-417 | Time-aware mark EMA (gap-aware) for the drawdown-breaker feed  *(P2 — runtime-risk)* | QE-202, QE-208 | — |
 | QE-418 | Pre-trade gross cap checked against true gross exposure, not net notional  *(P2 — risk)* | QE-213, QE-215 | — |
 | QE-419 | Unify config: single source of truth for storage dirs across server + spawned CLI  *(P2)* | QE-002, QE-254 | — |
-| QE-420 | Real code-commit provenance in vintage lineage (build-time git SHA)  *(P2 — determinism)* | QE-006, QE-013 | — |
 
 ### R1.c — P3 (opportunistic quality)
 

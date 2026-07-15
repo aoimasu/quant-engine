@@ -12,10 +12,28 @@ use qe_cli::jobs::{emit_done, emit_error, emit_progress, emit_train_done, Progre
 use qe_cli::{parse_args, run_train, Command, TrainOptions};
 use qe_config::{Config, Profile};
 
-/// Code provenance folded into the vintage id. Set `QE_CODE_COMMIT` at build/run time (e.g. the git
-/// SHA); falls back to the crate version so a vintage is always attributable.
+/// Code provenance folded into the vintage id (QE-420). Resolution precedence:
+///
+/// 1. `QE_CODE_COMMIT` runtime override, when set and non-empty (lets a build pipeline or container
+///    stamp an explicit commit — see the `Dockerfile` ARG);
+/// 2. `QE_BUILD_GIT_SHA` — the real git short SHA captured at compile time by `build.rs`
+///    (`<sha>` or `<sha>-dirty`);
+/// 3. the crate version as a last-resort sentinel, when the build had no git available
+///    (`QE_BUILD_GIT_SHA` is empty or `"unknown"`).
+///
+/// So two binaries built from different commits carry different `code_commit`s with no env var set,
+/// while the explicit override keeps working unchanged.
 fn code_commit() -> String {
-    std::env::var("QE_CODE_COMMIT").unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_owned())
+    if let Ok(explicit) = std::env::var("QE_CODE_COMMIT") {
+        if !explicit.is_empty() {
+            return explicit;
+        }
+    }
+    let build_sha = env!("QE_BUILD_GIT_SHA");
+    if build_sha.is_empty() || build_sha == "unknown" {
+        return env!("CARGO_PKG_VERSION").to_owned();
+    }
+    build_sha.to_owned()
 }
 
 fn main() -> ExitCode {
