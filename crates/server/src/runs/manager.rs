@@ -119,19 +119,37 @@ impl RunManager {
             error: None,
             artifacts: Vec::new(),
         };
-        self.store.init_run(&meta)?;
+        // QE-411: `init_run` is blocking `std::fs` (create dir, touch `stdout.log`, write `meta.json`) —
+        // run it off the async executor before taking the index lock, awaited to completion so the
+        // init-then-index-append ordering is unchanged.
+        {
+            let store = self.store.clone();
+            let meta = meta.clone();
+            tokio::task::spawn_blocking(move || store.init_run(&meta))
+                .await
+                .map_err(std::io::Error::other)??;
+        }
 
-        // Append to the discovery index under the lock (serialises concurrent creates).
+        // Append to the discovery index under the lock (serialises concurrent creates). QE-411: the
+        // blocking index read-modify-write runs inside `spawn_blocking` so it never parks the async
+        // executor thread; the async `index_lock` is still held across the await, preserving the
+        // serialisation of concurrent creates.
         {
             let _guard = self.index_lock.lock().await;
-            let mut index = self.store.read_index()?;
-            index.push(IndexEntry {
+            let store = self.store.clone();
+            let entry = IndexEntry {
                 id: id.clone(),
                 run_type,
                 created_ms,
                 label: spec.label(),
-            });
-            self.store.write_index(&index)?;
+            };
+            tokio::task::spawn_blocking(move || {
+                let mut index = store.read_index()?;
+                index.push(entry);
+                store.write_index(&index)
+            })
+            .await
+            .map_err(std::io::Error::other)??;
         }
 
         // Supervisor task: acquires a pool permit (blocking here keeps the run `queued`), then runs +

@@ -484,6 +484,60 @@ async fn unknown_run_is_404() {
     assert_eq!(s2, StatusCode::NOT_FOUND);
 }
 
+/// QE-411: `list_runs` batches its per-run `meta.json` reads into one `spawn_blocking` closure. This
+/// proves the batched read preserves behaviour: the list is newest-first (index order reversed), and an
+/// indexed run whose `meta.json` is missing is skipped (not a 500).
+#[tokio::test]
+async fn list_runs_newest_first_and_skips_missing_meta() {
+    let tmp = TempDir::new().unwrap();
+    let script = tmp.path().join("job_quick.sh");
+    // A job that immediately writes result.json and finishes — so both runs reach `succeeded` fast.
+    write_script(
+        &script,
+        r#"#!/bin/sh
+run_dir=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --run-dir) run_dir="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+printf '{"ok":true}' > "$run_dir/result.json"
+printf '{"t":"done","result":"result.json"}\n'
+exit 0
+"#,
+    );
+    let app = app_with_script(tmp.path(), &script, 2);
+
+    // Create A then B (index insertion order [A, B]); the newest-first list is therefore [B, A].
+    let (_, a) = post_run(&app, &create_body()).await;
+    let id_a = a["id"].as_str().unwrap().to_owned();
+    poll_status(&app, &id_a, "succeeded", TIMEOUT).await;
+    let (_, b) = post_run(&app, &create_body()).await;
+    let id_b = b["id"].as_str().unwrap().to_owned();
+    poll_status(&app, &id_b, "succeeded", TIMEOUT).await;
+
+    let (lstatus, list) = get(&app, "/api/runs").await;
+    assert_eq!(lstatus, StatusCode::OK);
+    let arr = list.as_array().unwrap();
+    assert_eq!(arr.len(), 2, "both runs listed: {list}");
+    assert_eq!(arr[0]["id"], json!(id_b), "newest first: {list}");
+    assert_eq!(arr[1]["id"], json!(id_a), "then the older run: {list}");
+
+    // Delete A's `meta.json`: it stays in `index.json` but has no meta — the list skips it (not a 500).
+    let meta_a = tmp.path().join("runs").join(&id_a).join("meta.json");
+    std::fs::remove_file(&meta_a).unwrap();
+    let (lstatus, list) = get(&app, "/api/runs").await;
+    assert_eq!(
+        lstatus,
+        StatusCode::OK,
+        "indexed-but-missing meta is skipped, not an error: {list}"
+    );
+    let arr = list.as_array().unwrap();
+    assert_eq!(arr.len(), 1, "only the run with meta remains: {list}");
+    assert_eq!(arr[0]["id"], json!(id_b), "the surviving run is B: {list}");
+}
+
 // ---------------------------------------------------------------------------
 // QE-407: run-lifecycle robustness — graceful shutdown, task registry, honest success.
 // ---------------------------------------------------------------------------

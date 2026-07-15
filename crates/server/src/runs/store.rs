@@ -89,6 +89,18 @@ impl RunStore {
         }
     }
 
+    /// Read a run's `result.json` bytes.
+    ///
+    /// A thin wrapper over `fs::read(result_path)` so the run-store's blocking filesystem primitives all
+    /// live here (QE-411): the read handler runs this inside `spawn_blocking` and treats any error as
+    /// "result artefact missing", exactly as the previous inline `std::fs::read` did.
+    ///
+    /// # Errors
+    /// Any filesystem error reading the artefact (including "not found").
+    pub fn read_result(&self, id: &str) -> io::Result<Vec<u8>> {
+        fs::read(self.result_path(id))
+    }
+
     /// Read `index.json`. A missing index is an empty list.
     ///
     /// # Errors
@@ -175,6 +187,19 @@ mod tests {
         assert!(store.read_meta("nope").unwrap().is_none());
         // stdout.log was touched.
         assert!(store.stdout_path("abc").exists());
+    }
+
+    #[test]
+    fn read_result_round_trips_and_absent_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RunStore::new(dir.path().join("runs"));
+        let meta = sample_meta("res");
+        store.init_run(&meta).unwrap();
+        // No result artefact yet ⇒ an error (the read handler maps this to a 409).
+        assert!(store.read_result("res").is_err());
+        // Once written, the exact bytes round-trip.
+        fs::write(store.result_path("res"), b"{\"ok\":true}").unwrap();
+        assert_eq!(store.read_result("res").unwrap(), b"{\"ok\":true}");
     }
 
     #[test]
