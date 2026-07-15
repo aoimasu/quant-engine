@@ -83,21 +83,49 @@ export interface TrainProgress {
   vintage?: string;
 }
 
-/** A run's `meta.json` — the authoritative status + progress record (§6.1 / §8.2). */
-export interface RunMeta {
+/**
+ * The status/progress fields common to every run's `meta.json` (§6.1 / §8.2), independent of the run
+ * `type`. The `type`-specific `params`/`train` fields are added by the {@link RunMeta} union variants.
+ */
+export interface RunMetaBase {
   id: string;
-  type: string;
   status: RunStatus;
-  params: BacktestParams;
   progress: Progress;
-  /** Rich training progress — present only on `train` runs (QE-261). */
-  train?: TrainProgress;
   created_ms: number;
   started_ms: number | null;
   finished_ms: number | null;
   exit: number | null;
   error: string | null;
   artifacts: string[];
+}
+
+/**
+ * A run's `meta.json` — the authoritative status + progress record — as a **discriminated union on
+ * `type`** (QE-406). This mirrors the Rust wire contract: `type` is `qe_server::runs::RunMeta.type`
+ * (`backtest`/`train`), and `params` is the matching `qe_run_protocol::{BacktestParams, TrainParams}`
+ * wire DTO. Kept **hand-in-lockstep** with `crates/run-protocol/src/lib.rs` (the source of truth) —
+ * update both together. Narrow on `meta.type` at each consumer instead of casting, so a train run can
+ * no longer be statically read as a backtest (and vice-versa).
+ */
+export type RunMeta = BacktestRunMeta | TrainRunMeta;
+
+/** A `type:"backtest"` run — its `params` is a {@link BacktestParams}. */
+export interface BacktestRunMeta extends RunMetaBase {
+  type: 'backtest';
+  params: BacktestParams;
+}
+
+/** A `type:"train"` run (QE-261) — {@link TrainParams} + the rich {@link TrainProgress} for polling. */
+export interface TrainRunMeta extends RunMetaBase {
+  type: 'train';
+  params: TrainParams;
+  /** Rich training progress — present only on `train` runs (QE-261). */
+  train?: TrainProgress;
+}
+
+/** Type-predicate narrowing a {@link RunMeta} to the `train` variant (for `.filter(isTrainRun)`). */
+export function isTrainRun(run: RunMeta): run is TrainRunMeta {
+  return run.type === 'train';
 }
 
 /** One trade row of the §8.1 result contract. */

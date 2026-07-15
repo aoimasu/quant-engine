@@ -172,7 +172,9 @@ export function TrainingMonitor({ runId, onBack, onBacktestVintage, pollMs = POL
   }, [runId, pollMs]);
 
   const running = meta != null && (meta.status === 'running' || meta.status === 'queued');
-  const train = meta?.train;
+  // `train` (rich QE-261 progress) lives only on the `train` variant — narrow on the discriminated
+  // `type` before reading it (this screen only opens training runs).
+  const train = meta?.type === 'train' ? meta.train : undefined;
   const gen = train?.generation;
   const ensemble = train?.ensemble;
   const gate = train?.gate;

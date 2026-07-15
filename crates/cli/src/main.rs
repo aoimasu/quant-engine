@@ -285,6 +285,12 @@ fn run_train_command(cmd: TrainCli) -> Result<ExitCode, Box<dyn std::error::Erro
     }
 }
 
+/// Format an `Option<f64>` protocol field for the terse human line: `6`-dp when finite, `n/a` when the
+/// value was non-finite on the wire (`null` → `None`).
+fn fmt_opt_f64(v: Option<f64>) -> String {
+    v.map_or_else(|| "n/a".to_owned(), |x| format!("{x:.6}"))
+}
+
 /// A terse human line for a train [`ProgressLine`] (the non-`--json` path).
 fn describe(line: &ProgressLine) -> String {
     match line {
@@ -298,7 +304,8 @@ fn describe(line: &ProgressLine) -> String {
             ..
         } => format!(
             "[{pct:>3}%] search: gen {generation}/{generations} coverage={coverage} \
-             best_fitness={best_fitness:.6}"
+             best_fitness={}",
+            fmt_opt_f64(*best_fitness)
         ),
         ProgressLine::Ensemble {
             pct,
@@ -306,7 +313,10 @@ fn describe(line: &ProgressLine) -> String {
             members,
             score,
             ..
-        } => format!("[{pct:>3}%] ensemble: {members} members, {folds} folds, score={score:.6}"),
+        } => format!(
+            "[{pct:>3}%] ensemble: {members} members, {folds} folds, score={}",
+            fmt_opt_f64(*score)
+        ),
         ProgressLine::Gate {
             pct,
             promoted,
@@ -321,7 +331,9 @@ fn describe(line: &ProgressLine) -> String {
                 failed.join(", ")
             }
         ),
-        ProgressLine::Done { result, vintage } => match vintage {
+        ProgressLine::Done {
+            result, vintage, ..
+        } => match vintage {
             Some(v) => format!("done: {result} (vintage {v})"),
             None => format!("done: {result}"),
         },

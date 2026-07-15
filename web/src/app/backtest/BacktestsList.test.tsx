@@ -2,9 +2,9 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { BacktestsList } from './BacktestsList';
-import type { RunMeta } from '../../api/runs';
+import type { BacktestRunMeta, RunMeta } from '../../api/runs';
 
-function meta(over: Partial<RunMeta>): RunMeta {
+function meta(over: Partial<BacktestRunMeta>): RunMeta {
   return {
     id: 'run-aaaaaaaa-1',
     type: 'backtest',

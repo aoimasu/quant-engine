@@ -244,7 +244,9 @@ pub fn run_train_job(
             coverage: coverage_long + coverage_short,
             coverage_long,
             coverage_short,
-            best_fitness,
+            // The shared protocol field is `Option<f64>` (the server's non-finite-as-null tolerance);
+            // a non-finite `best_fitness` still serializes to `null`, so the wire bytes are unchanged.
+            best_fitness: Some(best_fitness),
         });
     }
 
@@ -283,7 +285,7 @@ pub fn run_train_job(
         stage: "ensemble".to_owned(),
         folds: ens_cfg.folds,
         members: k,
-        score: ens.score,
+        score: Some(ens.score),
     });
 
     // ---- validation + G1 gate --------------------------------------------------------------------
@@ -307,10 +309,10 @@ pub fn run_train_job(
         stage: "gate".to_owned(),
         promoted: g1.promoted,
         failed: g1.failed_criteria().iter().map(|s| s.to_string()).collect(),
-        in_sample_sharpe,
-        holdout_sharpe,
-        dsr: robustness.dsr,
-        spa_pvalue: robustness.spa_pvalue,
+        in_sample_sharpe: Some(in_sample_sharpe),
+        holdout_sharpe: Some(holdout_sharpe),
+        dsr: Some(robustness.dsr),
+        spa_pvalue: Some(robustness.spa_pvalue),
         n_trials,
     });
 

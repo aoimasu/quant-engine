@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { Badge, Button, Callout, Card, DataTable, Icon } from '../../design';
 import type { Column } from '../../design';
 import { injectCss } from '../../design/injectCss';
-import { listRuns, type RunMeta, type RunStatus } from '../../api/runs';
+import { listRuns, isTrainRun, type RunStatus, type TrainRunMeta } from '../../api/runs';
 
 const CSS = `
 .qe-tl { max-width: var(--content-max); margin: 0 auto; padding: 24px; display: flex; flex-direction: column; gap: 16px; }
@@ -44,14 +44,16 @@ export interface TrainingListProps {
 
 /** Training-runs list — the `type:"train"` rows from `GET /api/runs`. Row click opens the monitor. */
 export function TrainingList({ onOpen, onNew }: TrainingListProps) {
-  const [runs, setRuns] = useState<RunMeta[] | null>(null);
+  const [runs, setRuns] = useState<TrainRunMeta[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     listRuns()
       .then((r) => {
-        if (!cancelled) setRuns(r.filter((run) => run.type === 'train'));
+        // `isTrainRun` is a type-predicate, so the filtered array narrows to `TrainRunMeta[]` — the
+        // columns can read `params` (TrainParams) and `train` without a cast.
+        if (!cancelled) setRuns(r.filter(isTrainRun));
       })
       .catch((e) => {
         if (!cancelled) setError(e instanceof Error ? e.message : 'Failed to load runs.');
@@ -61,7 +63,7 @@ export function TrainingList({ onOpen, onNew }: TrainingListProps) {
     };
   }, []);
 
-  const columns: Column<RunMeta & Record<string, unknown>>[] = [
+  const columns: Column<TrainRunMeta & Record<string, unknown>>[] = [
     {
       key: 'id',
       header: 'Run',
@@ -154,7 +156,7 @@ export function TrainingList({ onOpen, onNew }: TrainingListProps) {
         {runs != null && runs.length > 0 && (
           <DataTable
             columns={columns}
-            rows={runs as (RunMeta & Record<string, unknown>)[]}
+            rows={runs as (TrainRunMeta & Record<string, unknown>)[]}
             keyField="id"
             onRowClick={(row) => onOpen(row.id)}
           />

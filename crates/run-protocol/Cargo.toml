@@ -1,0 +1,19 @@
+[package]
+name = "qe-run-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# QE-406: the single source of truth for the CLI ↔ server ↔ SPA run protocol (the JSON-line progress
+# stream + the run-param wire DTOs + the protocol version). A **pure serde leaf** — no `qe-*` deps —
+# so both `qe-cli` (emit) and `qe-server` (parse) can depend on it without any firewall edge (a
+# `qe-server → qe-cli` dep would breach the firewall and pull the whole training tree onto the server).
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
