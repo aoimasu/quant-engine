@@ -8,8 +8,8 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use qe_server::auth::{
-    parse_allowlist, AuthConfig, AuthContext, GoogleClaims, IdTokenVerifier, VerifyError,
-    DEFAULT_AUTH_ENDPOINT, DEFAULT_SESSION_TTL_SECS, DEFAULT_TOKENINFO_ENDPOINT,
+    cookie_secure_for, parse_allowlist, AuthConfig, AuthContext, GoogleClaims, IdTokenVerifier,
+    VerifyError, DEFAULT_AUTH_ENDPOINT, DEFAULT_SESSION_TTL_SECS, DEFAULT_TOKENINFO_ENDPOINT,
     DEFAULT_TOKEN_ENDPOINT, SESSION_COOKIE_NAME,
 };
 use qe_server::{mint_session_cookie, AppState, ReadState, RunManager};
@@ -56,25 +56,46 @@ pub fn valid_claims(email: &str) -> GoogleClaims {
 }
 
 /// Build an [`AuthConfig`] with the fixed test secret, the given comma-separated allowlist, and the
-/// test client id.
+/// test client id. The `redirect_uri` is an `https` URL, so `cookie_secure` is `true` (production-like).
 pub fn auth_config(allowlist: &str) -> AuthConfig {
+    auth_config_with_redirect(allowlist, "https://app.test/api/auth/callback")
+}
+
+/// Like [`auth_config`] but with an explicit `redirect_uri`, so a test can exercise the QE-409 cookie
+/// `Secure` conditionality (https ⇒ `Secure`; `http://127.0.0.1` loopback dev ⇒ no `Secure`).
+pub fn auth_config_with_redirect(allowlist: &str, redirect_uri: &str) -> AuthConfig {
     AuthConfig {
         client_id: CLIENT_ID.to_owned(),
         client_secret: "test-secret".to_owned(),
-        redirect_uri: "https://app.test/api/auth/callback".to_owned(),
+        redirect_uri: redirect_uri.to_owned(),
         auth_endpoint: DEFAULT_AUTH_ENDPOINT.to_owned(),
         token_endpoint: DEFAULT_TOKEN_ENDPOINT.to_owned(),
         tokeninfo_endpoint: DEFAULT_TOKENINFO_ENDPOINT.to_owned(),
         allowed_emails: parse_allowlist(allowlist),
         session_secret: SESSION_SECRET.to_vec(),
+        session_secret_is_ephemeral: false,
         session_ttl_secs: DEFAULT_SESSION_TTL_SECS,
+        cookie_secure: cookie_secure_for(redirect_uri),
     }
 }
 
 /// Build an [`AuthContext`] from an allowlist + a mock verifier outcome.
 pub fn auth_context(allowlist: &str, verifier_outcome: Option<GoogleClaims>) -> Arc<AuthContext> {
+    auth_context_with_redirect(
+        allowlist,
+        "https://app.test/api/auth/callback",
+        verifier_outcome,
+    )
+}
+
+/// Build an [`AuthContext`] with an explicit `redirect_uri` (drives the cookie-`Secure` rule).
+pub fn auth_context_with_redirect(
+    allowlist: &str,
+    redirect_uri: &str,
+    verifier_outcome: Option<GoogleClaims>,
+) -> Arc<AuthContext> {
     Arc::new(AuthContext::new(
-        auth_config(allowlist),
+        auth_config_with_redirect(allowlist, redirect_uri),
         Arc::new(MockVerifier {
             outcome: verifier_outcome,
         }),

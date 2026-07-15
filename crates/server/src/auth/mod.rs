@@ -16,6 +16,7 @@ pub mod session;
 #[cfg(feature = "http")]
 pub mod google;
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -153,6 +154,58 @@ pub fn parse_allowlist(raw: &str) -> Vec<String> {
         .collect()
 }
 
+/// Whether cookies should carry the `Secure` attribute for a deployment whose external URL is
+/// `redirect_uri` (QE-409).
+///
+/// `Secure` is emitted **iff the deployment is served over https** (the `redirect_uri` scheme). A
+/// loopback/`http` dev address (including the empty default, before OAuth is configured) yields
+/// `false`, because a browser will not send a `Secure` cookie over `http://127.0.0.1` — an
+/// unconditional `Secure` would silently break default-address dev login. The scheme match is
+/// case-insensitive and anchored so only the URL scheme is inspected.
+pub fn cookie_secure_for(redirect_uri: &str) -> bool {
+    redirect_uri
+        .split_once("://")
+        .map(|(scheme, _)| scheme.eq_ignore_ascii_case("https"))
+        .unwrap_or(false)
+}
+
+/// Build a `Set-Cookie` header value with the QE-409 attribute policy: always `HttpOnly` +
+/// `SameSite=Lax` + `Path=/`, and `Secure` only when `secure` (see [`cookie_secure_for`]). One builder
+/// for the session, OAuth-state, clear-state, and logout cookies so the attribute set can never drift.
+fn set_cookie(name: &str, value: &str, secure: bool, max_age: u64) -> String {
+    let secure_attr = if secure { "; Secure" } else { "" };
+    format!("{name}={value}; HttpOnly{secure_attr}; SameSite=Lax; Path=/; Max-Age={max_age}")
+}
+
+/// The boot was refused because an ephemeral session secret would guard a network-exposed bind
+/// (QE-409 / AR-9). The ephemeral fallback is safe only on loopback.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "refusing to boot: bound to a non-loopback address ({addr}) with an ephemeral session secret — \
+     set {ENV_SESSION_SECRET} to a persistent value for a network-exposed deployment"
+)]
+pub struct EphemeralSecretRefused {
+    /// The offending (non-loopback) bind address.
+    pub addr: SocketAddr,
+}
+
+/// Fail-closed session-secret boot policy (QE-409 / AR-9). The random ephemeral session-secret
+/// fallback is safe **only** on loopback (a restart-invalidated, per-process secret must never guard
+/// a network-reachable deployment). Refuse when the bind is non-loopback and the secret is ephemeral;
+/// loopback keeps the ephemeral fallback, and any bind with an explicit secret is fine.
+///
+/// # Errors
+/// [`EphemeralSecretRefused`] when `addr` is non-loopback and `secret_is_ephemeral` is `true`.
+pub fn check_session_secret_policy(
+    addr: &SocketAddr,
+    secret_is_ephemeral: bool,
+) -> Result<(), EphemeralSecretRefused> {
+    if secret_is_ephemeral && !addr.ip().is_loopback() {
+        return Err(EphemeralSecretRefused { addr: *addr });
+    }
+    Ok(())
+}
+
 /// Server-side OAuth + session configuration.
 #[derive(Debug, Clone)]
 pub struct AuthConfig {
@@ -172,8 +225,17 @@ pub struct AuthConfig {
     pub allowed_emails: Vec<String>,
     /// HMAC key for the session cookie.
     pub session_secret: Vec<u8>,
+    /// Whether [`session_secret`](Self::session_secret) is a **random ephemeral** fallback (no
+    /// `QE_SESSION_SECRET` was set). Safe only on loopback (AR-9); the boot check
+    /// [`check_session_secret_policy`] refuses a non-loopback bind while this is `true`.
+    pub session_secret_is_ephemeral: bool,
     /// Session lifetime, seconds.
     pub session_ttl_secs: u64,
+    /// Whether cookies are minted with the `Secure` attribute (QE-409). Derived from the deployment
+    /// scheme (the OAuth `redirect_uri`): `true` for an `https` deployment, `false` for loopback/`http`
+    /// dev — because a browser drops a `Secure` cookie over `http://127.0.0.1`, so an unconditional
+    /// `Secure` silently breaks default-address dev login. `HttpOnly` + `SameSite=Lax` are always kept.
+    pub cookie_secure: bool,
 }
 
 impl AuthConfig {
@@ -182,31 +244,36 @@ impl AuthConfig {
     /// falls back to a **random ephemeral** secret (sessions don't survive a restart) — both are
     /// safe (fail-closed) defaults so the server always boots.
     pub fn from_env() -> Self {
-        let session_secret = std::env::var(ENV_SESSION_SECRET)
+        let explicit_secret = std::env::var(ENV_SESSION_SECRET)
             .ok()
-            .filter(|s| !s.is_empty())
-            .map(String::into_bytes)
-            .unwrap_or_else(|| {
-                tracing::warn!(
-                    "{ENV_SESSION_SECRET} unset — using a random ephemeral session secret; \
+            .filter(|s| !s.is_empty());
+        let session_secret_is_ephemeral = explicit_secret.is_none();
+        let session_secret = explicit_secret.map(String::into_bytes).unwrap_or_else(|| {
+            tracing::warn!(
+                "{ENV_SESSION_SECRET} unset — using a random ephemeral session secret; \
                      sessions will not survive a restart. Set {ENV_SESSION_SECRET} in production."
-                );
-                // 256 bits from two v4 UUIDs (getrandom-backed).
-                let mut key = Uuid::new_v4().as_bytes().to_vec();
-                key.extend_from_slice(Uuid::new_v4().as_bytes());
-                key
-            });
+            );
+            // 256 bits from two v4 UUIDs (getrandom-backed).
+            let mut key = Uuid::new_v4().as_bytes().to_vec();
+            key.extend_from_slice(Uuid::new_v4().as_bytes());
+            key
+        });
+
+        let redirect_uri = env_first(&ENV_REDIRECT_URI);
+        let cookie_secure = cookie_secure_for(&redirect_uri);
 
         Self {
             client_id: env_first(&ENV_CLIENT_ID),
             client_secret: env_first(&ENV_CLIENT_SECRET),
-            redirect_uri: env_first(&ENV_REDIRECT_URI),
+            redirect_uri,
             auth_endpoint: DEFAULT_AUTH_ENDPOINT.to_owned(),
             token_endpoint: DEFAULT_TOKEN_ENDPOINT.to_owned(),
             tokeninfo_endpoint: DEFAULT_TOKENINFO_ENDPOINT.to_owned(),
             allowed_emails: parse_allowlist(&std::env::var(ENV_ALLOWED_EMAILS).unwrap_or_default()),
             session_secret,
+            session_secret_is_ephemeral,
             session_ttl_secs: DEFAULT_SESSION_TTL_SECS,
+            cookie_secure,
         }
     }
 
@@ -242,6 +309,9 @@ pub fn public_routes() -> Router<AppState> {
     Router::new()
         .route("/auth/login", get(login))
         .route("/auth/callback", get(callback))
+        // Logout is public: you must be able to clear a broken/expired cookie without holding a valid
+        // session. `GET|POST` so a plain link and the SPA's `fetch(POST)` both reach it (QE-409).
+        .route("/auth/logout", get(logout).post(logout))
 }
 
 /// `GET /api/auth/login` — mint a CSRF `state`, set it in a short-lived cookie, and `302` to Google's
@@ -249,9 +319,7 @@ pub fn public_routes() -> Router<AppState> {
 async fn login(State(auth): State<Arc<AuthContext>>) -> Response {
     let state = Uuid::new_v4().to_string();
     let location = build_auth_url(&auth.config, &state);
-    let state_cookie = format!(
-        "{OAUTH_STATE_COOKIE}={state}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=600"
-    );
+    let state_cookie = set_cookie(OAUTH_STATE_COOKIE, &state, auth.config.cookie_secure, 600);
     (
         StatusCode::FOUND,
         [
@@ -315,13 +383,14 @@ async fn callback(
 
     let exp = now.saturating_add(auth.config.session_ttl_secs);
     let token = mint_session_cookie(&auth.config.session_secret, &claims.email, exp);
-    let session_cookie = format!(
-        "{SESSION_COOKIE_NAME}={token}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age={}",
-        auth.config.session_ttl_secs
+    let session_cookie = set_cookie(
+        SESSION_COOKIE_NAME,
+        &token,
+        auth.config.cookie_secure,
+        auth.config.session_ttl_secs,
     );
     // Clear the one-shot state cookie.
-    let clear_state =
-        format!("{OAUTH_STATE_COOKIE}=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0");
+    let clear_state = set_cookie(OAUTH_STATE_COOKIE, "", auth.config.cookie_secure, 0);
 
     // `AppendHeaders` so both `Set-Cookie`s survive — an array of headers would `insert` (overwrite)
     // and drop the session cookie.
@@ -339,6 +408,20 @@ async fn callback(
 /// `GET /api/me` — the authenticated email (the session middleware guarantees one is present).
 async fn me(Extension(AuthedEmail(email)): Extension<AuthedEmail>) -> Response {
     Json(json!({ "email": email })).into_response()
+}
+
+/// `GET|POST /api/auth/logout` — clear the session cookie (QE-409). Emits a `Set-Cookie` with the
+/// **same name/path/attributes** and `Max-Age=0` (empty value) so the browser drops it immediately;
+/// a subsequent `/api/me` then carries no valid session and is `401`. Idempotent and public (no valid
+/// session required — clearing a broken/expired cookie must always succeed).
+async fn logout(State(auth): State<Arc<AuthContext>>) -> Response {
+    let clear = set_cookie(SESSION_COOKIE_NAME, "", auth.config.cookie_secure, 0);
+    (
+        StatusCode::OK,
+        [(header::SET_COOKIE, clear)],
+        Json(json!({ "status": "logged_out" })),
+    )
+        .into_response()
 }
 
 /// Session-gate middleware for the protected `/api` subtree: require a valid signed session cookie,
@@ -530,7 +613,9 @@ mod tests {
             tokeninfo_endpoint: DEFAULT_TOKENINFO_ENDPOINT.to_owned(),
             allowed_emails: Vec::new(),
             session_secret: b"secret".to_vec(),
+            session_secret_is_ephemeral: false,
             session_ttl_secs: DEFAULT_SESSION_TTL_SECS,
+            cookie_secure: true,
         }
     }
 
@@ -566,5 +651,57 @@ mod tests {
             DisabledVerifier.verify("code"),
             Err(VerifyError::Unsupported)
         ));
+    }
+
+    #[test]
+    fn cookie_secure_follows_scheme() {
+        // https deployment ⇒ Secure.
+        assert!(cookie_secure_for(
+            "https://app.example.com/api/auth/callback"
+        ));
+        assert!(cookie_secure_for("HTTPS://APP.EXAMPLE.COM/cb")); // case-insensitive scheme
+                                                                  // loopback / http dev, and the empty default (OAuth unconfigured) ⇒ NOT Secure, so the cookie
+                                                                  // survives over http://127.0.0.1 and default-address dev login persists.
+        assert!(!cookie_secure_for(
+            "http://127.0.0.1:8080/api/auth/callback"
+        ));
+        assert!(!cookie_secure_for("http://localhost:8080/cb"));
+        assert!(!cookie_secure_for(""));
+        assert!(!cookie_secure_for("not-a-url"));
+    }
+
+    #[test]
+    fn set_cookie_keeps_httponly_and_samesite_and_conditions_secure() {
+        let secure = set_cookie(SESSION_COOKIE_NAME, "tok", true, 100);
+        assert!(secure.contains("HttpOnly"));
+        assert!(secure.contains("SameSite=Lax"));
+        assert!(secure.contains("Path=/"));
+        assert!(secure.contains("Secure"));
+        assert!(secure.contains("Max-Age=100"));
+
+        let insecure = set_cookie(SESSION_COOKIE_NAME, "tok", false, 0);
+        assert!(insecure.contains("HttpOnly"));
+        assert!(insecure.contains("SameSite=Lax"));
+        assert!(!insecure.contains("Secure"), "no Secure over http dev");
+        assert!(insecure.contains("Max-Age=0"));
+    }
+
+    #[test]
+    fn session_secret_policy_is_fail_closed_off_loopback() {
+        let loopback: SocketAddr = "127.0.0.1:8080".parse().unwrap();
+        let loopback_v6: SocketAddr = "[::1]:8080".parse().unwrap();
+        let routable: SocketAddr = "0.0.0.0:8080".parse().unwrap();
+        let public: SocketAddr = "10.0.0.5:8080".parse().unwrap();
+
+        // Ephemeral secret is safe on loopback (AR-9) …
+        assert!(check_session_secret_policy(&loopback, true).is_ok());
+        assert!(check_session_secret_policy(&loopback_v6, true).is_ok());
+        // … but a non-loopback bind with an ephemeral secret is REFUSED.
+        assert!(check_session_secret_policy(&routable, true).is_err());
+        assert!(check_session_secret_policy(&public, true).is_err());
+        // An explicit (persistent) secret is fine on any bind.
+        assert!(check_session_secret_policy(&routable, false).is_ok());
+        assert!(check_session_secret_policy(&public, false).is_ok());
+        assert!(check_session_secret_policy(&loopback, false).is_ok());
     }
 }

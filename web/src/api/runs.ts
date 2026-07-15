@@ -11,6 +11,8 @@
  *   GET  /api/market-data/coverage → CoverageRow[]
  */
 
+import { emitUnauthorized } from './authEvents';
+
 export type RunStatus = 'queued' | 'running' | 'succeeded' | 'failed';
 
 /** Latest progress update tailed from the subprocess stdout (spec §5.3). */
@@ -215,6 +217,21 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * A **401 Unauthorized** from any session-gated endpoint (QE-409) — an expired/cleared session
+ * mid-session. Subclasses {@link ApiError} (status is fixed to `401`) so every existing
+ * `instanceof ApiError` consumer keeps working, while pollers/screens can narrow with
+ * `instanceof UnauthorizedError` to treat it as **terminal-auth** (stop, don't retry, don't render a
+ * "failed" surface). Whenever one is thrown the API client also emits the app-level `unauthorized`
+ * signal (see {@link emitUnauthorized}), so the shell flips back to `Login` without a reload.
+ */
+export class UnauthorizedError extends ApiError {
+  constructor(message: string) {
+    super(401, message);
+    this.name = 'UnauthorizedError';
+  }
+}
+
 const JSON_HEADERS = { Accept: 'application/json' } as const;
 
 async function errorMessage(res: Response): Promise<string> {
@@ -227,9 +244,24 @@ async function errorMessage(res: Response): Promise<string> {
   return `request failed: ${res.status}`;
 }
 
+/**
+ * Turn a non-OK {@link Response} into the right thrown error. A **401** becomes an
+ * {@link UnauthorizedError} *and* fires the app-level `unauthorized` signal here — the single choke
+ * point so **any** 401 (list/run polling, coverage, vintages, create) flips the shell exactly once.
+ * Every other status becomes a generic {@link ApiError}.
+ */
+async function throwForResponse(res: Response): Promise<never> {
+  const message = await errorMessage(res);
+  if (res.status === 401) {
+    emitUnauthorized();
+    throw new UnauthorizedError(message);
+  }
+  throw new ApiError(res.status, message);
+}
+
 async function getJson<T>(url: string): Promise<T> {
   const res = await fetch(url, { credentials: 'same-origin', headers: JSON_HEADERS });
-  if (!res.ok) throw new ApiError(res.status, await errorMessage(res));
+  if (!res.ok) await throwForResponse(res);
   return (await res.json()) as T;
 }
 
@@ -330,7 +362,7 @@ async function postRun(type: string, params: unknown): Promise<string> {
     headers: { ...JSON_HEADERS, 'Content-Type': 'application/json' },
     body: JSON.stringify({ type, params }),
   });
-  if (!res.ok) throw new ApiError(res.status, await errorMessage(res));
+  if (!res.ok) await throwForResponse(res);
   const body = (await res.json()) as { id: string };
   return body.id;
 }

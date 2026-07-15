@@ -25,16 +25,49 @@ mod common;
 /// state (the runs dir + the read-state store) lives under it, so it is cleaned up when the caller
 /// drops the guard — nothing leaks into the temp dir across the suite.
 fn app(allowlist: &str, verifier_outcome: Option<GoogleClaims>) -> (Router, TempDir) {
+    app_with_redirect(
+        allowlist,
+        "https://app.test/api/auth/callback",
+        verifier_outcome,
+    )
+}
+
+/// Like [`app`] but with an explicit OAuth `redirect_uri`, which drives the QE-409 cookie-`Secure`
+/// rule (https ⇒ `Secure`; loopback `http` ⇒ no `Secure`).
+fn app_with_redirect(
+    allowlist: &str,
+    redirect_uri: &str,
+    verifier_outcome: Option<GoogleClaims>,
+) -> (Router, TempDir) {
     let tmp = tempfile::tempdir().expect("create temp dir");
     let spawner = Arc::new(CliJobSpawner::new(PathBuf::from("qe")));
     let manager = Arc::new(RunManager::new(tmp.path().join("runs"), spawner, 2));
-    let auth = common::auth_context(allowlist, verifier_outcome);
+    let auth = common::auth_context_with_redirect(allowlist, redirect_uri, verifier_outcome);
     // Static dir irrelevant (no `/` requests here).
     let router = build_router(
         &tmp.path().join("static"),
         common::app_state_under(manager, auth, tmp.path()),
     );
     (router, tmp)
+}
+
+fn post(uri: &str) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(uri)
+        .body(Body::empty())
+        .unwrap()
+}
+
+/// The full `Set-Cookie` header value for `qe_session` (attributes included), or `None`.
+fn raw_session_set_cookie(resp: &axum::response::Response) -> Option<String> {
+    for hv in resp.headers().get_all(header::SET_COOKIE) {
+        let s = hv.to_str().ok()?;
+        if s.starts_with("qe_session=") {
+            return Some(s.to_owned());
+        }
+    }
+    None
 }
 
 async fn send(app: &Router, req: Request<Body>) -> axum::response::Response {
@@ -278,4 +311,80 @@ async fn health_stays_public() {
     let (app, _tmp) = app("admin@example.com", None);
     let resp = send(&app, get("/api/health")).await;
     assert_eq!(resp.status(), StatusCode::OK);
+}
+
+// ---- QE-409: logout + dev-safe cookies -----------------------------------------------------------
+
+#[tokio::test]
+async fn logout_clears_the_session_and_me_is_then_401() {
+    let email = "admin@example.com";
+    let (app, _tmp) = app(email, Some(common::valid_claims(email)));
+
+    // Log in and confirm the session works.
+    let resp = send(&app, callback("auth-code", "state-1")).await;
+    let cookie = session_cookie_from(&resp).expect("a session cookie is set");
+    assert_eq!(
+        send(&app, get_with_cookie("/api/me", &cookie))
+            .await
+            .status(),
+        StatusCode::OK
+    );
+
+    // Logout clears the cookie: same name/path, empty value, Max-Age=0.
+    let out = send(&app, post("/api/auth/logout")).await;
+    assert_eq!(out.status(), StatusCode::OK);
+    let cleared = raw_session_set_cookie(&out).expect("logout clears the session cookie");
+    assert!(
+        cleared.starts_with("qe_session=;"),
+        "empty value: {cleared}"
+    );
+    assert!(cleared.contains("Max-Age=0"), "cleared: {cleared}");
+    assert!(cleared.contains("Path=/"));
+    assert!(cleared.contains("HttpOnly"));
+
+    // The browser then holds the emptied cookie ⇒ a subsequent /api/me carries no valid session ⇒ 401.
+    let after = send(&app, get_with_cookie("/api/me", "qe_session=")).await;
+    assert_eq!(after.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn logout_is_reachable_without_a_session() {
+    // Public route: clearing a broken/expired cookie must succeed even with no valid session.
+    let (app, _tmp) = app("admin@example.com", None);
+    assert_eq!(
+        send(&app, post("/api/auth/logout")).await.status(),
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn session_cookie_is_secure_on_https_and_keeps_httponly_samesite() {
+    let email = "admin@example.com";
+    let (app, _tmp) = app_with_redirect(
+        email,
+        "https://app.example.com/api/auth/callback",
+        Some(common::valid_claims(email)),
+    );
+    let resp = send(&app, callback("auth-code", "state-1")).await;
+    let set = raw_session_set_cookie(&resp).expect("session cookie");
+    assert!(set.contains("Secure"), "https ⇒ Secure: {set}");
+    assert!(set.contains("HttpOnly"), "{set}");
+    assert!(set.contains("SameSite=Lax"), "{set}");
+}
+
+#[tokio::test]
+async fn session_cookie_is_not_secure_on_loopback_http_dev() {
+    // Default dev bind is http://127.0.0.1 — a Secure cookie would be dropped by the browser, so the
+    // session cookie must NOT be Secure here (while keeping HttpOnly + SameSite=Lax).
+    let email = "admin@example.com";
+    let (app, _tmp) = app_with_redirect(
+        email,
+        "http://127.0.0.1:8080/api/auth/callback",
+        Some(common::valid_claims(email)),
+    );
+    let resp = send(&app, callback("auth-code", "state-1")).await;
+    let set = raw_session_set_cookie(&resp).expect("session cookie");
+    assert!(!set.contains("Secure"), "loopback http ⇒ no Secure: {set}");
+    assert!(set.contains("HttpOnly"), "{set}");
+    assert!(set.contains("SameSite=Lax"), "{set}");
 }

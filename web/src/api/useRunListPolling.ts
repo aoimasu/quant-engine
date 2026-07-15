@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { listRuns, type RunListItem, type RunListQuery } from './runs';
+import { listRuns, UnauthorizedError, type RunListItem, type RunListQuery } from './runs';
 import { DEFAULT_POLL_MS } from './usePollingRun';
 
 /** Consecutive poll failures tolerated before giving up with a fatal error (resilience). */
@@ -61,6 +61,10 @@ export function useRunListPolling(options: UseRunListPollingOptions = {}): RunLi
         if (anyActive(page.runs)) timer = setTimeout(tick, pollMs);
       } catch (e) {
         if (cancelled) return;
+        // Terminal-auth (QE-409): a 401 stops the list poll immediately without consuming the retry
+        // budget or surfacing a fatal error. The API client already emitted the `unauthorized` signal
+        // that flips the shell back to Login.
+        if (e instanceof UnauthorizedError) return;
         failures += 1;
         if (failures > MAX_POLL_FAILURES) {
           setError(e instanceof Error ? e.message : 'Failed to load runs.');
