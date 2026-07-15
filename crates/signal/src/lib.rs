@@ -23,7 +23,9 @@ pub mod indicator;
 pub mod reconstruct;
 pub mod regime;
 
-pub use feature::{assemble_batch, FeatureAssembler, FeatureSchema, FeatureVector};
+pub use feature::{
+    assemble_batch, CatalogueIdentity, FeatureAssembler, FeatureSchema, FeatureVector,
+};
 pub use genome::{
     Clause, Decision, ExitParams, Genome, PositionState, RiskParams, RuleSet, CLAUSES_PER_SET,
     MAX_SIZE_BPS, REP_VERSION,

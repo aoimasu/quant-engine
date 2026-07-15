@@ -6,20 +6,21 @@
 //! `qe_signal::feature::assemble_batch(catalogue_cfg, samples)` → `FeatureVector`s → zipped with the
 //! bar `close` price and funding into decision bars.
 //!
-//! **Schema sourcing (design note, decision 1).** The vintage does *not* persist the catalogue config
-//! (`CatalogueConfig.states` / `CATALOGUE_VERSION`) — neither `VintageContent`, `CalibrationProfile`,
-//! nor `Genome` records it. The schema is therefore built from [`CatalogueConfig::default`] (the
-//! canonical catalogue at the current `CATALOGUE_VERSION`) — the same schema training evolves against —
-//! and [`check_schema`] asserts every chromosome is valid against it.
+//! **Schema sourcing.** The schema is built from [`CatalogueConfig::default`] (the canonical catalogue at
+//! the current `CATALOGUE_VERSION`) — the same schema training evolves against. As of QE-402 the vintage
+//! *also* **persists** the identity of that catalogue (`CATALOGUE_VERSION`, `num_states`, and an ordered
+//! indicator-id hash) inside `VintageContent.catalogue`.
 //!
-//! **Scope of the guard (important — not a full drift check).** [`Genome::is_valid`] only *bounds-checks*
-//! each clause: feature index `< schema.len()` and state bounds `< num_states`. So the resulting
-//! [`RunError::SchemaMismatch`] catches only **out-of-range** drift (a genome addressing a feature/state
-//! this build's catalogue no longer has). It does **not** detect *identity* drift that keeps the same
-//! width and `num_states` — e.g. a catalogue **reorder** (clause indices silently mean a different
-//! indicator) or a `CATALOGUE_VERSION` bump with the same shape. Those are undetectable today because
-//! the vintage persists neither `CATALOGUE_VERSION` nor `states`; pinning them in the artefact so an
-//! exact schema match can be verified is a recommended follow-up (tracked separately).
+//! **Two complementary guards.**
+//! - **Exact identity match (QE-402)** — `VintageRepository::load` asserts, via
+//!   `qe_vintage::schema::assert_schema`, that the vintage's pinned [`qe_signal::CatalogueIdentity`]
+//!   equals this build's exactly. This catches *identity* drift that keeps the same width and
+//!   `num_states` — a catalogue **reorder** (clause indices silently mean a different indicator) or a
+//!   same-width `CATALOGUE_VERSION` bump — which the bounds check alone cannot. Both the CLI backtest and
+//!   the live runtime load through that boundary, so they fail closed.
+//! - **Bounds check** — [`check_schema`] below still runs [`Genome::is_valid`] (feature index
+//!   `< schema.len()`, state `< num_states`), yielding [`RunError::SchemaMismatch`] on **out-of-range**
+//!   drift. It is retained as a belt-and-braces structural check after the exact identity match.
 
 use std::collections::BTreeMap;
 

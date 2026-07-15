@@ -218,6 +218,7 @@ mod tests {
             weights,
             calibration: CalibrationProfile::new(Fraction::new(Decimal::new(2, 1)).unwrap()),
             worst_case_loss: Some(0.2),
+            catalogue: qe_signal::CatalogueIdentity::current(),
             lineage: Lineage::new("cfg", "snap", "commit", vec![1]),
         };
         Vintage::seal(content).unwrap()

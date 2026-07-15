@@ -193,6 +193,7 @@ mod tests {
                 Fraction::new(Decimal::new(calib_tenths, 1)).unwrap(),
             ),
             worst_case_loss: Some(0.28),
+            catalogue: qe_signal::CatalogueIdentity::current(),
             lineage: Lineage::new(
                 format!("cfg-{id}"),
                 format!("snap-{id}"),

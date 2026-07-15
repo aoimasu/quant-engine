@@ -5,6 +5,9 @@
 //! is the single path and [`assemble_batch`] is just the push loop — batch == streaming by
 //! construction (AC).
 
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
 use crate::indicator::{catalogue, CatalogueConfig, Indicator, QState, CATALOGUE_VERSION};
 use crate::Sample;
 
@@ -88,6 +91,77 @@ impl FeatureSchema {
     #[must_use]
     pub fn max_lookback(&self) -> usize {
         self.lookbacks.iter().copied().max().unwrap_or(0)
+    }
+
+    /// The persisted identity of the catalogue this schema was built from (QE-402).
+    #[must_use]
+    pub fn identity(&self) -> CatalogueIdentity {
+        CatalogueIdentity::from_schema(self)
+    }
+}
+
+/// The **persisted** identity of the indicator catalogue a vintage's genomes were sealed against (QE-402).
+///
+/// A [`FeatureSchema`]'s width/`num_states` bounds are not enough to pin identity: a catalogue **reorder**
+/// (a clause's `feature` index silently means a different indicator) or a **same-width `CATALOGUE_VERSION`
+/// bump** keeps the same shape yet changes what each index *means*. Pinning this identity inside the
+/// vintage lets the load boundary assert an **exact** match rather than a bounds check, so a sealed genome
+/// can never silently address a different indicator at backtest/live time.
+///
+/// It is a pure, deterministic function of the catalogue (fixed indicator order, fixed
+/// [`CATALOGUE_VERSION`], fixed state count), so the same build always produces the same identity — the
+/// property the vintage content hash / reproducibility relies on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CatalogueIdentity {
+    /// The catalogue version ([`CATALOGUE_VERSION`]) the schema was built from.
+    pub catalogue_version: u32,
+    /// The per-indicator quantised state count (uniform across the catalogue).
+    pub num_states: u16,
+    /// Lowercase-hex SHA-256 over the **ordered** indicator ids (one per line). Any reorder / add /
+    /// rename of an indicator changes this hash, so identity drift the version+width miss is caught.
+    pub id_hash: String,
+}
+
+impl CatalogueIdentity {
+    /// The identity of `schema` — its catalogue version, state count, and ordered-id hash.
+    #[must_use]
+    pub fn from_schema(schema: &FeatureSchema) -> Self {
+        CatalogueIdentity {
+            catalogue_version: schema.version(),
+            num_states: schema.num_states(),
+            id_hash: Self::hash_ids(schema.ids()),
+        }
+    }
+
+    /// The identity of the catalogue built from `cfg`.
+    #[must_use]
+    pub fn from_config(cfg: &CatalogueConfig) -> Self {
+        Self::from_schema(&FeatureSchema::from_catalogue(cfg))
+    }
+
+    /// The identity of the **current build's** default catalogue — the schema the whole pipeline
+    /// addresses genomes against. The value a loaded vintage must match exactly.
+    #[must_use]
+    pub fn current() -> Self {
+        Self::from_config(&CatalogueConfig::default())
+    }
+
+    /// Lowercase-hex SHA-256 over the ordered indicator ids, joined by `\n`. Exposed so a reorder can be
+    /// shown to change the hash.
+    #[must_use]
+    pub fn hash_ids(ids: &[String]) -> String {
+        let mut hasher = Sha256::new();
+        for id in ids {
+            hasher.update(id.as_bytes());
+            hasher.update(b"\n");
+        }
+        let digest = hasher.finalize();
+        let mut s = String::with_capacity(digest.len() * 2);
+        use std::fmt::Write as _;
+        for b in digest {
+            let _ = write!(s, "{b:02x}");
+        }
+        s
     }
 }
 
