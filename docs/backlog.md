@@ -264,7 +264,6 @@ Authoritative for the P0/P1 tickets below; later phases inherit unless a ticket 
 
 | Ticket | Title | Depends on | Status |
 |--------|-------|------------|:------:|
-| QE-408 | Backtests list must filter to backtest runs (client filter + server `?type=`)  *(P2 — correctness)* | QE-259 | — |
 | QE-409 | Auth completeness: SPA 401→re-auth, logout endpoint, dev-safe cookies, fail-closed secret  *(P2)* · *adjacent QE-265* | QE-256 | — |
 | QE-410 | Run-list read path: shared polling hook, live list refresh, server pagination/projection/filter  *(P2)* · *coordinate QE-264* | QE-255, QE-259 | — |
 | QE-419 | Unify config: single source of truth for storage dirs across server + spawned CLI  *(P2)* | QE-002, QE-254 | — |

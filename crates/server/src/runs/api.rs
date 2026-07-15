@@ -7,11 +7,12 @@
 
 use std::sync::Arc;
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use serde::Deserialize;
 use serde_json::json;
 
 use super::manager::{CreateError, RunManager};
@@ -52,16 +53,36 @@ async fn create_run(
     }
 }
 
+/// Query string for `GET /api/runs`. `?type=backtest|train` filters to that run type (QE-408); absent
+/// ⇒ all runs. An unrecognised value simply matches nothing (empty list), never an error.
+#[derive(Debug, Deserialize)]
+struct ListRunsQuery {
+    /// Optional run-type filter, matched against `IndexEntry.run_type` / `RunMeta.type`.
+    #[serde(rename = "type")]
+    run_type: Option<String>,
+}
+
 /// `GET /api/runs` — list runs newest-first (index order reversed), each enriched with its
 /// authoritative `meta.json` status/progress.
+///
+/// QE-408: an optional `?type=` query filters to a single run type. The filter is applied at the
+/// **index** level (before reading each `meta.json`), so a type-specific caller (e.g. the Backtests
+/// list) does not make the server over-read the other type's meta. With no `?type=` the behaviour is
+/// byte-identical to before (all runs).
 ///
 /// QE-411: the index read and the per-run `meta.json` reads are blocking `std::fs`, so the whole batch
 /// runs inside a single [`tokio::task::spawn_blocking`] closure (one closure for the whole list, not one
 /// per run) — keeping the async worker free while preserving the newest-first order and the
 /// skip-on-missing-meta semantics.
-async fn list_runs(State(manager): State<Arc<RunManager>>) -> Response {
+async fn list_runs(
+    State(manager): State<Arc<RunManager>>,
+    Query(query): Query<ListRunsQuery>,
+) -> Response {
     let store = manager.store().clone();
-    match tokio::task::spawn_blocking(move || list_runs_blocking(&store)).await {
+    let type_filter = query.run_type;
+    match tokio::task::spawn_blocking(move || list_runs_blocking(&store, type_filter.as_deref()))
+        .await
+    {
         Ok(Ok(runs)) => Json(runs).into_response(),
         Ok(Err(msg)) => internal(msg),
         Err(_) => internal("run listing task failed".to_owned()),
@@ -69,14 +90,20 @@ async fn list_runs(State(manager): State<Arc<RunManager>>) -> Response {
 }
 
 /// The blocking body of [`list_runs`], run off the async executor. Returns the newest-first runs, or a
-/// pre-formatted error message identical to the previous inline error bodies.
-fn list_runs_blocking(store: &RunStore) -> Result<Vec<RunMeta>, String> {
+/// pre-formatted error message identical to the previous inline error bodies. When `type_filter` is
+/// `Some`, only index entries whose `run_type` matches are read + returned (QE-408); `None` is the
+/// original all-runs behaviour.
+fn list_runs_blocking(store: &RunStore, type_filter: Option<&str>) -> Result<Vec<RunMeta>, String> {
     let index = store
         .read_index()
         .map_err(|e| format!("failed to read index: {e}"))?;
     let mut runs: Vec<RunMeta> = Vec::with_capacity(index.len());
     // Newest first.
     for entry in index.iter().rev() {
+        // QE-408: skip the other run type at the index level, before touching its `meta.json`.
+        if type_filter.is_some_and(|want| entry.run_type != want) {
+            continue;
+        }
         match store.read_meta(&entry.id) {
             Ok(Some(meta)) => runs.push(meta),
             Ok(None) => {} // indexed but meta missing (mid-create race / manual deletion) — skip.
