@@ -24,6 +24,10 @@ const CSS = `
   color: var(--text-primary); white-space: nowrap;
 }
 .qe-table tbody tr { transition: background var(--dur-fast) var(--ease-out); }
+.qe-table tbody tr.qe-table__row--clickable { cursor: pointer; }
+.qe-table tbody tr.qe-table__row--clickable:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: -2px; background: var(--surface-hover);
+}
 .qe-table--hover tbody tr:hover { background: var(--surface-hover); }
 .qe-table--striped tbody tr:nth-child(even) { background: rgba(255,255,255,0.015); }
 .qe-table tbody tr:last-child td { border-bottom: none; }
@@ -94,10 +98,25 @@ export function DataTable<Row extends Record<string, unknown>>({
         </thead>
         <tbody>
           {rows.map((row, i) => (
+            // When `onRowClick` is set the row is an activation control: expose it as a
+            // keyboard-operable button (Enter/Space) so navigation isn't mouse-only (QE-422).
+            // Rows without a handler stay plain, non-interactive `<tr>`s.
             <tr
               key={keyField ? String(row[keyField]) : i}
+              className={onRowClick ? 'qe-table__row--clickable' : undefined}
+              role={onRowClick ? 'button' : undefined}
+              tabIndex={onRowClick ? 0 : undefined}
               onClick={onRowClick ? () => onRowClick(row, i) : undefined}
-              style={onRowClick ? { cursor: 'pointer' } : undefined}
+              onKeyDown={
+                onRowClick
+                  ? (e) => {
+                      if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') {
+                        e.preventDefault(); // Space would otherwise scroll the page.
+                        onRowClick(row, i);
+                      }
+                    }
+                  : undefined
+              }
             >
               {columns.map((c) => (
                 <td key={c.key} className={alignCls(c.align)}>
