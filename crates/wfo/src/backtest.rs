@@ -68,6 +68,9 @@ pub struct BacktestResult {
     pub trades: usize,
     /// Final equity minus the unit starting capital (net of all costs).
     pub net_pnl: Decimal,
+    /// Realised funding cashflow accrued against the held position over the run (signed; negative when
+    /// paid). Decomposed out of `net_pnl` for QE-403 net-of-cost visibility; already included in it.
+    pub funding: Decimal,
     /// Whether the genome cleared the minimum-trade gate.
     pub accepted: bool,
     /// Noise-robust geometric fitness; `mean = −∞` when rejected as noise.
@@ -160,6 +163,7 @@ pub fn backtest_with_trades(
 
     let mut returns: Vec<f64> = Vec::with_capacity(bars.len().saturating_sub(1));
     let mut trades = 0usize;
+    let mut funding_accrued = Decimal::ZERO; // QE-403: realised funding, decomposed out of net P&L
 
     // Trade recorder: the open entry (idx, side, fill price) between a paired entry and close, plus the
     // completed round-trips. `open` is `Some` iff a position is currently held (entries are flat-only
@@ -222,7 +226,9 @@ pub fn backtest_with_trades(
 
         // (2) Funding accrual against the held position (QE-109 sign: longs pay shorts when rate > 0).
         if let Some(rate) = bar.funding_rate {
-            cash += -pos_qty * price * rate;
+            let flow = -pos_qty * price * rate;
+            cash += flow;
+            funding_accrued += flow;
         }
 
         // (3) Mark equity and record the net-of-cost per-bar return.
@@ -273,6 +279,7 @@ pub fn backtest_with_trades(
         returns,
         trades,
         net_pnl,
+        funding: funding_accrued,
         accepted,
         fitness,
     };
@@ -407,6 +414,64 @@ mod tests {
             lo.fitness.mean
         );
         assert!(hi.net_pnl < lo.net_pnl, "cost should lower net P&L");
+    }
+
+    #[test]
+    fn size_impact_strictly_lowers_high_turnover_fitness() {
+        // QE-403 AC: with size-impact > 0, a high-turnover / large-size genome's fitness STRICTLY drops
+        // relative to impact == 0. `decide` is cost-blind, so the trade sequence is identical — the drop
+        // is pure size-dependent slippage drag, not fewer trades.
+        use crate::friction::SlippageModel;
+
+        let s = schema();
+        let bars = uptrend_bars(&s, 160);
+        // Full-size (10 000 bps = 1×), short holding period ⇒ many round-trips ⇒ high turnover.
+        let g = long_genome(1, 10_000);
+
+        let no_impact = BacktestConfig {
+            friction: FrictionConfig {
+                slippage: SlippageModel {
+                    impact: Decimal::ZERO,
+                    ..SlippageModel::default()
+                },
+                ..FrictionConfig::default()
+            },
+            ..BacktestConfig::default()
+        };
+        // A deliberately visible impact so the drag is unambiguous (any impact > 0 drops fitness; a large
+        // coefficient just makes the strict inequality robust to floating-point noise).
+        let with_impact = BacktestConfig {
+            friction: FrictionConfig {
+                slippage: SlippageModel {
+                    impact: Decimal::new(5, 3), // 0.005 per unit qty
+                    ..SlippageModel::default()
+                },
+                ..FrictionConfig::default()
+            },
+            ..BacktestConfig::default()
+        };
+
+        let base = backtest(&g, &bars, &no_impact);
+        let taxed = backtest(&g, &bars, &with_impact);
+
+        assert!(
+            base.accepted && taxed.accepted,
+            "genome must clear the gate"
+        );
+        assert_eq!(
+            base.trades, taxed.trades,
+            "size-impact must not change the trade sequence (cost-blind decisions)"
+        );
+        assert!(
+            taxed.fitness.mean < base.fitness.mean,
+            "size-impact must strictly lower fitness: {} !< {}",
+            taxed.fitness.mean,
+            base.fitness.mean
+        );
+        assert!(
+            taxed.net_pnl < base.net_pnl,
+            "size-impact must strictly lower net P&L"
+        );
     }
 
     #[test]

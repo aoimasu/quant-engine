@@ -128,6 +128,7 @@ pub fn run_train(
         population: opts.population,
         holdout: opts.holdout,
         embargo: opts.embargo,
+        funding_coverage_min: cfg.selection.funding_coverage_min,
         lineage,
         profile: cfg.profile.as_str().to_owned(),
     };

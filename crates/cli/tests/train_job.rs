@@ -16,10 +16,13 @@ use std::path::{Path, PathBuf};
 
 use qe_cli::jobs::backtest::{run_backtest, BacktestParams};
 use qe_cli::jobs::train::{run_train_job, TrainParams};
-use qe_cli::jobs::ProgressLine;
+use qe_cli::jobs::{ProgressLine, RunError};
 use qe_determinism::Lineage;
+use qe_domain::{Bar, InstrumentId, Price, Qty, Resolution, Timestamp};
 use qe_signal::{CatalogueConfig, FeatureSchema};
+use qe_storage::MarketStore;
 use qe_vintage::VintageRepository;
+use rust_decimal::Decimal;
 
 /// Matches the map size the committed fixture store was written with (`backtest_job.rs`).
 const FIXTURE_MAP_SIZE: usize = 1 << 20; // 1 MiB
@@ -63,6 +66,9 @@ fn params(store_path: PathBuf, vintage_root: PathBuf, seed: u64) -> TrainParams 
         population: 16,
         holdout: 31,
         embargo: 2,
+        // The committed fixture store has full 8h funding coverage (stamps every 8 bars over 120 bars),
+        // so the default 0.90 floor is comfortably cleared.
+        funding_coverage_min: 0.90,
         lineage: lineage(seed),
         profile: "train".to_owned(),
     }
@@ -211,4 +217,76 @@ fn train_is_deterministic_for_a_fixed_seed() {
     // A different seed changes the vintage id (the seed folds into the lineage).
     let (id_c, _) = run(7);
     assert_ne!(id_a, id_c, "a different seed must change the vintage id");
+}
+
+/// Epoch-ms of 2021-01-01 (matches the window in `params`).
+const START_MS: i64 = 18_628 * 86_400_000;
+const HOUR_MS: i64 = 3_600_000;
+
+/// Write a store with 120 hourly bars but **no funding stamps**, so the QE-403 funding-coverage gate must
+/// fire. Prices swing (a triangle wave) so feature assembly is well-defined.
+fn write_no_funding_store(dir: &std::path::Path) -> PathBuf {
+    let path = dir.join("no_funding_store");
+    std::fs::create_dir_all(&path).unwrap();
+    let store = MarketStore::open(&path, FIXTURE_MAP_SIZE).unwrap();
+    let inst = InstrumentId::new("BTCUSDT").unwrap();
+    let bars: Vec<Bar> = (0..120i64)
+        .map(|i| {
+            let phase = i % 24;
+            let tri = if phase <= 12 { phase } else { 24 - phase };
+            let mid =
+                Decimal::from(100) + Decimal::from(tri) * Decimal::new(15, 1) - Decimal::from(9);
+            let t = Timestamp::from_millis(START_MS + i * HOUR_MS);
+            Bar::new(
+                t,
+                Resolution::H1,
+                Price::new(mid).unwrap(),
+                Price::new(mid + Decimal::new(5, 1)).unwrap(),
+                Price::new(mid - Decimal::new(5, 1)).unwrap(),
+                Price::new(mid).unwrap(),
+                Qty::new(Decimal::from(1000)).unwrap(),
+                100,
+            )
+            .unwrap()
+        })
+        .collect();
+    store.put_bars(&inst, &bars).unwrap();
+    // Deliberately no `put_funding` — the coverage gate must catch the gap.
+    path
+}
+
+#[test]
+fn no_funding_window_trips_coverage_gate_and_seals_nothing() {
+    // QE-403 AC: a training run over a window with no funding data errors (an explicit "funding coverage
+    // 0%" gate failure) rather than sealing.
+    let tmp = tempfile::tempdir().unwrap();
+    let store_path = write_no_funding_store(tmp.path());
+    let vintage_root = tmp.path().join("artifacts/vintages");
+
+    let err = run_train_job(&params(store_path, vintage_root.clone(), 42), &mut |_| {})
+        .expect_err("a funding-free window must not seal");
+
+    match err {
+        RunError::FundingCoverage {
+            present,
+            coverage_pct,
+            threshold_pct,
+            ..
+        } => {
+            assert_eq!(present, 0, "the store has no funding stamps");
+            assert_eq!(coverage_pct, 0, "coverage must read 0%");
+            assert_eq!(threshold_pct, 90, "the default floor is 90%");
+        }
+        other => panic!("expected RunError::FundingCoverage, got {other:?}"),
+    }
+
+    // Nothing was sealed.
+    let sealed_any = vintage_root.exists()
+        && std::fs::read_dir(&vintage_root)
+            .map(|mut d| d.next().is_some())
+            .unwrap_or(false);
+    assert!(
+        !sealed_any,
+        "no vintage may be written when the funding gate fails"
+    );
 }

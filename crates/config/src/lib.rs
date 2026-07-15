@@ -12,7 +12,7 @@ pub mod universe;
 
 pub use error::ConfigError;
 pub use schema::{
-    BarsConfig, Config, DeterminismConfig, HistoryConfig, Profile, StorageConfig,
+    BarsConfig, Config, DeterminismConfig, HistoryConfig, Profile, SelectionConfig, StorageConfig,
     UniverseMemberConfig,
 };
 pub use universe::{InstrumentListing, Universe};
@@ -157,6 +157,15 @@ impl Config {
         // with dotted field paths — fail-fast at load like every other field.
         self.universe()?;
 
+        // QE-403: the funding-coverage floor is a fraction.
+        let f = self.selection.funding_coverage_min;
+        if !f.is_finite() || !(0.0..=1.0).contains(&f) {
+            return Err(invalid(
+                "selection.funding_coverage_min",
+                "must be a fraction in [0.0, 1.0]",
+            ));
+        }
+
         Ok(())
     }
 
@@ -274,6 +283,32 @@ seed = 42
         assert_eq!(cfg.bars.reconstructed, vec!["30m", "4h"]);
         assert!(cfg.history.max_available);
         assert_eq!(cfg.determinism.seed, 0);
+    }
+
+    #[test]
+    fn funding_coverage_min_defaults_and_validates() {
+        // Default is the sensible 0.90 floor.
+        let cfg = Config::from_toml_str(VALID).unwrap();
+        assert!((cfg.selection.funding_coverage_min - 0.90).abs() < 1e-12);
+
+        // An explicit in-range override is accepted.
+        let ok = format!("{VALID}\n[selection]\nfunding_coverage_min = 0.5\n");
+        assert!(
+            (Config::from_toml_str(&ok)
+                .unwrap()
+                .selection
+                .funding_coverage_min
+                - 0.5)
+                .abs()
+                < 1e-12
+        );
+
+        // Out of range is rejected with a dotted field path.
+        let bad = format!("{VALID}\n[selection]\nfunding_coverage_min = 1.5\n");
+        let err = Config::from_toml_str(&bad).unwrap_err();
+        assert!(
+            matches!(err, ConfigError::Invalid { field, .. } if field == "selection.funding_coverage_min")
+        );
     }
 
     #[test]
