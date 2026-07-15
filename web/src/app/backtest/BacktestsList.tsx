@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { Badge, Button, Callout, Card, DataTable, Icon } from '../../design';
 import type { Column } from '../../design';
 import { injectCss } from '../../design/injectCss';
-import { listRuns, type RunMeta, type RunStatus } from '../../api/runs';
+import { listRuns, isBacktestRun, type BacktestRunMeta, type RunStatus } from '../../api/runs';
 
 const CSS = `
 .qe-list { max-width: var(--content-max); margin: 0 auto; padding: 24px; display: flex; flex-direction: column; gap: 16px; }
@@ -44,14 +44,18 @@ export interface BacktestsListProps {
 
 /** Backtests list — the runs table from `GET /api/runs`. Row click opens the result. */
 export function BacktestsList({ onOpen, onNew }: BacktestsListProps) {
-  const [runs, setRuns] = useState<RunMeta[] | null>(null);
+  const [runs, setRuns] = useState<BacktestRunMeta[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
-    listRuns()
+    // Fetch only backtest runs (`?type=backtest`) so training runs are not over-fetched, and still
+    // narrow with `isBacktestRun` as defense-in-depth — `isBacktestRun` is a type-predicate, so the
+    // filtered array is `BacktestRunMeta[]` and the columns read `params` (BacktestParams) directly.
+    // Without this a leaked train row would be clickable and route to a permanently-409/404 result.
+    listRuns('backtest')
       .then((r) => {
-        if (!cancelled) setRuns(r);
+        if (!cancelled) setRuns(r.filter(isBacktestRun));
       })
       .catch((e) => {
         if (!cancelled) setError(e instanceof Error ? e.message : 'Failed to load runs.');
@@ -61,7 +65,7 @@ export function BacktestsList({ onOpen, onNew }: BacktestsListProps) {
     };
   }, []);
 
-  const columns: Column<RunMeta & Record<string, unknown>>[] = [
+  const columns: Column<BacktestRunMeta & Record<string, unknown>>[] = [
     {
       key: 'id',
       header: 'Run',
@@ -74,12 +78,10 @@ export function BacktestsList({ onOpen, onNew }: BacktestsListProps) {
     {
       key: 'params',
       header: 'Vintage',
-      // `vintage` is backtest-only — narrow on the discriminated `type` before reading it (a train run
-      // in the list has no vintage).
+      // The list is filtered to backtest runs, so `row` is a `BacktestRunMeta` and `params.vintage`
+      // reads directly (a train run — which has no vintage — can no longer reach this table).
       render: (_v, row) => (
-        <span style={{ fontWeight: 600 }}>
-          {row.type === 'backtest' ? row.params.vintage || '—' : '—'}
-        </span>
+        <span style={{ fontWeight: 600 }}>{row.params.vintage || '—'}</span>
       ),
     },
     {
@@ -144,7 +146,7 @@ export function BacktestsList({ onOpen, onNew }: BacktestsListProps) {
         {runs != null && runs.length > 0 && (
           <DataTable
             columns={columns}
-            rows={runs as (RunMeta & Record<string, unknown>)[]}
+            rows={runs as (BacktestRunMeta & Record<string, unknown>)[]}
             keyField="id"
             onRowClick={(row) => onOpen(row.id)}
           />

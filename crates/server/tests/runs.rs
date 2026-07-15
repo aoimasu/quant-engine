@@ -538,6 +538,75 @@ exit 0
     assert_eq!(arr[0]["id"], json!(id_b), "the surviving run is B: {list}");
 }
 
+/// QE-408: `GET /api/runs?type=` filters the listing to a single run type. A mixed store (one backtest
+/// + one train run) returns only the matching type; no `?type=` returns both (parity); an unknown type
+/// returns an empty list (a `200`, not an error).
+#[tokio::test]
+async fn list_runs_filters_by_type_query() {
+    let tmp = TempDir::new().unwrap();
+    let script = tmp.path().join("job_quick.sh");
+    // A job that immediately writes result.json and finishes — the subcommand (backtest/train) is
+    // ignored, so the one script drives both run types to `succeeded` fast.
+    write_script(
+        &script,
+        r#"#!/bin/sh
+run_dir=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --run-dir) run_dir="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+printf '{"ok":true}' > "$run_dir/result.json"
+printf '{"t":"done","result":"result.json"}\n'
+exit 0
+"#,
+    );
+    let app = app_with_script(tmp.path(), &script, 2);
+
+    // Create one backtest and one train run; wait for both to settle.
+    let (_, b) = post_run(&app, &create_body()).await;
+    let id_bt = b["id"].as_str().unwrap().to_owned();
+    poll_status(&app, &id_bt, "succeeded", TIMEOUT).await;
+    let (_, t) = post_run(&app, &create_train_body()).await;
+    let id_tr = t["id"].as_str().unwrap().to_owned();
+    poll_status(&app, &id_tr, "succeeded", TIMEOUT).await;
+
+    // No filter → both runs (byte-parity with the pre-QE-408 behaviour).
+    let (s, all) = get(&app, "/api/runs").await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(
+        all.as_array().unwrap().len(),
+        2,
+        "unfiltered lists both: {all}"
+    );
+
+    // ?type=backtest → only the backtest run.
+    let (s, only_bt) = get(&app, "/api/runs?type=backtest").await;
+    assert_eq!(s, StatusCode::OK);
+    let arr = only_bt.as_array().unwrap();
+    assert_eq!(arr.len(), 1, "only the backtest run: {only_bt}");
+    assert_eq!(arr[0]["id"], json!(id_bt));
+    assert_eq!(arr[0]["type"], json!("backtest"));
+
+    // ?type=train → only the train run.
+    let (s, only_tr) = get(&app, "/api/runs?type=train").await;
+    assert_eq!(s, StatusCode::OK);
+    let arr = only_tr.as_array().unwrap();
+    assert_eq!(arr.len(), 1, "only the train run: {only_tr}");
+    assert_eq!(arr[0]["id"], json!(id_tr));
+    assert_eq!(arr[0]["type"], json!("train"));
+
+    // An unrecognised type matches nothing — an empty `200`, not an error.
+    let (s, none) = get(&app, "/api/runs?type=bogus").await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(
+        none.as_array().unwrap().len(),
+        0,
+        "unknown type → empty list: {none}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // QE-407: run-lifecycle robustness — graceful shutdown, task registry, honest success.
 // ---------------------------------------------------------------------------

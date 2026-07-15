@@ -128,6 +128,11 @@ export function isTrainRun(run: RunMeta): run is TrainRunMeta {
   return run.type === 'train';
 }
 
+/** Type-predicate narrowing a {@link RunMeta} to the `backtest` variant (for `.filter(isBacktestRun)`). */
+export function isBacktestRun(run: RunMeta): run is BacktestRunMeta {
+  return run.type === 'backtest';
+}
+
 /** One trade row of the §8.1 result contract. */
 export interface Trade {
   id: string;
@@ -227,9 +232,14 @@ async function getJson<T>(url: string): Promise<T> {
   return (await res.json()) as T;
 }
 
-/** List all runs, newest first. */
-export function listRuns(): Promise<RunMeta[]> {
-  return getJson<RunMeta[]>('/api/runs');
+/**
+ * List runs, newest first. Pass a `type` (`'backtest'` | `'train'`) to have the server filter to that
+ * run type (`?type=…`) so a type-specific screen stops over-fetching the other type; omit it for all
+ * runs. Callers should still narrow the result (e.g. `.filter(isBacktestRun)`) as defense-in-depth.
+ */
+export function listRuns(type?: RunMeta['type']): Promise<RunMeta[]> {
+  const url = type ? `/api/runs?type=${encodeURIComponent(type)}` : '/api/runs';
+  return getJson<RunMeta[]>(url);
 }
 
 /** Fetch one run's meta (status + progress). */
