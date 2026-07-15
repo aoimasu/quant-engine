@@ -25,7 +25,8 @@ pub mod kill;
 pub mod limit;
 
 pub use breaker::{
-    replay, BreakerThresholds, BreakerTier, CircuitBreaker, MarkEma, DEFAULT_FAST_WINDOW,
+    replay, time_aware_alpha, BreakerThresholds, BreakerTier, CircuitBreaker, MarkEma,
+    DEFAULT_FAST_WINDOW,
 };
 pub use calibration::{
     calibrate_threshold, calibrate_thresholds, default_calibration_margin, drawdown_distribution,

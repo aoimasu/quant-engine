@@ -83,7 +83,9 @@ pub use hedger::{CapitalView, HedgePlanner, PositionKeeper, TargetPosition};
 pub use kill_gate::{KillHalt, KillOutcome, VenueKillGate};
 pub use live_breakers::BreakerLayer;
 pub use live_kline::LiveKlineSource;
-pub use live_mark::{MarkEmaLoop, MarkTick, MarkTickObserver};
+pub use live_mark::{
+    MarkEmaLoop, MarkTick, MarkTickObserver, DEFAULT_STALENESS_BOUND_SECS, DEFAULT_TICK_SECS,
+};
 pub use live_netter::{NetLeg, NetTarget, PositionNetter};
 pub use pretrade::{PreTradeDecision, PreTradeGovernor, PreTradeVerdict};
 pub use qe_risk::{KillHandle, KillSwitch};
