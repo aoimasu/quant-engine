@@ -198,6 +198,19 @@ pub struct FirewallRule {
 /// QE-254 adds the **second composition root** `qe-server` (admin-UI backend, ADR D4a): it reuses the
 /// training-side + shared crates but must stay clear of the live side — no `qe-runtime`/`qe-venue`
 /// edge — so async stays isolated to that crate and the server never links the live trading path.
+///
+/// QE-405 closes the reverse direction for the **live side**: `qe-runtime` and `qe-vintage` must not
+/// depend on the training crates (`qe-wfo`, `qe-ensemble`). The live binary must stay free of the
+/// search tree (and its `rayon` fan-out) for deterministic, small-footprint execution; the vintage —
+/// handed to the runtime — reaches genome logic only through the shared `qe-signal` crate, never
+/// through `qe-wfo`. Together with the `qe-wfo`/`qe-ensemble` rules above this makes the train/live
+/// decoupling bidirectional and machine-enforced rather than prose-only.
+///
+/// `qe-cli` is deliberately **not** constrained here: it is the composition root that legitimately
+/// links both the training and the live sides (it runs search/seal *and* live execution), so it is the
+/// one crate allowed to reach every side. The firewall is therefore a **library-level** (compile /
+/// link-graph) guarantee about which crates may *link* which — not a process-level isolation of the
+/// running binary.
 #[must_use]
 pub fn firewall_rules() -> Vec<FirewallRule> {
     vec![
@@ -212,6 +225,15 @@ pub fn firewall_rules() -> Vec<FirewallRule> {
         FirewallRule {
             upstream: "qe-server",
             forbidden: &["qe-runtime", "qe-venue"],
+        },
+        // QE-405: the live side must not pull in the training (search/portfolio) crates.
+        FirewallRule {
+            upstream: "qe-runtime",
+            forbidden: &["qe-wfo", "qe-ensemble"],
+        },
+        FirewallRule {
+            upstream: "qe-vintage",
+            forbidden: &["qe-wfo", "qe-ensemble"],
         },
     ]
 }
