@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -24,13 +24,24 @@ const DEFAULT_LIMIT: usize = 50;
 /// Hard ceiling on `?limit=` so a caller cannot ask for the whole history in one page.
 const MAX_LIMIT: usize = 200;
 
+/// QE-425: explicit request-body cap on `POST /api/runs`. A run-spec JSON (window + resolution +
+/// universe + costs + strategy config) is a few KB in practice; 256 KiB leaves ~20–50× headroom for a
+/// pathologically large universe while rejecting any multi-MB body far below axum's 2 MiB default. An
+/// over-cap body is short-circuited to `413 Payload Too Large` before the handler runs.
+const RUN_SPEC_BODY_LIMIT: usize = 256 * 1024;
+
 /// The run lifecycle routes. Parameterised over [`crate::AppState`]; the handlers still extract
 /// `State<Arc<RunManager>>`, projected out of `AppState` via `FromRef`.
+///
+/// QE-425: the [`RUN_SPEC_BODY_LIMIT`] body cap is layered on this sub-router. The only body-carrying
+/// route is `POST /api/runs`; the sibling GETs are bodyless, so the cap is a no-op for them and an
+/// over-limit run spec returns `413` before `create_run` is reached.
 pub fn routes() -> Router<crate::AppState> {
     Router::new()
         .route("/runs", post(create_run).get(list_runs))
         .route("/runs/{id}", get(get_run))
         .route("/runs/{id}/result", get(get_result))
+        .layer(DefaultBodyLimit::max(RUN_SPEC_BODY_LIMIT))
 }
 
 /// `POST /api/runs` — validate, create + spawn a run. `201` with `{ "id": … }`, or `400` on a bad
