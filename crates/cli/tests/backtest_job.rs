@@ -219,6 +219,8 @@ fn fixture_params(store_path: PathBuf) -> BacktestParams {
         universe: vec!["BTCUSDT".to_owned()],
         taker_fee_bps: 2.0,
         slippage_model: "square-root-impact".to_owned(),
+        // QE-428: match the selection cost model's size-impact (default) so reported PnL matches selection.
+        reporting_impact: None,
     }
 }
 
@@ -251,6 +253,40 @@ fn backtest_over_fixture_store_matches_golden() {
     assert_eq!(
         got, want,
         "result diverged from the golden file (determinism)"
+    );
+}
+
+/// QE-428: with the default reporting impact (matching the selection cost model, `impact = 0.0001`),
+/// reported net-of-cost returns must be strictly worse than an explicit `impact = 0` run over the same
+/// fixture — proving the reporting backtest now actually prices size-impact. Non-vacuous: under the old
+/// zero-impact reporting pin the two runs would be byte-identical.
+#[test]
+fn reporting_prices_impact_lowers_returns_vs_zero_impact() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store_path = copy_store_to(tmp.path());
+
+    // Default (`reporting_impact: None`) ⇒ selection impact 0.0001 is priced.
+    let with_impact = run_backtest(&fixture_params(store_path.clone()), &mut |_, _, _| {}).unwrap();
+
+    // Explicit override to zero reproduces the legacy zero-impact reporting.
+    let mut zero_params = fixture_params(store_path);
+    zero_params.reporting_impact = Some(Decimal::ZERO);
+    let no_impact = run_backtest(&zero_params, &mut |_, _, _| {}).unwrap();
+
+    // Impact does not move entry/exit decisions, so the trade set is identical...
+    assert_eq!(with_impact.trades.len(), no_impact.trades.len());
+    // ...but every net-of-cost aggregate is dragged strictly lower by the priced impact.
+    let final_with = *with_impact.equity_curve.last().unwrap();
+    let final_zero = *no_impact.equity_curve.last().unwrap();
+    assert!(
+        final_with < final_zero,
+        "priced impact must lower final equity: with={final_with} zero={final_zero}"
+    );
+    assert!(
+        with_impact.metrics.cagr < no_impact.metrics.cagr,
+        "priced impact must lower reported CAGR: with={} zero={}",
+        with_impact.metrics.cagr,
+        no_impact.metrics.cagr
     );
 }
 
