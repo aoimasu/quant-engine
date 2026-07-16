@@ -22,6 +22,43 @@ pub const DEFAULT_TICK_SECS: f64 = 1.0;
 /// (e.g. a wss reconnect gap). Never trips at the nominal 1s cadence, so today's behaviour is unchanged.
 pub const DEFAULT_STALENESS_BOUND_SECS: f64 = 5.0;
 
+/// The spec-baseline mark-EMA half-life, in seconds (τ½=60s per the QE-208 spec).
+pub const DEFAULT_HALF_LIFE_SECS: f64 = 60.0;
+
+/// Per-run runtime-risk config for the mark-EMA feed (QE-429, promoting the QE-417 constants).
+///
+/// The smoothing `half_life_secs`, nominal sample `tick_secs`, and `staleness_bound_secs` were hardcoded
+/// constructor params/consts; this block promotes them to a per-run config so operators can tune the live
+/// mark feed without a recompile. [`Default`] reproduces the spec baseline (τ½=60s, 1s cadence, 5s bound)
+/// **byte-for-byte**, so adopting the config changes no behaviour (proven by
+/// `from_config_default_matches_spec_baseline`).
+///
+/// **Runtime/live-only — never serialized into a vintage.** These knobs do not feed the seal, the
+/// [`Lineage`](qe_determinism::Lineage), or `qe_config::Config::content_hash`, so they cannot move a
+/// vintage content hash or any golden. (The QE-416 seal-time capacity/calibration constants, by contrast,
+/// *do* feed the hash and are intentionally left hardcoded — see the QE-429 design note.)
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MarkEmaConfig {
+    /// EMA half-life in seconds (the time for a held step to move the smoothed mark halfway).
+    pub half_life_secs: f64,
+    /// Nominal markPrice sample cadence in seconds (drives the seeding first tick's Δt).
+    pub tick_secs: f64,
+    /// Gap (seconds) above which a tick is flagged [`MarkTick::stale`].
+    pub staleness_bound_secs: f64,
+}
+
+impl Default for MarkEmaConfig {
+    /// The spec baseline: τ½=60s on 1-second markPrice ticks, 5s staleness bound — byte-identical to the
+    /// pre-QE-429 hardcoded constants.
+    fn default() -> Self {
+        Self {
+            half_life_secs: DEFAULT_HALF_LIFE_SECS,
+            tick_secs: DEFAULT_TICK_SECS,
+            staleness_bound_secs: DEFAULT_STALENESS_BOUND_SECS,
+        }
+    }
+}
+
 /// One mark observation: the raw markPrice@1s sample and its EMA-smoothed value at the same tick.
 ///
 /// The `smoothed` value drives the slow/med-DD probe (spec baseline); `raw` is carried so the fast tier /
@@ -92,10 +129,18 @@ impl MarkEmaLoop {
         }
     }
 
+    /// A loop from a per-run [`MarkEmaConfig`] (QE-429) — the promoted-to-config construction path. Threads
+    /// the config's half-life, cadence, and staleness bound to the EMA loop. `MarkEmaConfig::default()`
+    /// yields the spec baseline byte-for-byte.
+    #[must_use]
+    pub fn from_config(cfg: &MarkEmaConfig) -> Self {
+        Self::with_config(cfg.half_life_secs, cfg.tick_secs, cfg.staleness_bound_secs)
+    }
+
     /// The spec baseline: EMA τ½=60s on 1-second markPrice ticks, default staleness bound.
     #[must_use]
     pub fn spec_baseline() -> Self {
-        Self::with_half_life(60.0, DEFAULT_TICK_SECS)
+        Self::from_config(&MarkEmaConfig::default())
     }
 
     /// The configured staleness bound (seconds) — the Δt above which [`MarkTick::stale`] is raised.
@@ -302,6 +347,53 @@ mod tests {
         assert!(stalled.stale, "a 30s gap must raise the stale signal");
         // Back to nominal cadence: clears.
         assert!(!loop_.observe(32_000, dec(100)).stale);
+    }
+
+    /// QE-429: `MarkEmaConfig::default()` reproduces `spec_baseline()` tick-for-tick — promoting the
+    /// constants to config is behaviour-preserving (no golden/mark-feed churn).
+    #[test]
+    fn from_config_default_matches_spec_baseline() {
+        let cfg = MarkEmaConfig::default();
+        assert_eq!(cfg.half_life_secs, 60.0);
+        assert_eq!(cfg.tick_secs, DEFAULT_TICK_SECS);
+        assert_eq!(cfg.staleness_bound_secs, DEFAULT_STALENESS_BOUND_SECS);
+
+        let mut from_cfg = MarkEmaLoop::from_config(&cfg);
+        let mut baseline = MarkEmaLoop::spec_baseline();
+        assert_eq!(
+            from_cfg.staleness_bound_secs(),
+            baseline.staleness_bound_secs()
+        );
+        // A gappy, jumpy series exercises the time-aware alpha + the stale signal on both loops.
+        let marks = [
+            (0, dec(100)),
+            (1_000, dec(120)),
+            (2_000, dec(120)),
+            (33_000, dec(80)), // a >5s gap → stale, and a large gap-aware alpha
+            (34_000, dec(95)),
+        ];
+        for (t, p) in marks {
+            assert_eq!(
+                from_cfg.observe(t, p),
+                baseline.observe(t, p),
+                "from_config(default) must equal spec_baseline tick-for-tick"
+            );
+        }
+    }
+
+    /// QE-429: a non-default config threads its knobs through (distinct behaviour from the baseline).
+    #[test]
+    fn from_config_threads_non_default_knobs() {
+        let cfg = MarkEmaConfig {
+            half_life_secs: 10.0,
+            tick_secs: 1.0,
+            staleness_bound_secs: 2.0,
+        };
+        let mut loop_ = MarkEmaLoop::from_config(&cfg);
+        assert_eq!(loop_.staleness_bound_secs(), 2.0);
+        loop_.observe(0, dec(100));
+        // A 3s gap exceeds the tightened 2s bound → stale (the default 5s bound would not trip here).
+        assert!(loop_.observe(3_000, dec(100)).stale);
     }
 
     /// A `FnMut(&MarkTick)` closure is usable as a `MarkTickObserver` (the blanket impl).

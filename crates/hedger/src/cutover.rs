@@ -9,13 +9,34 @@
 //! decision stream is identical to a session that ran continuously and flipped at the same bar (the AC).
 //!
 //! The concrete wss bar decode/drive is runtime plumbing (this operates on decoded `Bar`s, per QE-205).
+//!
+//! # Live circuit-breaker wiring (QE-429)
+//!
+//! The bootstrap→live cutover is also where the sealed vintage's calibration and the reconstructed
+//! committed-peak state converge, so it is where the live [`BreakerLayer`] is **wired** (removing the
+//! "latent until wired" caveat QE-416/401/417 flagged). [`Cutover::from_reconstructed_calibrated`]
+//! constructs the layer from the session's [`CalibrationProfile`](qe_risk::CalibrationProfile) keyed by
+//! [`EvaluatorSession::strategy_ids`] and **seeds** the committed-peak drawdown anchors from the
+//! [`ReconstructedState`] **before the first live tick**; live equity ticks route through it via
+//! [`observe_strategy_equity`](Cutover::observe_strategy_equity) /
+//! [`observe_ensemble_equity`](Cutover::observe_ensemble_equity), and [`feed_live_bar`](Cutover::feed_live_bar)
+//! **clamps** gated strategies to flat before netting (QE-213). The legacy constructors
+//! ([`new`](Cutover::new) / [`from_reconstructed`](Cutover::from_reconstructed)) carry no breaker, so their
+//! decision stream is unchanged.
+
+// Order-emission path (QE-268): reject `unwrap`/`expect`/`panic` — a panic here is a live-trading fault.
+// `debug_assert!` (the deliberate wiring-bug guard in `feed_live_bar`) is not `panic!` and is unaffected.
+#![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use thiserror::Error;
 
 use qe_domain::{Bar, Resolution};
+use qe_risk::BreakerTier;
 
+use crate::boot_state::ReconstructedState;
 use crate::bootstrap::Reconstructed;
 use crate::evaluator::{EvalOutput, EvaluatorSession, SessionMode};
+use crate::live_breakers::BreakerLayer;
 
 /// A cutover failure.
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -55,6 +76,10 @@ pub struct Cutover {
     interval_ms: i64,
     /// Whether the session has been flipped live yet (so `go_live` runs exactly once).
     live: bool,
+    /// The live circuit-breaker layer (QE-429), calibrated + committed-peak-seeded at construction. `None`
+    /// for the legacy constructors (no gating; decision stream unchanged). When present, live equity ticks
+    /// route through it and [`feed_live_bar`](Self::feed_live_bar) clamps gated strategies to flat.
+    breaker: Option<BreakerLayer>,
 }
 
 impl Cutover {
@@ -74,19 +99,79 @@ impl Cutover {
             .last()
             .map(|o| o.time_ms)
             .ok_or(CutoverError::EmptyReplay)?;
-        Ok(Self::new(session, last_open_ms, base))
+        Ok(Self::with_breaker(session, last_open_ms, base, None))
+    }
+
+    /// Take ownership of a bootstrap [`Reconstructed`] and continue it live **with the live circuit-breaker
+    /// wired** (QE-429). This is the cutover site where the sealed vintage's calibration and the
+    /// reconstructed committed-peak state converge: it constructs a [`BreakerLayer`] from the session's
+    /// [`CalibrationProfile`](qe_risk::CalibrationProfile) keyed by [`EvaluatorSession::strategy_ids`]
+    /// (`from_calibration` — an uncalibrated/missing strategy is fail-safe pre-gated) and **seeds** the
+    /// per-strategy + ensemble drawdown anchors from `state` (`seed_committed_peaks`) — **before the first
+    /// live tick**, so a book already below its historical peak trips on its first post-cutover equity tick
+    /// instead of re-anchoring. `fast_window` is the breaker's fast-drop window (typically
+    /// [`qe_risk::DEFAULT_FAST_WINDOW`]).
+    ///
+    /// After construction, route live equity ticks through
+    /// [`observe_strategy_equity`](Self::observe_strategy_equity) /
+    /// [`observe_ensemble_equity`](Self::observe_ensemble_equity); [`feed_live_bar`](Self::feed_live_bar)
+    /// then clamps any gated strategy's decision to flat before netting.
+    ///
+    /// # Errors
+    /// [`CutoverError::EmptyReplay`] if the replay evaluated no bars (no boundary to anchor).
+    pub fn from_reconstructed_calibrated(
+        reconstructed: Reconstructed,
+        state: &ReconstructedState,
+        base: Resolution,
+        fast_window: usize,
+    ) -> Result<Self, CutoverError> {
+        // Build + seed the layer while the session (and thus the sealed calibration + strategy ids) is still
+        // owned by `reconstructed`. Keyed by the SSOT `strategy_ids()` the seal wrote the profile under.
+        let mut breaker = BreakerLayer::from_calibration(
+            reconstructed.session.calibration(),
+            &reconstructed.session.strategy_ids(),
+            fast_window,
+        );
+        breaker.seed_committed_peaks(state);
+
+        let Reconstructed {
+            session, decisions, ..
+        } = reconstructed;
+        let last_open_ms = decisions
+            .last()
+            .map(|o| o.time_ms)
+            .ok_or(CutoverError::EmptyReplay)?;
+        Ok(Self::with_breaker(
+            session,
+            last_open_ms,
+            base,
+            Some(breaker),
+        ))
     }
 
     /// A cutover over an already-warmed `session` whose last evaluated base bar opened at `last_open_ms`,
-    /// continuing at the `base` resolution.
+    /// continuing at the `base` resolution. No live breaker is wired (legacy path) — see
+    /// [`from_reconstructed_calibrated`](Self::from_reconstructed_calibrated) for the QE-429 wired path.
     #[must_use]
     pub fn new(session: EvaluatorSession, last_open_ms: i64, base: Resolution) -> Self {
+        Self::with_breaker(session, last_open_ms, base, None)
+    }
+
+    /// Shared constructor: a cutover over `session` with an optional pre-built, already-seeded `breaker`.
+    #[must_use]
+    fn with_breaker(
+        session: EvaluatorSession,
+        last_open_ms: i64,
+        base: Resolution,
+        breaker: Option<BreakerLayer>,
+    ) -> Self {
         Self {
             session,
             base,
             last_open_ms,
             interval_ms: i64::from(base.minutes()) * 60_000,
             live: false,
+            breaker,
         }
     }
 
@@ -122,9 +207,49 @@ impl Cutover {
             self.session.go_live();
             self.live = true;
         }
-        let out = self.session.on_bar(bar);
+        let mut out = self.session.on_bar(bar);
+        // QE-429: route the live decision stream through the wired breaker layer — any gated strategy
+        // (tripped on an observed equity drawdown, or fail-safe pre-gated because it is uncalibrated) is
+        // clamped to flat BEFORE netting (QE-213), so its aggregate contribution is zero. No breaker ⇒
+        // decisions pass through unchanged (legacy path).
+        if let Some(breaker) = &self.breaker {
+            out.decisions = breaker.clamp(&out.decisions);
+        }
         self.last_open_ms = open;
         Ok(CutoverStep::Evaluated(out))
+    }
+
+    /// Route one live equity tick for strategy `index` through the wired breaker (QE-429), latching it gated
+    /// if any drawdown tier trips; returns the tier that fired (observability) or `None`. This is the plug
+    /// point for the QE-217 live per-strategy equity feed (smoothed mark × positions, net-of-cost). Returns
+    /// `None` when no breaker is wired (legacy path) or for an out-of-range index.
+    pub fn observe_strategy_equity(
+        &mut self,
+        index: usize,
+        equity: rust_decimal::Decimal,
+    ) -> Option<BreakerTier> {
+        self.breaker
+            .as_mut()
+            .and_then(|b| b.observe_strategy(index, equity))
+    }
+
+    /// Route one live **aggregate** equity tick through the wired ensemble breaker (QE-429), latching every
+    /// strategy gated if the ensemble fast-drop trips; returns the tier or `None`. `None` when no breaker is
+    /// wired.
+    pub fn observe_ensemble_equity(
+        &mut self,
+        equity: rust_decimal::Decimal,
+    ) -> Option<BreakerTier> {
+        self.breaker
+            .as_mut()
+            .and_then(|b| b.observe_ensemble(equity))
+    }
+
+    /// Read-only access to the wired live breaker layer (QE-429), or `None` on the legacy (un-wired) path.
+    /// Surfaces gating state + seeded drawdown anchors (QE-304 cockpit / tests).
+    #[must_use]
+    pub fn breaker(&self) -> Option<&BreakerLayer> {
+        self.breaker.as_ref()
     }
 
     /// Forward: record the latest funding rate on the session's as-of context.
