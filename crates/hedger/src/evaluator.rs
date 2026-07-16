@@ -136,6 +136,16 @@ impl EvaluatorSession {
         &self.vintage.content.calibration
     }
 
+    /// Read-only: the canonical per-strategy ids the live breaker layer keys its calibration lookup by
+    /// (QE-416) — the positional index of each chromosome as a string (`["0", "1", …]`). Delegates to
+    /// [`VintageContent::strategy_ids`](qe_vintage::VintageContent::strategy_ids), the single source of
+    /// truth the seal wrote the calibration under and `BreakerLayer::from_calibration` looks up, so the
+    /// cutover wiring (QE-429) keys the live layer identically — no calibrated member is pre-gated.
+    #[must_use]
+    pub fn strategy_ids(&self) -> Vec<String> {
+        self.vintage.content.strategy_ids()
+    }
+
     /// Read-only: the number of chromosomes.
     #[must_use]
     pub fn chromosome_count(&self) -> usize {

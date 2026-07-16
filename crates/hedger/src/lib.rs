@@ -42,7 +42,8 @@ pub use hedger::HedgePlanner;
 pub use live_breakers::BreakerLayer;
 pub use live_kline::LiveKlineSource;
 pub use live_mark::{
-    MarkEmaLoop, MarkTick, MarkTickObserver, DEFAULT_STALENESS_BOUND_SECS, DEFAULT_TICK_SECS,
+    MarkEmaConfig, MarkEmaLoop, MarkTick, MarkTickObserver, DEFAULT_HALF_LIFE_SECS,
+    DEFAULT_STALENESS_BOUND_SECS, DEFAULT_TICK_SECS,
 };
 pub use live_netter::{NetLeg, NetTarget, PositionNetter};
 pub use pretrade::{PreTradeDecision, PreTradeGovernor, PreTradeVerdict};
