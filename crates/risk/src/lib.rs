@@ -50,3 +50,37 @@ pub enum RiskError {
     #[error("fraction must be within [0, 1] (got {0})")]
     FractionOutOfRange(String),
 }
+
+impl qe_error::Classified for RiskError {
+    fn class(&self) -> qe_error::ErrorClass {
+        // A malformed risk cap is a configuration/invariant fault: the order path must not run with an
+        // unvalidated limit set, so it halts rather than continuing (QE-421).
+        match self {
+            RiskError::NegativeLeverage(_) | RiskError::FractionOutOfRange(_) => {
+                qe_error::ErrorClass::Fatal
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod classify_tests {
+    use super::RiskError;
+    use qe_error::{Classified, Disposition};
+
+    fn _assert_classified<T: Classified>() {}
+    fn _risk_error_is_classified() {
+        _assert_classified::<RiskError>();
+    }
+
+    /// Exhaustive: every `RiskError` variant is a fatal config fault → halt.
+    #[test]
+    fn risk_error_dispositions_to_halt() {
+        for e in [
+            RiskError::NegativeLeverage("-1".into()),
+            RiskError::FractionOutOfRange("2".into()),
+        ] {
+            assert_eq!(e.disposition(), Disposition::Halt);
+        }
+    }
+}

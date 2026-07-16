@@ -12,6 +12,10 @@ workspace = true
 
 [dependencies]
 qe-domain.workspace = true
+# QE-421: the shared recoverability taxonomy. The runtime owns the live order path, so every order-path
+# error reports an `ErrorClass` and the live loop routes it through `disposition()` (halt/retry/skip).
+# `qe-error` is a foundational leaf (firewall-legal; already used by qe-risk/qe-clock).
+qe-error.workspace = true
 qe-risk.workspace = true
 qe-signal.workspace = true
 qe-storage.workspace = true

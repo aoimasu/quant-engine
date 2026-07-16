@@ -4,6 +4,10 @@
 //! retried, `Data` errors skip the offending datum and continue, and `Fatal` errors halt the
 //! runtime (never panic). [`disposition`] maps an error to the action the runtime loop takes.
 //!
+//! Crate-specific `thiserror` enums opt into the taxonomy via the [`Classified`] trait
+//! (`fn class(&self) -> ErrorClass`), so the runtime's live order loop can route **any** order-path error
+//! through [`Classified::disposition`] uniformly — the cross-cutting halt-vs-retry-vs-skip strategy (QE-421).
+//!
 //! ## Hot-path lint convention
 //! Modules on the order-emission path must reject `unwrap`/`expect`/`panic`. Copy this attribute
 //! block at the top of such a module:
@@ -25,6 +29,42 @@ pub enum ErrorClass {
     Data,
     /// Unrecoverable — the runtime must halt (not panic).
     Fatal,
+}
+
+impl ErrorClass {
+    /// The runtime action this class dispositions to — the single source of truth for the mapping
+    /// (`Transient→Retry`, `Data→Continue`, `Fatal→Halt`). `Fatal` **always** halts (never panics).
+    #[must_use]
+    pub fn disposition(self) -> Disposition {
+        match self {
+            ErrorClass::Transient => Disposition::Retry,
+            ErrorClass::Data => Disposition::Continue,
+            ErrorClass::Fatal => Disposition::Halt,
+        }
+    }
+}
+
+/// A crate-local error type that carries a recoverability [`ErrorClass`], so the runtime's live loop can
+/// uniformly disposition it (halt-vs-retry-vs-skip) without knowing the concrete type.
+///
+/// Every error reachable on the order-emission path implements this (QE-421): the supervisor routes each
+/// one through [`Classified::disposition`] rather than ad-hoc per-variant handling, and a `Fatal` error
+/// always drives to [`Disposition::Halt`] — the halt-not-panic guarantee, on the path where it matters most.
+pub trait Classified {
+    /// This error's recoverability class.
+    fn class(&self) -> ErrorClass;
+
+    /// The runtime action this error dispositions to. Defaults to [`ErrorClass::disposition`]; overriding
+    /// is rarely needed since the class already determines the action.
+    fn disposition(&self) -> Disposition {
+        self.class().disposition()
+    }
+}
+
+impl Classified for QeError {
+    fn class(&self) -> ErrorClass {
+        self.class
+    }
 }
 
 /// The platform's standard error: a class, a human-readable context, and an optional source.
@@ -104,11 +144,7 @@ pub enum Disposition {
 /// Map an error to the runtime's response. `Fatal` always routes to [`Disposition::Halt`].
 #[must_use]
 pub fn disposition(err: &QeError) -> Disposition {
-    match err.class() {
-        ErrorClass::Transient => Disposition::Retry,
-        ErrorClass::Data => Disposition::Continue,
-        ErrorClass::Fatal => Disposition::Halt,
-    }
+    err.class().disposition()
 }
 
 /// Demonstrator for the hot-path lint convention (see crate docs). Modules on the order-emission
@@ -164,6 +200,32 @@ mod tests {
         let src = std::error::Error::source(&err).expect("source present");
         assert!(src.to_string().contains("underlying"));
         assert!(err.to_string().contains("load failed"));
+    }
+
+    #[test]
+    fn error_class_disposition_matches_free_function() {
+        // The free `disposition` and `ErrorClass::disposition` are one mapping (single source of truth).
+        for err in [
+            QeError::fatal("x"),
+            QeError::transient("x"),
+            QeError::data("x"),
+        ] {
+            assert_eq!(disposition(&err), err.class().disposition());
+        }
+        assert_eq!(ErrorClass::Fatal.disposition(), Disposition::Halt);
+        assert_eq!(ErrorClass::Transient.disposition(), Disposition::Retry);
+        assert_eq!(ErrorClass::Data.disposition(), Disposition::Continue);
+    }
+
+    #[test]
+    fn qeerror_is_classified_and_fatal_halts() {
+        // `Classified` lets generic routing treat a `QeError` uniformly with crate-specific enums.
+        fn route<E: Classified>(e: &E) -> Disposition {
+            e.disposition()
+        }
+        assert_eq!(route(&QeError::fatal("disk gone")), Disposition::Halt);
+        assert_eq!(route(&QeError::transient("timeout")), Disposition::Retry);
+        assert_eq!(route(&QeError::data("bad row")), Disposition::Continue);
     }
 
     #[test]

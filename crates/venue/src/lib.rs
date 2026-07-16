@@ -18,6 +18,7 @@
 //! truth on reconnect, and a [`sim`](userdata::sim) implementation driving the whole loop in sim mode.
 
 pub mod cache;
+pub mod classify;
 pub mod clock;
 pub mod ratelimit;
 pub mod registry;
