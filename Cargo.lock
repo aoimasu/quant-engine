@@ -1784,6 +1784,7 @@ version = "0.1.0"
 dependencies = [
  "qe-determinism",
  "qe-domain",
+ "qe-error",
  "qe-risk",
  "qe-signal",
  "qe-storage",
@@ -1870,6 +1871,7 @@ name = "qe-venue"
 version = "0.1.0"
 dependencies = [
  "qe-domain",
+ "qe-error",
  "rust_decimal",
  "thiserror",
  "ureq",

@@ -16,6 +16,7 @@
 //!   kept position yields a zero delta, so the position is never doubled.
 
 use qe_domain::{Notional, Price};
+use qe_error::{Classified, Disposition};
 use qe_venue::userdata::{PositionReport, UserDataEvent};
 
 use crate::edge::{plan_delta, SimFill, VenueKeeper};
@@ -118,6 +119,9 @@ pub struct PlannerAdapterLink<A: AppendSink = NullAppendSink> {
     append: A,
     append_failures: u64,
     dropped_superseded: u64,
+    /// The disposition the live loop last routed an order-path error to (QE-421) — observability for the
+    /// uniform halt-vs-retry-vs-skip decision. `None` until an error is dispositioned.
+    last_disposition: Option<Disposition>,
 }
 
 impl PlannerAdapterLink<NullAppendSink> {
@@ -141,7 +145,24 @@ impl<A: AppendSink> PlannerAdapterLink<A> {
             append,
             append_failures: 0,
             dropped_superseded: 0,
+            last_disposition: None,
         }
+    }
+
+    /// The live loop's uniform error router (QE-421): map **any** order-path error to its [`Disposition`]
+    /// — `Halt` (fatal, e.g. a tripped kill), `Retry` (transient, e.g. a disconnected link), or `Continue`
+    /// (skippable, e.g. a non-gating journal append) — record it for observability, and return it for the
+    /// caller to act on. Routing every error through one seam is the point: no ad-hoc per-error handling.
+    fn route(&mut self, err: &impl Classified) -> Disposition {
+        let d = err.disposition();
+        self.last_disposition = Some(d);
+        d
+    }
+
+    /// The disposition the live loop last routed an order-path error to, if any (QE-421 observability).
+    #[must_use]
+    pub fn last_disposition(&self) -> Option<Disposition> {
+        self.last_disposition
     }
 
     /// The authoritative position keeper (read-only).
@@ -208,7 +229,10 @@ impl<A: AppendSink> PlannerAdapterLink<A> {
     /// [`TransportError::Disconnected`] while the link is disconnected (nothing is enqueued).
     pub fn submit_target(&mut self, rev: TargetRevision) -> Result<(), TransportError> {
         if !self.connected {
-            return Err(TransportError::Disconnected);
+            // Route uniformly: a disconnected link dispositions to `Retry` — the planner awaits reconnect.
+            let err = TransportError::Disconnected;
+            let _ = self.route(&err);
+            return Err(err);
         }
         if self.pending.replace(rev).is_some() {
             self.dropped_superseded += 1;
@@ -230,9 +254,14 @@ impl<A: AppendSink> PlannerAdapterLink<A> {
         };
         self.last_applied = Some(rev);
         let reports = self.apply_revision(rev);
-        // Offer the already-produced reports to the journal. A failure is counted, never propagated.
-        if self.append.append(&rev, &reports).is_err() {
-            self.append_failures += 1;
+        // Offer the already-produced reports to the journal. A failure routes uniformly to `Continue`
+        // (skippable, non-gating): it is counted, never propagated, and never changes the dispatch (QE-301).
+        if let Err(e) = self.append.append(&rev, &reports) {
+            match self.route(&e) {
+                Disposition::Continue | Disposition::Retry => self.append_failures += 1,
+                // `AppendError` is never fatal; kept exhaustive so append can never gate dispatch.
+                Disposition::Halt => {}
+            }
         }
         reports
     }
@@ -265,10 +294,21 @@ impl<A: AppendSink> PlannerAdapterLink<A> {
         let mut reports = Vec::new();
 
         if let Some(intent) = plan_delta(rev.target.notional, current, mark) {
-            // A tripped kill returns `Err(KillHalt)` here (submission halted); the fill is simply absent.
-            if let Ok(fill) = self.gate.submit(intent, mark, rev.event_time_ms) {
-                self.keeper.apply(&fill.event);
-                reports.push(AdapterReport::Fill(fill));
+            // Route the submit outcome through the shared taxonomy (QE-421): a tripped kill returns
+            // `Err(KillHalt)` which dispositions to `Halt` — submission is halted (nothing sent), never a
+            // panic. The health line below still reports `Down` directly from the kill.
+            match self.gate.submit(intent, mark, rev.event_time_ms) {
+                Ok(fill) => {
+                    self.keeper.apply(&fill.event);
+                    reports.push(AdapterReport::Fill(fill));
+                }
+                Err(halt) => match self.route(&halt) {
+                    // Fatal → the kill's own semantics: no fill this tick.
+                    Disposition::Halt => {}
+                    // `KillHalt` is always fatal; the arm is kept exhaustive so a future non-fatal submit
+                    // error would be handled uniformly rather than silently dropped.
+                    Disposition::Retry | Disposition::Continue => {}
+                },
             }
         }
 
@@ -514,6 +554,65 @@ mod tests {
             heartbeat(&reports),
             (Some(1), VenueHealth::Down("watchdog: staleness".to_owned())),
             "a tripped kill is reported Down even with no delta to submit"
+        );
+    }
+
+    /// QE-421 (AC, live loop): the loop routes **every** order-path error through `disposition()`. A tripped
+    /// kill drives the submit to `Halt` (no fill, nothing submitted); a failing journal append drives to
+    /// `Continue` (dispatch unaffected); a disconnected submit drives to `Retry` — proving the routing
+    /// discriminates fatal from non-fatal on the exact emission path.
+    #[test]
+    fn live_loop_routes_every_error_through_disposition() {
+        // (a) Fatal: a tripped kill halts submission — the loop dispositions the KillHalt to Halt.
+        let mut killed = link_at("50000", "100000");
+        killed.kill().trip("watchdog: staleness");
+        killed.submit_target(rev(0, "10000", 1)).unwrap();
+        let reports = killed.pump();
+        assert!(
+            find_fill(&reports).is_none(),
+            "no fill once the kill is tripped"
+        );
+        assert_eq!(
+            killed.orders_submitted(),
+            0,
+            "nothing submitted to the venue"
+        );
+        assert_eq!(
+            killed.last_disposition(),
+            Some(Disposition::Halt),
+            "a tripped kill routes the live loop to Halt"
+        );
+
+        // (b) Skippable: a failing journal append routes to Continue and never gates dispatch.
+        let mut keeper = VenueKeeper::new(instrument(), Notional::new(dec("100000")));
+        keeper.observe_mark(price("50000"));
+        let gate = VenueKillGate::new(KillHandle::new(), VenueSimulator::new(instrument()));
+        let mut journalled =
+            PlannerAdapterLink::with_append(keeper, gate, FailingAppendSink { calls: 0 });
+        journalled.submit_target(rev(0, "10000", 1)).unwrap();
+        let reports = journalled.pump();
+        assert!(
+            find_fill(&reports).is_some(),
+            "the append failure must not gate the fill"
+        );
+        assert_eq!(journalled.append_failures(), 1);
+        assert_eq!(
+            journalled.last_disposition(),
+            Some(Disposition::Continue),
+            "a non-gating journal append routes to Continue"
+        );
+
+        // (c) Transient: a disconnected submit routes to Retry.
+        let mut down = link_at("50000", "100000");
+        down.disconnect();
+        assert_eq!(
+            down.submit_target(rev(0, "10000", 1)),
+            Err(TransportError::Disconnected)
+        );
+        assert_eq!(
+            down.last_disposition(),
+            Some(Disposition::Retry),
+            "a disconnected link routes to Retry"
         );
     }
 

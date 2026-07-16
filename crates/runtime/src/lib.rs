@@ -52,6 +52,7 @@
 
 pub mod boot_state;
 pub mod bootstrap;
+pub mod classify;
 pub mod cutover;
 pub mod edge;
 pub mod evaluator;

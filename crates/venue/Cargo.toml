@@ -19,6 +19,9 @@ http = ["dep:ureq"]
 [dependencies]
 # Timestamp / TimeInterval / InstrumentId for the request model and closed-window logic.
 qe-domain.workspace = true
+# QE-421: the shared recoverability taxonomy — venue connectivity errors report an `ErrorClass` so the
+# runtime's live loop dispositions them uniformly. `qe-error` is a foundational leaf (firewall-legal).
+qe-error.workspace = true
 # Classified REST errors.
 thiserror.workspace = true
 # Optional blocking HTTP client for the real transport. native-tls (system TLS) avoids ring's
