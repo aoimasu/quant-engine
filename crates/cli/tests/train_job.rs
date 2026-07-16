@@ -262,6 +262,9 @@ fn sealed_vintage_is_backtestable_by_qe251() {
         universe: vec!["BTCUSDT".to_owned()],
         taker_fee_bps: 2.0,
         slippage_model: "square-root-impact".to_owned(),
+        // QE-428: match the selection cost model's size-impact (default) — this train→backtest
+        // integration test now reports net-of-cost PnL consistent with what the search selected on.
+        reporting_impact: None,
     };
     let doc = run_backtest(&bt, &mut |_, _, _| {}).expect("sealed vintage backtests");
     assert_eq!(doc.strategy.name, outcome.vintage_id);

@@ -15,6 +15,7 @@ pub mod jobs;
 
 use qe_config::Config;
 use qe_determinism::Lineage;
+use rust_decimal::Decimal;
 use thiserror::Error;
 
 use jobs::train::{run_train_job, TrainParams};
@@ -198,6 +199,9 @@ pub enum Command {
         taker_fee_bps: f64,
         /// Slippage-model label (recorded in the result contract).
         slippage_model: String,
+        /// Reporting size-impact coefficient (QE-428). `None` ⇒ match the selection cost model's impact;
+        /// `Some(v)` ⇒ override (e.g. `0` reproduces the legacy zero-impact reporting).
+        reporting_impact: Option<Decimal>,
         /// Run directory the job writes `result.json` into.
         run_dir: PathBuf,
         /// Emit JSON-line progress on stdout.
@@ -292,6 +296,7 @@ where
             let mut universe: Vec<String> = Vec::new();
             let mut taker_fee_bps = 2.0_f64;
             let mut slippage_model = "square-root-impact".to_owned();
+            let mut reporting_impact: Option<Decimal> = None;
             let mut run_dir = PathBuf::new();
             let mut json = false;
             while let Some(flag) = it.next() {
@@ -318,6 +323,16 @@ where
                         })?;
                     }
                     "--slippage-model" => slippage_model = value(&mut it, "--slippage-model")?,
+                    "--reporting-impact" => {
+                        // QE-428: override the reporting size-impact coefficient. Absent ⇒ match the
+                        // selection cost model's impact so reported PnL matches selection.
+                        let v = value(&mut it, "--reporting-impact")?;
+                        reporting_impact = Some(Decimal::from_str_exact(&v).map_err(|_| {
+                            CliError::Usage(format!(
+                                "--reporting-impact expects a decimal, got `{v}`"
+                            ))
+                        })?);
+                    }
                     "--run-dir" => run_dir = PathBuf::from(value(&mut it, "--run-dir")?),
                     "--json" => json = true,
                     other => return Err(CliError::Usage(format!("unknown flag `{other}`"))),
@@ -334,6 +349,7 @@ where
                 universe,
                 taker_fee_bps,
                 slippage_model,
+                reporting_impact,
                 run_dir,
                 json,
             })
@@ -531,6 +547,7 @@ mod tests {
                 universe: vec![],
                 taker_fee_bps: 2.0,
                 slippage_model: "square-root-impact".into(),
+                reporting_impact: None,
                 run_dir: PathBuf::from("/tmp/r"),
                 json: true,
             }
@@ -557,6 +574,8 @@ mod tests {
             "5",
             "--slippage-model",
             "linear",
+            "--reporting-impact",
+            "0.0002",
             "--run-dir",
             "/tmp/r",
         ])
@@ -572,6 +591,7 @@ mod tests {
                 universe: vec!["BTCUSDT".into(), "ETHUSDT".into()],
                 taker_fee_bps: 5.0,
                 slippage_model: "linear".into(),
+                reporting_impact: Some(Decimal::new(2, 4)),
                 run_dir: PathBuf::from("/tmp/r"),
                 json: false,
             }

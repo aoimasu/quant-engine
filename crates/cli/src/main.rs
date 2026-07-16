@@ -114,6 +114,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             universe,
             taker_fee_bps,
             slippage_model,
+            reporting_impact,
             run_dir,
             json,
         } => run_backtest_command(BacktestCli {
@@ -125,6 +126,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             universe,
             taker_fee_bps,
             slippage_model,
+            reporting_impact,
             run_dir,
             json,
         }),
@@ -147,6 +149,7 @@ struct BacktestCli {
     universe: Vec<String>,
     taker_fee_bps: f64,
     slippage_model: String,
+    reporting_impact: Option<rust_decimal::Decimal>,
     run_dir: PathBuf,
     json: bool,
 }
@@ -181,6 +184,7 @@ fn run_backtest_command(cmd: BacktestCli) -> Result<ExitCode, Box<dyn std::error
         universe: cmd.universe,
         taker_fee_bps: cmd.taker_fee_bps,
         slippage_model: cmd.slippage_model,
+        reporting_impact: cmd.reporting_impact,
     };
 
     // Progress sink: JSON lines on stdout when `--json`, else a terse human line on stderr.
