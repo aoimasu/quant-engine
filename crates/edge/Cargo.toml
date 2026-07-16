@@ -1,0 +1,30 @@
+[package]
+name = "qe-edge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+qe-domain.workspace = true
+# QE-421: the shared recoverability taxonomy. The edge owns the live order-emission path, so every order-path
+# error reports an `ErrorClass` and the live loop routes it through `disposition()` (halt/retry/skip).
+qe-error.workspace = true
+qe-risk.workspace = true
+# The QE-204 user-data feed (fills / position reports / snapshots) the keeper absorbs as ground truth.
+qe-venue.workspace = true
+# QE-426: the shared planner⑤ ↔ edge⑥ contract (absolute target + keeper seam) — the only edge that reaches
+# the planner side, and only through this pure contract crate (no `qe-hedger` production edge).
+qe-runtime-core.workspace = true
+rust_decimal.workspace = true
+
+[dev-dependencies]
+# QE-426: the `edge.rs` end-to-end test drives the QE-213→217 stack — a `HedgePlanner` over the real
+# `VenueKeeper` with a `NetTarget`. Dev-only (firewall-excluded): there is no `qe-edge → qe-hedger`
+# production edge, so the order path still compiles independently of the planner.
+qe-hedger.workspace = true

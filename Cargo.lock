@@ -1702,6 +1702,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "qe-edge"
+version = "0.1.0"
+dependencies = [
+ "qe-domain",
+ "qe-error",
+ "qe-hedger",
+ "qe-risk",
+ "qe-runtime-core",
+ "qe-venue",
+ "rust_decimal",
+]
+
+[[package]]
 name = "qe-ensemble"
 version = "0.1.0"
 dependencies = [
@@ -1726,6 +1739,22 @@ dependencies = [
  "qe-validation",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "qe-hedger"
+version = "0.1.0"
+dependencies = [
+ "qe-determinism",
+ "qe-domain",
+ "qe-error",
+ "qe-risk",
+ "qe-runtime-core",
+ "qe-signal",
+ "qe-venue",
+ "qe-vintage",
+ "rust_decimal",
+ "thiserror",
 ]
 
 [[package]]
@@ -1784,14 +1813,22 @@ version = "0.1.0"
 dependencies = [
  "qe-determinism",
  "qe-domain",
+ "qe-edge",
  "qe-error",
+ "qe-hedger",
  "qe-risk",
+ "qe-runtime-core",
  "qe-signal",
- "qe-storage",
  "qe-venue",
  "qe-vintage",
  "rust_decimal",
- "thiserror",
+]
+
+[[package]]
+name = "qe-runtime-core"
+version = "0.1.0"
+dependencies = [
+ "qe-domain",
 ]
 
 [[package]]

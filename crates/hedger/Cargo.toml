@@ -1,0 +1,33 @@
+[package]
+name = "qe-hedger"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+qe-domain.workspace = true
+# QE-421: the shared recoverability taxonomy. The hedger owns the bootstrap → handoff path, so every
+# bootstrap/cutover/reconstruction error reports an `ErrorClass` routed through `disposition()`.
+qe-error.workspace = true
+qe-risk.workspace = true
+qe-signal.workspace = true
+qe-venue.workspace = true
+# The sealed vintage (chromosomes/ensemble/calibration) the evaluator session loads read-only (QE-207).
+# qe-vintage embeds the genome via the shared qe-signal crate, so this edge does NOT reach the training
+# side (qe-wfo) — the QE-001 train/live decoupling invariant holds (genome eval is shared via qe-signal).
+qe-vintage.workspace = true
+# `Lineage` recorded on each vintage rollover (QE-219). Cross-cutting crate (QE-006), not on either side of
+# the QE-132 firewall, and already reached transitively via qe-vintage.
+qe-determinism.workspace = true
+# QE-426: the shared planner⑤ ↔ edge⑥ contract (absolute target + keeper seam).
+qe-runtime-core.workspace = true
+# Exact-decimal scalar context (funding/OI/premium) joined onto bars in the live factor join (QE-206).
+rust_decimal.workspace = true
+# Typed bootstrap errors (QE-209) — reconstruction / REST / decode.
+thiserror.workspace = true

@@ -19,6 +19,10 @@ fn firewall_holds_in_the_workspace() {
         "qe-runtime",
         "qe-venue",
         "qe-server",
+        // QE-426: the split crates must be present so their firewall rules cover crates that exist.
+        "qe-runtime-core",
+        "qe-hedger",
+        "qe-edge",
     ] {
         assert!(
             graph.contains_key(required),
@@ -43,6 +47,24 @@ fn firewall_holds_in_the_workspace() {
          vacuous.\n qe-server deps reachable: {:?}",
         reachable(&graph, "qe-server")
     );
+    // QE-426 non-vacuity: known real edges of the split crates were actually parsed, so their new firewall
+    // rules cannot pass vacuously. The order path reaches the venue (`qe-edge → qe-venue`), the planner
+    // reaches the sealed vintage (`qe-hedger → qe-vintage`), the shared contract reaches the money
+    // primitives (`qe-runtime-core → qe-domain`), and the facade reaches the order path (`qe-runtime →
+    // qe-edge`).
+    for (from, to) in [
+        ("qe-edge", "qe-venue"),
+        ("qe-hedger", "qe-vintage"),
+        ("qe-runtime-core", "qe-domain"),
+        ("qe-runtime", "qe-edge"),
+    ] {
+        assert!(
+            reachable(&graph, from).contains(to),
+            "expected `{from} → {to}` edge was not parsed — the split-crate guard would be vacuous.\n\
+             {from} deps reachable: {:?}",
+            reachable(&graph, from)
+        );
+    }
 
     let violations = check_firewall(&graph, &firewall_rules());
     assert!(

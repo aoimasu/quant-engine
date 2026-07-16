@@ -206,8 +206,8 @@ impl ShadowRun {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hedger::TargetPosition;
     use crate::transport::AdapterReport;
+    use qe_runtime_core::TargetPosition;
     use std::str::FromStr;
 
     fn dec(s: &str) -> Decimal {

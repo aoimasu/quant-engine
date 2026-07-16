@@ -257,23 +257,21 @@ Authoritative for the P0/P1 tickets below; later phases inherit unless a ticket 
 
 ### R1.a — P1 (lead the queue: before trusting output / before live capital)
 
-| Ticket | Title | Depends on | Status |
-|--------|-------|------------|:------:|
+_All R1.a tickets delivered — see [`reviewed/`](mds/reviewed/)._
 
 ### R1.b — P2 (before wider exposure / load)
 
+_All original R1.b tickets delivered — see [`reviewed/`](mds/reviewed/). Two follow-ups spawned during the R1 delivery run remain open below._
+
 | Ticket | Title | Depends on | Status |
 |--------|-------|------------|:------:|
-
 | QE-428 | Route reported-backtest impact through the selection cost model / a CLI flag (QE-128) so reporting PnL matches selection  *(P3 — follow-up from QE-403 review)* | QE-403, QE-128 | — |
 
 | QE-429 | Wire the live BreakerLayer at cutover: construct from sealed `content.strategy_ids()` calibration (`from_calibration`) AND call `seed_committed_peaks(&ReconstructedState)` before the first live tick + promote runtime-risk modelling/threshold constants (capacity/calibration + mark-EMA staleness bound/half-life) to per-run config  *(P2 — follow-up from QE-416/QE-401/QE-417 reviews; realizes the live runtime-risk loop: calibration + committed-peak seed + stale-mark handling)* | QE-416, QE-401, QE-417, QE-211, QE-212 | — |
 
 ### R1.c — P3 (opportunistic quality)
 
-| Ticket | Title | Depends on | Status |
-|--------|-------|------------|:------:|
-| QE-426 | Split the `qe-runtime` god-crate along the spec's process seams  *(P3 — refactor)* · **blocked by QE-401/417/418** | QE-401, QE-417, QE-418 | — |
+_All R1.c tickets delivered — see [`reviewed/`](mds/reviewed/)._
 
 > **Suggested first slice:** the small high-leverage guards **QE-402, QE-403, QE-404, QE-405** and the
 > trading correctness P1s **QE-401, QE-414, QE-415, QE-416**; land the tri-team contract **QE-406**

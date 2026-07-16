@@ -21,7 +21,7 @@ use rust_decimal::Decimal;
 use qe_domain::Notional;
 use qe_risk::{Fraction, LimitBreach, LimitKind, LimitOutcome, RiskLimits};
 
-use crate::hedger::{CapitalView, TargetPosition};
+use qe_runtime_core::{CapitalView, TargetPosition};
 
 /// What the governor decides for a target.
 #[derive(Debug, Clone, PartialEq, Eq)]

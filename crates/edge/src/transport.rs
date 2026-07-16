@@ -20,9 +20,9 @@ use qe_error::{Classified, Disposition};
 use qe_venue::userdata::{PositionReport, UserDataEvent};
 
 use crate::edge::{plan_delta, SimFill, VenueKeeper};
-use crate::hedger::TargetPosition;
 use crate::kill_gate::VenueKillGate;
 use qe_risk::{KillHandle, KillSwitch, OrderGate};
+use qe_runtime_core::TargetPosition;
 
 /// A monotonic, **absolute** target revision the planner emits over the transport. A later [`seq`](Self::seq)
 /// supersedes an earlier one; the mark is not carried (it is venue truth held by the [`VenueKeeper`]).
