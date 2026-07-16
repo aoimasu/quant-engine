@@ -7,7 +7,7 @@
 //!   split intended.
 //! - [`VenueKeeper`] — the position keeper. It absorbs the QE-204 [`UserDataEvent`] feed (fills, position
 //!   reports, snapshots) as **ground truth** and **never infers** position from its own orders. It `impl`s the
-//!   QE-214 [`PositionKeeper`](crate::hedger::PositionKeeper) seam, so the Hedge Planner runs over the real
+//!   QE-214 [`PositionKeeper`](qe_runtime_core::PositionKeeper) seam, so the Hedge Planner runs over the real
 //!   keeper.
 //! - [`VenueSimulator`] — an in-memory venue for paper/sim mode: it accepts an [`OrderIntent`], drives an
 //!   [`Order`] through its lifecycle with an immediate fill, and emits the [`Fill`] event the keeper absorbs —
@@ -21,7 +21,9 @@ use rust_decimal::Decimal;
 use qe_domain::{Direction, InstrumentId, Notional, Price, Qty, Side};
 use qe_venue::userdata::{Fill, PositionReport, UserDataEvent};
 
-use crate::hedger::CapitalView;
+// QE-426: the keeper seam + capital view live in the shared `qe-runtime-core` contract, so the edge⑥
+// implements the planner's seam without depending on `qe-hedger`.
+use qe_runtime_core::CapitalView;
 
 /// The lifecycle state of an order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -237,7 +239,7 @@ impl VenueKeeper {
     }
 }
 
-impl crate::hedger::PositionKeeper for VenueKeeper {
+impl qe_runtime_core::PositionKeeper for VenueKeeper {
     fn capital(&self) -> CapitalView {
         CapitalView {
             equity: self.equity,
@@ -250,19 +252,8 @@ impl crate::hedger::PositionKeeper for VenueKeeper {
     // `equity()` intentionally not overridden — it stays `== capital().equity` (QE-214 forward obligation).
 }
 
-/// Forward the keeper seam through a shared reference, so a `HedgePlanner` can *borrow* a keeper (read its
-/// equity/position for planning) while the keeper is still mutated by the user-data feed between plans.
-impl<K: crate::hedger::PositionKeeper + ?Sized> crate::hedger::PositionKeeper for &K {
-    fn capital(&self) -> CapitalView {
-        (**self).capital()
-    }
-    fn venue_position(&self) -> Notional {
-        (**self).venue_position()
-    }
-    fn equity(&self) -> Notional {
-        (**self).equity()
-    }
-}
+// QE-426: the `PositionKeeper for &K` blanket impl now lives in `qe-runtime-core` alongside the trait (the
+// orphan rule requires it there), so a `HedgePlanner` can still *borrow* a keeper across plans.
 
 /// The result of submitting an order to the simulator: the resolved order + the fill event to feed the keeper.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -372,8 +363,9 @@ impl VenueSimulator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hedger::{HedgePlanner, PositionKeeper};
-    use crate::live_netter::NetTarget;
+    use qe_hedger::live_netter::NetTarget;
+    use qe_hedger::HedgePlanner;
+    use qe_runtime_core::PositionKeeper;
     use qe_venue::userdata::PositionSnapshot;
     use std::str::FromStr;
 

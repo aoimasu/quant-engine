@@ -11,25 +11,21 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-qe-domain.workspace = true
-# QE-421: the shared recoverability taxonomy. The runtime owns the live order path, so every order-path
-# error reports an `ErrorClass` and the live loop routes it through `disposition()` (halt/retry/skip).
-# `qe-error` is a foundational leaf (firewall-legal; already used by qe-risk/qe-clock).
-qe-error.workspace = true
+# QE-426: `qe-runtime` is now a thin FACADE. It re-exports the full prior public API from the three split
+# crates so every downstream `use qe_runtime::X` keeps compiling unchanged.
+qe-runtime-core.workspace = true
+qe-hedger.workspace = true
+qe-edge.workspace = true
+# The QE-009 kill contract types re-exported as `qe_runtime::{KillHandle, KillSwitch}` (pre-split surface).
 qe-risk.workspace = true
+
+[dev-dependencies]
+# The retained integration tests (breaker_seed, restart_parity, order_port_conformance, classify_taxonomy)
+# drive the split crates through the facade and construct their inputs directly from these crates.
+qe-domain.workspace = true
+qe-error.workspace = true
 qe-signal.workspace = true
-qe-storage.workspace = true
-qe-venue.workspace = true
-# The sealed vintage (chromosomes/ensemble/calibration) the evaluator session loads read-only (QE-207).
-# qe-vintage embeds the genome via the shared qe-signal crate, so this edge does NOT reach the training
-# side (qe-wfo) — the QE-001 train/live decoupling invariant holds (genome eval is shared via qe-signal).
 qe-vintage.workspace = true
-# `Lineage` recorded on each vintage rollover (QE-219). Cross-cutting crate (QE-006), not on either side of
-# the QE-132 firewall, and already reached transitively via qe-vintage — the direct edge adds nothing
-# forbidden. Promoted from a dev-dependency now that it is named in the public rollover API.
 qe-determinism.workspace = true
-# Exact-decimal scalar context (funding/OI/premium) joined onto bars in the live factor join (QE-206).
-# A normal dependency is already visible to the crate's tests, so no separate dev-dependency is needed.
+qe-venue.workspace = true
 rust_decimal.workspace = true
-# Typed bootstrap errors (QE-209) — reconstruction / REST / decode.
-thiserror.workspace = true

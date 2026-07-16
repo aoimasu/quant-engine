@@ -1,0 +1,16 @@
+[package]
+name = "qe-runtime-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The only dependency: the exact-decimal money/direction primitives the seam types are built from. A pure
+# leaf (QE-426) — the shared planner⑤ ↔ edge⑥ contract must reach neither side, nor the venue.
+qe-domain.workspace = true

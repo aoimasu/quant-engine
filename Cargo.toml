@@ -94,6 +94,12 @@ qe-wfo = { path = "crates/wfo" }
 qe-ensemble = { path = "crates/ensemble" }
 qe-venue = { path = "crates/venue" }
 qe-runtime = { path = "crates/runtime" }
+# QE-426: the split of the `qe-runtime` god-crate along the process seams. `qe-runtime-core` is the shared
+# planner⑤ ↔ edge⑥ contract; `qe-hedger` is Bootstrap③+Live④+Hedge⑤; `qe-edge` is the order-submitting
+# Edge gateway⑥. `qe-runtime` is retained as a thin facade re-exporting all three.
+qe-runtime-core = { path = "crates/runtime-core" }
+qe-hedger = { path = "crates/hedger" }
+qe-edge = { path = "crates/edge" }
 qe-vintage = { path = "crates/vintage" }
 qe-validation = { path = "crates/validation" }
 qe-report = { path = "crates/report" }

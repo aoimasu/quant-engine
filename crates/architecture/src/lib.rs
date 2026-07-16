@@ -198,20 +198,74 @@ pub struct FirewallRule {
 /// QE-254 adds the **second composition root** `qe-server` (admin-UI backend, ADR D4a): it reuses the
 /// training-side + shared crates but must stay clear of the live side — no `qe-runtime`/`qe-venue`
 /// edge — so async stays isolated to that crate and the server never links the live trading path.
+///
+/// QE-426 split the `qe-runtime` god-crate along the process seams into `qe-runtime-core` (the shared
+/// planner⑤ ↔ edge⑥ contract), `qe-hedger` (Bootstrap③+Live④+Hedge⑤), and `qe-edge` (the order-submitting
+/// Edge gateway⑥). The "live" side is therefore now five crates, so the existing search/portfolio/server
+/// rules gain the three split crates on their forbidden lists. Three new rules assert the split's own
+/// boundaries: the order-submitting `qe-edge` stays tight (no search/portfolio/vintage/planner deps — it is
+/// the security boundary), the planner `qe-hedger` never links the adapter (the gRPC seam is a compile
+/// boundary), and the shared `qe-runtime-core` contract stays a pure leaf.
 #[must_use]
 pub fn firewall_rules() -> Vec<FirewallRule> {
     vec![
         FirewallRule {
             upstream: "qe-wfo",
-            forbidden: &["qe-ensemble", "qe-runtime", "qe-venue"],
+            forbidden: &[
+                "qe-ensemble",
+                "qe-runtime",
+                "qe-venue",
+                "qe-runtime-core",
+                "qe-hedger",
+                "qe-edge",
+            ],
         },
         FirewallRule {
             upstream: "qe-ensemble",
-            forbidden: &["qe-wfo", "qe-runtime", "qe-venue"],
+            forbidden: &[
+                "qe-wfo",
+                "qe-runtime",
+                "qe-venue",
+                "qe-runtime-core",
+                "qe-hedger",
+                "qe-edge",
+            ],
         },
         FirewallRule {
             upstream: "qe-server",
-            forbidden: &["qe-runtime", "qe-venue"],
+            forbidden: &[
+                "qe-runtime",
+                "qe-venue",
+                "qe-runtime-core",
+                "qe-hedger",
+                "qe-edge",
+            ],
+        },
+        // QE-426: the order-submitting crate is the deployment/security boundary — its dependency surface
+        // stays minimal. It must link neither search/portfolio (`qe-wfo`/`qe-ensemble`), nor the genome /
+        // vintage eval (`qe-vintage`/`qe-signal`), nor the planner (`qe-hedger`). It reaches only the shared
+        // contract + domain/venue/risk/error.
+        FirewallRule {
+            upstream: "qe-edge",
+            forbidden: &[
+                "qe-wfo",
+                "qe-ensemble",
+                "qe-vintage",
+                "qe-signal",
+                "qe-hedger",
+            ],
+        },
+        // QE-426: the planner must not link the order-submission adapter — the QE-218 gRPC seam is a compile
+        // boundary (two colocated processes). It also stays clear of the training side.
+        FirewallRule {
+            upstream: "qe-hedger",
+            forbidden: &["qe-edge", "qe-wfo", "qe-ensemble"],
+        },
+        // QE-426: the shared planner⑤ ↔ edge⑥ contract is a pure leaf — it must reach neither side, nor the
+        // venue/risk/signal beyond its `qe-domain` money primitives.
+        FirewallRule {
+            upstream: "qe-runtime-core",
+            forbidden: &["qe-edge", "qe-hedger", "qe-venue", "qe-risk", "qe-signal"],
         },
     ]
 }
