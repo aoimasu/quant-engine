@@ -1,0 +1,35 @@
+# QE-427: run the qe-server admin UI (authenticated server + built SPA) end-to-end.
+#
+#   cp .env.server.example .env.server   # then fill in the OAuth + session values
+#   docker compose --env-file .env.server -f docker-compose.server.yml up --build
+#
+# The container binds 0.0.0.0 (non-loopback), so QE_SESSION_SECRET is REQUIRED — without it the
+# server refuses to boot (QE-409 fail-closed). TLS is out of scope (QE-427): put a TLS-terminating
+# proxy in front and set QE_OAUTH_REDIRECT_URI to the public https URL. See docs/deploy/README.md.
+
+services:
+  qe-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+      args:
+        # Optional code-commit provenance (QE-420). Empty falls back to the compiled-in SHA.
+        QE_CODE_COMMIT: "${QE_CODE_COMMIT:-}"
+    image: qe-server
+    ports:
+      - "8080:8080"
+    environment:
+      # REQUIRED: non-loopback bind => the ephemeral-secret fallback is refused (QE-409). Generate with
+      # `openssl rand -hex 32`. A missing/empty value makes the server fail closed on boot.
+      QE_SESSION_SECRET: "${QE_SESSION_SECRET:?QE_SESSION_SECRET is required (non-loopback bind fails closed without it)}"
+      # Google OAuth (QE-256). The redirect URI must be the PUBLIC https URL of /api/auth/callback so
+      # session cookies are minted `Secure` (QE-409).
+      QE_OAUTH_GOOGLE_CLIENT_ID: "${QE_OAUTH_GOOGLE_CLIENT_ID:-}"
+      QE_OAUTH_GOOGLE_CLIENT_SECRET: "${QE_OAUTH_GOOGLE_CLIENT_SECRET:-}"
+      QE_OAUTH_REDIRECT_URI: "${QE_OAUTH_REDIRECT_URI:-}"
+      # Sign-in allowlist (QE-256). Empty => fails closed (nobody can sign in).
+      QE_ADMIN_ALLOWED_EMAILS: "${QE_ADMIN_ALLOWED_EMAILS:-}"
+    volumes:
+      # Relative host path (QE-013) so QE-311 stays mechanical. Persistent run-store state.
+      - ./data:/app/data
+    restart: unless-stopped

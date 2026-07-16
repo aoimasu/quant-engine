@@ -1,0 +1,23 @@
+# QE-427: keep the build context lean for both images (Dockerfile, Dockerfile.server). The SPA is
+# rebuilt from source inside the image, so never ship built/vendored artefacts.
+
+# Rust build output (multi-GB; rebuilt in the builder stage).
+target/
+
+# Node toolchain + build output (rebuilt by `npm ci` + `npm run build` in the web-builder stage).
+web/node_modules/
+web/dist/
+web/coverage/
+web/.vite/
+
+# VCS + local env. `.git` is large and unneeded — thread the commit via --build-arg QE_CODE_COMMIT.
+.git/
+.env
+.env.*
+!.env.server.example
+
+# Local run-store state / mounted data (mounted at runtime, never baked into the image).
+data/
+
+# Editor / OS cruft.
+.DS_Store

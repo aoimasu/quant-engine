@@ -1,0 +1,72 @@
+# QE-427: SERVER image — the long-lived `qe-server` admin HTTP service + the built SPA.
+#
+# DISTINCT from the CLI batch image (`Dockerfile`, which builds `-p qe-cli` with `ENTRYPOINT ["qe"]`
+# and runs `train`). This image builds the SPA (`web/dist`), builds `qe-server` (with live Google
+# OAuth via `--features http`) AND the `qe` CLI (so the server can spawn real backtest/train runs),
+# and boots the server bound to `0.0.0.0` so it is reachable — which, per QE-409, MEANS a
+# `QE_SESSION_SECRET` is REQUIRED or the server refuses to boot (fail closed).
+#
+#   docker build -f Dockerfile.server -t qe-server .
+#   docker run --rm -p 8080:8080 \
+#     -e QE_SESSION_SECRET="$(openssl rand -hex 32)" \
+#     -e QE_OAUTH_GOOGLE_CLIENT_ID=... -e QE_OAUTH_GOOGLE_CLIENT_SECRET=... \
+#     -e QE_OAUTH_REDIRECT_URI=https://admin.example.com/api/auth/callback \
+#     -e QE_ADMIN_ALLOWED_EMAILS=you@example.com \
+#     -v "$(pwd)/data:/app/data" qe-server
+#
+# TLS is out of scope (QE-427): terminate TLS at a fronting proxy and point `QE_OAUTH_REDIRECT_URI`
+# at the public https URL so session cookies are minted `Secure` (QE-409). See docs/deploy/README.md.
+
+# ---- stage 1: build the SPA -> web/dist ---------------------------------------------------------
+FROM node:20-slim AS web-builder
+WORKDIR /web
+# Copy only the web context first so a Rust-source change doesn't bust the npm cache layers.
+COPY web/package.json web/package-lock.json ./
+RUN npm ci
+COPY web/ ./
+# `tsc -b && vite build` -> /web/dist (see web/vite.config.ts outDir: 'dist').
+RUN npm run build
+
+# ---- stage 2: build qe-server (+ qe CLI) --------------------------------------------------------
+# Pin to bookworm so the builder's glibc matches the `debian:bookworm-slim` runtime below (the
+# default `rust:1.96` tag tracks a newer Debian whose glibc the slim runtime lacks).
+FROM rust:1.96-bookworm AS server-builder
+WORKDIR /build
+COPY . .
+# Live Google OAuth is behind the `http` feature (default-off); enable it for the deployed server.
+# Build the `qe` CLI too so the co-located-deploy convention (resolve_cli_bin) finds it for run spawns.
+RUN cargo build --release --locked -p qe-server --features http \
+ && cargo build --release --locked -p qe-cli
+
+# ---- stage 3: slim runtime ----------------------------------------------------------------------
+FROM debian:bookworm-slim AS runtime
+WORKDIR /app
+# Code-commit provenance (QE-420): the build context may not ship `.git`, so thread the real commit in.
+#   docker build -f Dockerfile.server --build-arg QE_CODE_COMMIT="$(git rev-parse --short=12 HEAD)" .
+ARG QE_CODE_COMMIT=""
+ENV QE_CODE_COMMIT=$QE_CODE_COMMIT
+# native-tls (Google OIDC verifier under `--features http`) needs system CA certificates at runtime.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+# The server binary and, co-located beside it, the `qe` CLI the server spawns for runs
+# (resolve_cli_bin() looks for a `qe` next to the running `qe-server`).
+COPY --from=server-builder /build/target/release/qe-server /usr/local/bin/qe-server
+COPY --from=server-builder /build/target/release/qe /usr/local/bin/qe
+# The built SPA the server serves at `/`.
+COPY --from=web-builder /web/dist /app/web/dist
+# A default qe-config; override by mounting your own and/or `QE_`-prefixed env vars.
+COPY config.example.toml /app/config.toml
+
+# Bind non-loopback so the container is reachable. Per QE-409 this MEANS a `QE_SESSION_SECRET` is
+# REQUIRED — with a non-loopback bind and no secret, `qe-server` refuses to boot (fail closed).
+ENV QE_SERVER_ADDR=0.0.0.0:8080 \
+    QE_SERVER_STATIC_DIR=/app/web/dist \
+    QE_SERVER_DATA_DIR=/app/data \
+    QE_CONFIG=/app/config.toml
+# Persistent run-store state lives under /app/data — mount a (relative, QE-013) volume here.
+VOLUME ["/app/data"]
+EXPOSE 8080
+
+# Long-lived HTTP service — no `train` CMD. The server reads its config from the `QE_`-prefixed env.
+ENTRYPOINT ["qe-server"]
