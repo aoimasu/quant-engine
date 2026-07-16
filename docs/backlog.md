@@ -273,7 +273,6 @@ Authoritative for the P0/P1 tickets below; later phases inherit unless a ticket 
 
 | Ticket | Title | Depends on | Status |
 |--------|-------|------------|:------:|
-| QE-421 | Adopt the `qe-error` recoverability taxonomy on the runtime order path  *(P3)* · *complements QE-268* | QE-268 | — |
 | QE-426 | Split the `qe-runtime` god-crate along the spec's process seams  *(P3 — refactor)* · **blocked by QE-401/417/418** | QE-401, QE-417, QE-418 | — |
 | QE-427 | Container/deploy path for the admin server + SPA; fail closed  *(P3 — deployment)* | QE-013, QE-254, QE-258 | — |
 
