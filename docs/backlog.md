@@ -261,12 +261,7 @@ _All R1.a tickets delivered — see [`reviewed/`](mds/reviewed/)._
 
 ### R1.b — P2 (before wider exposure / load)
 
-_All original R1.b tickets delivered — see [`reviewed/`](mds/reviewed/). One follow-up spawned during the R1 delivery run remains open below (QE-428 delivered)._
-
-| Ticket | Title | Depends on | Status |
-|--------|-------|------------|:------:|
-
-| QE-429 | Wire the live BreakerLayer at cutover: construct from sealed `content.strategy_ids()` calibration (`from_calibration`) AND call `seed_committed_peaks(&ReconstructedState)` before the first live tick + promote runtime-risk modelling/threshold constants (capacity/calibration + mark-EMA staleness bound/half-life) to per-run config  *(P2 — follow-up from QE-416/QE-401/QE-417 reviews; realizes the live runtime-risk loop: calibration + committed-peak seed + stale-mark handling)* | QE-416, QE-401, QE-417, QE-211, QE-212 | — |
+_All R1.b tickets delivered, including both follow-ups (QE-428, QE-429) spawned during the R1 delivery run — see [`reviewed/`](mds/reviewed/)._
 
 ### R1.c — P3 (opportunistic quality)
 
