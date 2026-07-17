@@ -23,7 +23,10 @@ pub mod regime;
 pub mod search;
 pub mod stress;
 
-pub use capacity::{cap_weights, capacity, CapacityModel, StrategyProfile, DEFAULT_EDGE_RETENTION};
+pub use capacity::{
+    cap_weights, capacity, ewma_variance, inverse_vol_seed, CapacityModel, SeedWeighting,
+    StrategyProfile, DEFAULT_EDGE_RETENTION, DEFAULT_EWMA_DECAY,
+};
 pub use de::{binomial_crossover, de_mutant, EnsembleMask, DEFAULT_CR};
 pub use objective::{
     cdar, combined_returns, combined_returns_weighted, cvar, leave_one_out_min,

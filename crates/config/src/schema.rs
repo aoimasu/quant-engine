@@ -114,6 +114,19 @@ pub struct SelectionConfig {
     /// Must be `≥ 2` (a real cross-validated standard error); the default is a small-budget-friendly `4`.
     #[serde(default = "default_cv_folds")]
     pub cv_folds: usize,
+    /// QE-443: opt-in **inverse-vol (EWMA) risk-parity seed** for the deployed ensemble weight budget. When
+    /// `true` the sealed weights are seeded by inverse-vol (a single EWMA decay, [`ewma_decay`]) before the
+    /// existing QE-128 capacity water-fill; when `false` (the **default**) the seed is the OOS-robust
+    /// equal-weight `1/N` the engine has always used, so vintages and goldens are unchanged. The Max Dama
+    /// panel judged inverse-vol a genuine risk-cancellation vs variance-estimation trade-off — not a strict
+    /// win — so it is offered opt-in, never forced. [`ewma_decay`]: SelectionConfig::ewma_decay
+    #[serde(default)]
+    pub inverse_vol_seed: bool,
+    /// QE-443: the single EWMA variance decay constant `λ` for the inverse-vol seed (used only when
+    /// [`inverse_vol_seed`](Self::inverse_vol_seed) is `true`). RiskMetrics-standard `0.94`; must be in
+    /// `(0, 1)`.
+    #[serde(default = "default_ewma_decay")]
+    pub ewma_decay: f64,
 }
 
 impl Default for SelectionConfig {
@@ -121,6 +134,8 @@ impl Default for SelectionConfig {
         Self {
             funding_coverage_min: default_funding_coverage_min(),
             cv_folds: default_cv_folds(),
+            inverse_vol_seed: false,
+            ewma_decay: default_ewma_decay(),
         }
     }
 }
@@ -131,6 +146,10 @@ fn default_funding_coverage_min() -> f64 {
 
 fn default_cv_folds() -> usize {
     4
+}
+
+fn default_ewma_decay() -> f64 {
+    0.94
 }
 
 /// One point-in-time universe member: an instrument with an optional `[listed, delisted)` window.

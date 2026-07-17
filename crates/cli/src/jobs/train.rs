@@ -22,7 +22,7 @@ use qe_determinism::{seed_rng, Lineage};
 use qe_domain::{Direction, InstrumentId, Resolution, Timestamp};
 use qe_ensemble::{
     cap_weights, capacity, default_synthetic_shocks, weighted_combined, worst_case_loss,
-    CapacityModel, StrategyProfile,
+    CapacityModel, SeedWeighting, StrategyProfile,
 };
 use qe_gate::{evaluate_g1, split_with_embargo, G1Criteria, G1Decision};
 use qe_risk::{
@@ -156,6 +156,10 @@ pub struct TrainParams {
     /// number. The folds tile the train window (nothing held out) — an in-window robustness signal, not a true
     /// OOS gate; the G1 terminal holdout remains the only true OOS boundary.
     pub cv_folds: usize,
+    /// QE-443: how the **deployed** ensemble weight budget is seeded before the QE-128 capacity water-fill.
+    /// Defaults to [`SeedWeighting::Equal`] (the OOS-robust `1/N`), so the sealed weights are byte-identical
+    /// to today unless `config.selection.inverse_vol_seed` opts in to inverse-vol (EWMA) risk parity.
+    pub seed_weighting: SeedWeighting,
     /// The config-derived lineage (config hash + snapshot + code commit + seed). Its [`Lineage::id`] is
     /// the sealed vintage id — deterministic and independent of the stochastic search.
     pub lineage: Lineage,
@@ -456,7 +460,12 @@ pub fn run_train_job(
         .map(|g| backtest(g, train_bars, &train_cfg))
         .collect();
     let selected_returns: Vec<Vec<f64>> = selected_bt.iter().map(|b| b.returns.clone()).collect();
-    let weights = capacity_capped_weights(&chromosomes, &selected_bt, train_adv_notional);
+    let weights = capacity_capped_weights(
+        &chromosomes,
+        &selected_bt,
+        train_adv_notional,
+        params.seed_weighting,
+    );
 
     emit(ProgressLine::Ensemble {
         pct: 75,
@@ -723,10 +732,16 @@ fn capacity_capped_weights(
     chromosomes: &[Genome],
     selected_bt: &[qe_wfo::backtest::BacktestResult],
     adv_notional: f64,
+    seed_weighting: SeedWeighting,
 ) -> Vec<f64> {
+    // QE-443: the seed budget the capacity water-fill starts from — `1/N` by default (byte-identical to the
+    // historical path), or inverse-vol (EWMA) risk parity over the members' net-return series when opted in.
+    let returns: Vec<Vec<f64>> = selected_bt.iter().map(|b| b.returns.clone()).collect();
     cap_or_equal(
         chromosomes.len(),
         &strategy_capacities(chromosomes, selected_bt, adv_notional),
+        seed_weighting,
+        &returns,
     )
 }
 
@@ -780,16 +795,24 @@ fn mean_dollar_adv(bars: &[DecisionBar]) -> f64 {
 /// the capping would zero the entire budget (every member modelled uneconomic at the target AUM) so the
 /// seal still yields a tradeable vintage. Split out from [`capacity_capped_weights`] so the binding /
 /// non-binding / degenerate branches are unit-testable without constructing backtest results.
-fn cap_or_equal(k: usize, capacities: &[f64]) -> Vec<f64> {
+fn cap_or_equal(
+    k: usize,
+    capacities: &[f64],
+    seed_weighting: SeedWeighting,
+    returns: &[Vec<f64>],
+) -> Vec<f64> {
     if k == 0 {
         return Vec::new();
     }
-    let equal = vec![1.0 / k as f64; k];
-    let capped = cap_weights(&equal, capacities, TARGET_AUM_USD);
+    // QE-443: the seed the water-fill layers on top of. `SeedWeighting::Equal` (the default) yields exactly
+    // `vec![1/k; k]`, byte-identical to the historical literal; `InverseVol` seeds by EWMA inverse-vol.
+    let seed = seed_weighting.seed(returns, k);
+    let fallback = vec![1.0 / k as f64; k];
+    let capped = cap_weights(&seed, capacities, TARGET_AUM_USD);
     let chosen = if capped.iter().sum::<f64>() > 0.0 {
         capped
     } else {
-        equal
+        fallback
     };
     // Round to a hash-stable precision so the sealed weights round-trip byte-identically (a raw capacity
     // weight can carry 17 significant digits that serde_json's default parser does not round-trip).
@@ -914,13 +937,18 @@ mod tests {
 
     /// QE-416 AC (a): the sealed weights differ from equal-weight when capacity binds, stay equal when it
     /// does not, and fall back to equal (a tradeable book) when every member is modelled uneconomic.
+    fn cap_equal(k: usize, capacities: &[f64]) -> Vec<f64> {
+        // The default (opt-OFF) path: equal-weight seed, so `returns` is unused.
+        cap_or_equal(k, capacities, SeedWeighting::Equal, &[])
+    }
+
     #[test]
     fn capacity_capped_weights_differ_from_equal_only_when_capacity_binds() {
         let equal = [0.5, 0.5];
 
         // Member 0's capacity ($100k) is far below its $500k equal-weight dollar share at the $1M target,
         // so it is capped down and the freed budget water-fills to the high-capacity member 1.
-        let binding = cap_or_equal(2, &[100_000.0, 1e15]);
+        let binding = cap_equal(2, &[100_000.0, 1e15]);
         assert!(
             (binding[0] - 0.5).abs() > 1e-9,
             "capacity binds ⇒ weight differs from equal: {binding:?}"
@@ -930,17 +958,53 @@ mod tests {
             "capped member shrinks, freed budget water-fills the other: {binding:?}"
         );
         // Capacities far above the target ⇒ no binding ⇒ equal weights unchanged.
-        let free = cap_or_equal(2, &[1e15, 1e15]);
+        let free = cap_equal(2, &[1e15, 1e15]);
         assert!(
             (free[0] - 0.5).abs() < 1e-12 && (free[1] - 0.5).abs() < 1e-12,
             "no binding ⇒ equal weights: {free:?}"
         );
         // Every member uneconomic (capacity 0) ⇒ fall back to equal so the vintage still trades.
-        let degenerate = cap_or_equal(2, &[0.0, 0.0]);
+        let degenerate = cap_equal(2, &[0.0, 0.0]);
         assert_eq!(
             degenerate,
             equal.to_vec(),
             "all-uneconomic ⇒ equal-weight fallback (tradeable): {degenerate:?}"
         );
+    }
+
+    /// QE-443: the equal-weight seed (default OFF) is byte-identical to the historical `1/k` literal path,
+    /// while the opt-in inverse-vol seed water-fills a *different* budget — proving the toggle is the only
+    /// thing that changes the sealed weights.
+    #[test]
+    fn inverse_vol_seed_is_opt_in_and_off_is_byte_identical() {
+        // Two members: member 0 low-vol, member 1 high-vol.
+        let low_vol: Vec<f64> = (0..64)
+            .map(|i| if i % 2 == 0 { 0.004 } else { -0.004 })
+            .collect();
+        let high_vol: Vec<f64> = (0..64)
+            .map(|i| if i % 2 == 0 { 0.04 } else { -0.04 })
+            .collect();
+        let returns = vec![low_vol, high_vol];
+        let caps = [1e15, 1e15]; // no capacity binding, so the seed shows through unchanged
+
+        // OFF (default): byte-identical to the equal-weight literal path.
+        let off = cap_or_equal(2, &caps, SeedWeighting::Equal, &returns);
+        assert_eq!(off, cap_equal(2, &caps));
+        assert_eq!(off, vec![0.5, 0.5]);
+
+        // ON: inverse-vol seeds the low-vol member strictly above 0.5; the (non-binding) water-fill keeps it.
+        let on = cap_or_equal(
+            2,
+            &caps,
+            SeedWeighting::InverseVol {
+                decay: qe_ensemble::DEFAULT_EWMA_DECAY,
+            },
+            &returns,
+        );
+        assert!(
+            on[0] > 0.5 && on[1] < 0.5,
+            "inverse-vol seed weights the low-vol member up: {on:?}"
+        );
+        assert!((on[0] + on[1] - 1.0).abs() < 1e-9);
     }
 }

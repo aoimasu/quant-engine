@@ -72,6 +72,8 @@ fn params(store_path: PathBuf, vintage_root: PathBuf, seed: u64) -> TrainParams 
         // QE-415: 2 purged OOS folds keeps the small-budget fixture search fast (test blocks partition the
         // ~87-bar train window, so per-genome eval stays ~one pass over the train bars).
         cv_folds: 2,
+        // QE-443: default OFF ⇒ the deployed weights keep the equal-weight `1/N` seed (goldens unchanged).
+        seed_weighting: qe_ensemble::SeedWeighting::Equal,
         lineage: lineage(seed),
         profile: "train".to_owned(),
     }
