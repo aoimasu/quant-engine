@@ -9,12 +9,16 @@
 //! - [`pbo`] — **Probability of Backtest Overfitting** via Combinatorially Symmetric Cross-Validation.
 //! - [`spa`] — **White's Reality Check / Hansen's SPA** vs a best-of-N null.
 //! - [`nulls`] — **BTC-HODL** and **turnover-matched random-entry** benchmark nulls.
+//! - [`ic`] — **per-indicator rank-IC / information-horizon screening** (QE-434): a catalogue-admission
+//!   pre-filter that classifies each factor Admit/Flag/Drop out-of-fold, filtering **compute** the
+//!   search roams over — never the hypothesis/trial count the DSR deflates against.
 //!
 //! It is downstream validation: pure statistics over return matrices + trial counts. It depends only on
 //! `qe-determinism` (reproducible bootstrap/null RNG, QE-006) — **no `qe-wfo`/`qe-ensemble`**, so it never
 //! touches the search⟂portfolio firewall.
 
 pub mod dsr;
+pub mod ic;
 pub mod nulls;
 pub mod pbo;
 pub mod spa;
@@ -26,6 +30,10 @@ use thiserror::Error;
 pub use dsr::{
     deflated_sharpe_ratio, effective_trials, expected_max_sharpe, probabilistic_sharpe_ratio,
     trial_sharpe_variance,
+};
+pub use ic::{
+    benjamini_hochberg, forward_returns, rank_ic, screen_catalogue, spearman_pvalue, HorizonIc,
+    IcScreenConfig, IcScreenReport, IndicatorScreen, IndicatorSignals, Verdict,
 };
 pub use nulls::{buy_and_hold_returns, random_entry_returns, realised_turnover};
 pub use pbo::{pbo_cscv, PboReport};
