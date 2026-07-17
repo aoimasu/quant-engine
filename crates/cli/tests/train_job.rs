@@ -184,6 +184,23 @@ fn train_over_fixture_store_seals_verifiable_vintage() {
         "the trial variance (deflation basis) must be recorded, got {}",
         robustness.trial_variance,
     );
+
+    // QE-430: the effective N behind the correlation penalty is recorded in the ensemble score record,
+    // consistently with the selected membership — `> 0` iff ≥ 2 members were selected (a penalty rests on
+    // a pair), and it is a fold-slice sample size, never larger than the train window.
+    let n_selected = outcome.result.selected.len();
+    let eff_n = outcome.result.ensemble_corr_effective_n;
+    if n_selected >= 2 {
+        assert!(
+            eff_n > 0,
+            "≥2 selected members ⇒ the correlation penalty rests on a pair, so effective N > 0 (got {eff_n})"
+        );
+    } else {
+        assert_eq!(
+            eff_n, 0,
+            "a single-member ensemble's correlation penalty rests on no pair ⇒ effective N == 0"
+        );
+    }
 }
 
 /// QE-416 AC (b) + (c): the sealed vintage carries a real worst-case-loss figure (not `None`), and its
