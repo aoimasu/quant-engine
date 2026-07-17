@@ -24,7 +24,9 @@ use rand_core::RngCore;
 use rayon::prelude::*;
 
 use crate::archive::{descriptor_for, Cell, SUBPOP_SIZE};
+use crate::fitness::NoiseRobustFitness;
 use crate::genome::Genome;
+use crate::lifecycle::QualityGate;
 
 /// A stored elite: a genome and its scalar fitness (a score, not money — `f64`).
 #[derive(Debug, Clone, PartialEq)]
@@ -265,6 +267,66 @@ impl MapElitesArchive {
     pub fn total_elites(&self) -> usize {
         self.long.total_elites() + self.short.total_elites()
     }
+
+    /// QE-436 **graduation-champion parsimony tie-break**. Return the archived elite genome that is *tied*
+    /// with `genome` on stored selection fitness within its own niche(s) and is the **most parsimonious**
+    /// (lowest [`Genome::mdl_complexity`]) — the equal-robust-fitness but structurally simpler equivalent
+    /// to *deploy* in `genome`'s place. When `genome` is not archived, or is already the simplest at its
+    /// fitness, it is returned unchanged.
+    ///
+    /// This is a strict equal-fitness lexicographic tie-break, routed through
+    /// [`QualityGate::most_parsimonious`]: it reads only the stored **scalar** fitness and the genotype —
+    /// never a `.returns` series — and it never mutates the archive. So [`best`](SubPopulation::best),
+    /// [`occupied_cells`](Self::occupied_cells), and the per-cell champions the DSR **trial-variance
+    /// basis** and **n_trials** are built from are all untouched; only the *deployed candidate* may change,
+    /// to a statistically equivalent (equal-fitness) simpler genome. Deterministic (fixed traversal order;
+    /// the gate keeps the earliest on an exact complexity tie), so byte-reproducibility is preserved.
+    #[must_use]
+    pub fn parsimonious_equal(&self, genome: &Genome, gate: &QualityGate) -> Genome {
+        // The niche cell(s) this genome occupies (its Long and/or Short bank descriptors).
+        let cells: [Option<(Direction, Cell)>; 2] = [
+            descriptor_for(genome, Direction::Long, &self.schema).map(|c| (Direction::Long, c)),
+            descriptor_for(genome, Direction::Short, &self.schema).map(|c| (Direction::Short, c)),
+        ];
+        // Its stored selection fitness (the scalar the archive holds for this exact genotype).
+        let mut fitness: Option<f64> = None;
+        for (dir, cell) in cells.iter().flatten() {
+            if let Some(sub) = self.direction(*dir).cell(cell) {
+                for e in sub.elites() {
+                    if e.genome == *genome {
+                        fitness = Some(e.fitness);
+                    }
+                }
+            }
+        }
+        let Some(fitness) = fitness else {
+            return genome.clone(); // not archived → nothing to tie-break against
+        };
+        // Every elite in those niche(s) tied on stored fitness, in deterministic traversal order.
+        let tied: Vec<(&Genome, NoiseRobustFitness, u32)> = cells
+            .iter()
+            .flatten()
+            .filter_map(|(dir, cell)| self.direction(*dir).cell(cell))
+            .flat_map(|sub| sub.elites())
+            .filter(|e| e.fitness == fitness)
+            .map(|e| {
+                (
+                    &e.genome,
+                    // SE = 0 ⇒ the noise band collapses to exact-fitness equality: only genomes with the
+                    // SAME selection fitness are "within band", so the tie-break is strict.
+                    NoiseRobustFitness {
+                        mean: e.fitness,
+                        std_error: 0.0,
+                        n: 1,
+                    },
+                    e.genome.mdl_complexity(),
+                )
+            })
+            .collect();
+        gate.most_parsimonious(&tied)
+            .cloned()
+            .unwrap_or_else(|| genome.clone())
+    }
 }
 
 /// Evaluate a batch of genomes across cores, **byte-deterministically regardless of pool size**.
@@ -453,6 +515,91 @@ mod tests {
             arc.insert(genome_with(&[feat], &[], 3), 5.1).long,
             Some(InsertOutcome::ImprovedElite)
         );
+    }
+
+    /// Two enabled clauses on the **same feature** — a structurally more complex genome that still lands
+    /// in the same niche as its one-clause sibling (identical referenced-feature set ⇒ identical
+    /// descriptor), used to construct a genuine equal-fitness / unequal-complexity tie.
+    fn two_clause_same_feature(feat: u16, max_holding_bars: u16) -> Genome {
+        let clauses = [
+            Clause {
+                enabled: true,
+                feature: feat,
+                lo: 0,
+                hi: 1,
+            },
+            Clause {
+                enabled: true,
+                feature: feat,
+                lo: 2,
+                hi: 3,
+            },
+            clause(false, 0),
+            clause(false, 0),
+        ];
+        Genome {
+            version: REP_VERSION,
+            long_entry: RuleSet {
+                clauses,
+                min_satisfied: 1,
+            },
+            short_entry: RuleSet {
+                clauses: [
+                    clause(false, 0),
+                    clause(false, 0),
+                    clause(false, 0),
+                    clause(false, 0),
+                ],
+                min_satisfied: 1,
+            },
+            exit: ExitParams {
+                max_holding_bars,
+                exit_on_opposite: true,
+            },
+            risk: RiskParams { size_bps: 5_000 },
+        }
+    }
+
+    /// QE-436 "wiring is LIVE" guard: with two equal-fitness niche elites of different complexity present,
+    /// the graduation-champion pick deploys the SIMPLER one. Fails if the tie-break is unwired (i.e. if
+    /// `parsimonious_equal` degenerates to returning the input genome).
+    #[test]
+    fn parsimonious_equal_deploys_the_simpler_of_two_tied_niche_elites() {
+        let s = schema();
+        let feat = idx_of(&s, "rsi_14");
+        let simple = genome_with(&[feat], &[], 3); // 1 clause + 1 feature = complexity 2
+        let complex = two_clause_same_feature(feat, 3); // 2 clauses + 1 feature = complexity 3
+                                                        // The fixtures must collide in a single niche for the tie-break to apply.
+        assert_eq!(
+            descriptor_for(&simple, Direction::Long, &s),
+            descriptor_for(&complex, Direction::Long, &s),
+            "fixtures must share one niche"
+        );
+        assert!(complex.mdl_complexity() > simple.mdl_complexity());
+
+        let gate = QualityGate::with_defaults();
+
+        // A genuine tie: both members at the SAME selection fitness in the SAME cell.
+        let mut arc = MapElitesArchive::new(schema());
+        arc.insert(complex.clone(), 1.0); // inserted FIRST — so a naive "keep incumbent" would keep complex
+        arc.insert(simple.clone(), 1.0);
+        assert_eq!(
+            arc.parsimonious_equal(&complex, &gate),
+            simple,
+            "at equal fitness the simpler niche elite is the graduated champion"
+        );
+        assert_eq!(arc.parsimonious_equal(&simple, &gate), simple);
+
+        // NOT a tie: a materially better (higher-fitness) complex elite is the sole holder of its fitness,
+        // so parsimony never swaps it away — fitness dominates complexity.
+        let mut arc2 = MapElitesArchive::new(schema());
+        arc2.insert(simple.clone(), 1.0);
+        arc2.insert(complex.clone(), 2.0);
+        assert_eq!(arc2.parsimonious_equal(&complex, &gate), complex);
+
+        // An un-archived genome has no tie-break basis and deploys unchanged.
+        let stranger = genome_with(&[idx_of(&s, "ema_ratio_20")], &[], 60);
+        assert_eq!(arc2.parsimonious_equal(&stranger, &gate), stranger);
     }
 
     #[test]

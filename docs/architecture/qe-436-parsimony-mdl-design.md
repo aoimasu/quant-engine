@@ -89,6 +89,31 @@ at equal robust fitness" when a caller must pick a single champion among equal-r
 - `QualityGate::most_parsimonious<'a, T>(candidates) -> Option<&'a T>`: among candidates that share the
   best robust lower bound (within the noise band), returns the lowest-complexity one; deterministic.
 
+### 3d. `crates/wfo/src/mapelites.rs` + `crates/cli/src/jobs/train.rs` — LIVE wiring at the graduation-champion pick
+The helpers above are not left dormant. `MapElitesArchive::parsimonious_equal(genome, gate)` is the
+graduation-champion selector: for a genome the ensemble selected for deployment, it gathers the archived
+elites in that genome's own niche(s) that are **tied on stored selection fitness**, and returns the
+**most parsimonious** among them (via `QualityGate::most_parsimonious`), to seal in the genome's place.
+The train seal path (`train.rs`, just after the ensemble picks `selected`) maps each deployed member
+through it:
+```
+let grad_gate = QualityGate::with_defaults();
+let chromosomes = selected.iter()
+    .map(|&i| archive.parsimonious_equal(&pool_genomes[i], &grad_gate))
+    .collect();
+```
+
+**Why this is the DSR-safe home.** Traced end-to-end (evidence in §2 of the review map): the DSR
+**candidate** is `in_sample_returns = combine(chromosomes)`, but the DSR **trial-variance basis**
+(`cell_champion_returns` = per-cell `best()`), the **n_trials** (`archive.occupied_cells()`), and the
+DSR/PBO/SPA **trial columns** (`pool` = `elite_pool`) are all derived from the *unchanged* archive and do
+**not** depend on which member is deployed. `parsimonious_equal` reads only the stored **scalar** fitness
+and the genotype — never a `.returns` series — and never mutates the archive, so `best()`/`elite_pool`/
+`cell_champion_returns` and thus the deflation **bar** are byte-identical. Only the deployed *candidate*
+may shift to an equal-fitness simpler genome, which the unchanged bar then honestly deflates. So the
+escape-hatch condition ("wiring cannot avoid feeding the DSR variance basis") is **not** triggered: the
+variance basis is not fed.
+
 ## 4. Why this is a strict parsimony tie-break, not a fitness distortion
 
 - The MDL magnitude (`mdl_complexity`) is an integer read off the genome; it is **never** added to,
@@ -102,27 +127,33 @@ at equal robust fitness" when a caller must pick a single champion among equal-r
 
 ## 5. Golden / vintage impact
 
-The scalar archive path (`consider`/`best`/`elite_pool`), the `.returns` series, and the DSR inputs are
-**not** modified. `should_replace` stays pure; `persists` pass/fail is unchanged. The new APIs
-(`mdl_complexity`, `should_replace_parsimonious`, `within_noise_band`, gate selection helpers) are
-additive and are **not** wired into the vintage-producing pipeline in this ticket, so:
+The DSR **trial-variance basis** (`cell_champion_returns` / `best()`), **n_trials**
+(`archive.occupied_cells()`), and the DSR/PBO/SPA **trial columns** (`elite_pool`) are **not** modified; the
+`.returns` series and `persists`/`survivors` pass/fail are unchanged; `should_replace` stays pure. The one
+in-pipeline behaviour change is the graduation-champion swap (§3d), which can only move the deployed
+`chromosomes` — and only between genomes of **exactly equal** stored selection fitness.
 
-- `crates/cli/tests/fixtures/golden_result.json` (a fixed sealed-vintage backtest) is unaffected.
-- `crates/cli/tests/train_job.rs` reproducibility / `content_hash` assertions are unaffected.
-- The determinism harness and parity tests are unaffected.
+Measured on the seed-42 fixture (`train_job`), before→after the wiring:
 
-Expected `content_hash` movement: **none**. Verified by the full green gate below. Had a golden moved, we
-would regenerate via the real code path only
-(`cargo test -p qe-cli --test backtest_job regenerate_fixtures -- --ignored --exact`), never by hand, and
-bump `VINTAGE_FORMAT_VERSION` only if a new hashed field were added (none is).
+- `content_hash` = `afda70723fdc5c2188026c85ed261c03db13b7768e9af2c0151f800b2f8caec5` **unchanged**
+  (identical with the wiring stashed vs. live). No equal-fitness / unequal-complexity tie occurs among the
+  ensemble-selected members on this fixture, so no swap fires — the wiring is **behaviour-preserving on the
+  fixture but active in general** (guarded live by the test in §7).
+- `crates/cli/tests/fixtures/golden_result.json` (a fixed pre-sealed-vintage backtest — does not run the
+  search) is unaffected.
+
+So **no golden moved** and no regeneration is required; no new hashed field was added, so
+`VINTAGE_FORMAT_VERSION` is unchanged. Had a champion shifted, it would be a pure equal-fitness parsimony
+tie-break (not a fitness distortion) and the golden would be regenerated via the real code path only
+(`cargo test -p qe-cli --test backtest_job regenerate_fixtures -- --ignored --exact`), never by hand.
 
 ## 6. Scope note — "decouple size from rule discovery"
 
-The ticket's second half (two-stage search under a size-normalised/unit-risk fitness, or an alpha-quality
-term) would require restructuring the size-co-evolution in the scalar-fitness search — which is exactly the
-DSR-facing path we are forbidden to touch here, and is a larger change than an `Effort: S` tie-break. The
-parsimony tie-break delivered here is the in-search parsimony operationalisation the panel's rank-#7
-recommendation centres on; the size/rule decoupling is left as a follow-up that must be done without
+The in-search parsimony operationalisation the panel's rank-#7 recommendation centres on is delivered and
+**live** at the graduation-champion pick (§3d). The ticket's *second* half (two-stage search under a
+size-normalised/unit-risk fitness, or an alpha-quality term) would require restructuring the
+size-co-evolution inside the **DSR-facing** scalar-fitness search — the very path forbidden here — and is a
+larger change than an `Effort: S` tie-break. It stays a documented **follow-up**, to be done without
 injecting a size term into the DSR-facing selection fitness (tracked against the same spec ref).
 
 ## 7. Tests (TDD)
@@ -133,3 +164,9 @@ injecting a size term into the DSR-facing selection fitness (tracked against the
   not; ruin never replaces; the MDL term is proven out of `should_replace`/the fitness scalar.
 - `lifecycle.rs`: `most_parsimonious` picks the simplest among equal-robust survivors; a materially-higher
   lower-bound candidate always wins regardless of complexity; determinism.
+- **`mapelites.rs` (the "wiring is LIVE" guard):**
+  `parsimonious_equal_deploys_the_simpler_of_two_tied_niche_elites` — inserts two equal-fitness elites of
+  different complexity into one niche (the more complex one **first**) and asserts the graduation-champion
+  pick deploys the **simpler** one; also asserts a materially-better complex elite is never swapped away and
+  an un-archived genome deploys unchanged. Fails if the tie-break is unwired (i.e. if `parsimonious_equal`
+  degenerates to returning its input).
