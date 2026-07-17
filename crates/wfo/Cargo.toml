@@ -14,6 +14,9 @@ workspace = true
 qe-domain.workspace = true
 qe-signal.workspace = true
 qe-storage.workspace = true
+# QE-431: the single content-addressed slippage/impact calibration (upstream shared source of truth).
+# `qe-risk` reaches only `qe-domain`/`qe-error` — no search⟂portfolio firewall edge.
+qe-risk.workspace = true
 # Exact decimal for cost / funding / P&L arithmetic — never float money (QE-109).
 rust_decimal.workspace = true
 # Genome serialisation (QE-110): the canonical vintage-lineage form is JSON.

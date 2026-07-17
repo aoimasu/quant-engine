@@ -488,6 +488,11 @@ pub fn run_train_job(
         chromosomes,
         weights: weights.clone(),
         calibration,
+        // QE-431: the content-addressed slippage/impact calibration that priced selection. The train
+        // search runs on `BacktestConfig::default().friction`, whose model derives from this exact
+        // `SlippageCalibration::default()`, so sealing it ties the cost coefficients into the lineage.
+        // (Wiring a live-fitted calibration through here is the QE-431 follow-up.)
+        slippage: qe_risk::SlippageCalibration::default(),
         worst_case_loss: Some(hash_stable(stress.worst_case_loss)),
         // Pin the identity of the catalogue these chromosomes were evolved against (QE-402) — the
         // exact-match key the backtest/live load boundary asserts. `schema` is the same

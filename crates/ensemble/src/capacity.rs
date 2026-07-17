@@ -7,14 +7,14 @@
 //! target AUM.
 //!
 //! The impact form is QE-109's (`cost = notional · (half_spread + impact · qty)`), but the coefficients
-//! live here in [`CapacityModel`] rather than importing `qe_wfo::friction::SlippageModel` — the
-//! search⟂portfolio firewall (QE-001/QE-132) forbids `qe-ensemble → qe-wfo`, so the two sides stay
-//! consistent through configuration, not a code dependency. Live impact measurement is out of scope.
+//! are **not** imported from `qe_wfo::friction::SlippageModel` — the search⟂portfolio firewall
+//! (QE-001/QE-132) forbids `qe-ensemble → qe-wfo`. Instead both sides **derive** their coefficients from
+//! the one upstream [`SlippageCalibration`](qe_risk::SlippageCalibration) (QE-431): capacity reads the
+//! canonical per-$ `impact_per_notional` directly and friction converts it to per-contract, so the two can
+//! never drift (a coefficient-parity test proves it). Live impact measurement is out of scope.
 
-/// Default half-spread (fraction of notional) — the spread-cross term (1bp), mirroring QE-109.
-pub const DEFAULT_HALF_SPREAD: f64 = 0.0001;
-/// Default size-impact coefficient (per dollar of traded notional) — the size-dependent term.
-pub const DEFAULT_IMPACT_COEFF: f64 = 2e-9;
+use qe_risk::SlippageCalibration;
+
 /// Default fraction of gross edge that must remain at capacity (`0` = capacity is where edge hits zero).
 pub const DEFAULT_EDGE_RETENTION: f64 = 0.0;
 
@@ -40,11 +40,11 @@ pub struct CapacityModel {
 
 impl Default for CapacityModel {
     fn default() -> Self {
-        CapacityModel {
-            half_spread: DEFAULT_HALF_SPREAD,
-            impact_coeff: DEFAULT_IMPACT_COEFF,
-            edge_retention: DEFAULT_EDGE_RETENTION,
-        }
+        // QE-431: derived from the one content-addressed [`SlippageCalibration`], not authored here — so
+        // no magic slippage/impact literal remains on the selection path and capacity can never drift from
+        // the friction side, which derives from the same calibration. The coefficients are byte-identical
+        // to the pre-QE-431 literals (`half_spread = 1e-4`, `impact_coeff = 2e-9`).
+        CapacityModel::from_calibration(&SlippageCalibration::default())
     }
 }
 
@@ -53,6 +53,26 @@ impl CapacityModel {
     #[must_use]
     pub fn with_defaults() -> Self {
         CapacityModel::default()
+    }
+
+    /// Derive the capacity impact model from the shared [`SlippageCalibration`] (QE-431): `half_spread`
+    /// and the per-$ `impact_coeff` are taken directly from the calibration's canonical per-notional
+    /// coefficients; `edge_retention` is capacity-specific and keeps its [`DEFAULT_EDGE_RETENTION`].
+    #[must_use]
+    pub fn from_calibration(cal: &SlippageCalibration) -> Self {
+        CapacityModel {
+            half_spread: cal.half_spread_f64(),
+            impact_coeff: cal.impact_per_notional_f64(),
+            edge_retention: DEFAULT_EDGE_RETENTION,
+        }
+    }
+
+    /// The per-fill slippage cost of trading `notional` dollars under this model, in QE-109's per-notional
+    /// form `notional · (half_spread + impact_coeff · notional)` — the same shape friction charges. Used by
+    /// the coefficient-parity check that friction & capacity agree for identical inputs (QE-431).
+    #[must_use]
+    pub fn slippage_cost(&self, notional: f64) -> f64 {
+        notional * (self.half_spread + self.impact_coeff * notional)
     }
 }
 
@@ -154,6 +174,19 @@ mod tests {
 
     fn approx(a: f64, b: f64) {
         assert!((a - b).abs() < 1e-9, "{a} !~ {b}");
+    }
+
+    #[test]
+    fn default_is_derived_from_the_shared_calibration_no_magic_literal() {
+        // QE-431 AC3: the selection-path capacity model authors no slippage/impact literal — it is exactly
+        // the one derived from `SlippageCalibration::default()` (the single source of truth).
+        let cal = SlippageCalibration::default();
+        let m = CapacityModel::default();
+        assert_eq!(m, CapacityModel::from_calibration(&cal));
+        // Byte-identical to the pre-QE-431 literals.
+        approx(m.half_spread, 0.0001);
+        approx(m.impact_coeff, 2e-9);
+        approx(m.edge_retention, DEFAULT_EDGE_RETENTION);
     }
 
     #[test]

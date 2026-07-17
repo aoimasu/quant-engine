@@ -227,6 +227,7 @@ mod tests {
             chromosomes: genomes,
             weights,
             calibration: CalibrationProfile::new(Fraction::new(Decimal::new(2, 1)).unwrap()),
+            slippage: qe_risk::SlippageCalibration::default(),
             worst_case_loss: Some(0.2),
             catalogue: qe_signal::CatalogueIdentity::current(),
             lineage: Lineage::new("cfg", "snap", "commit", vec![1]),

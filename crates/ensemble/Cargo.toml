@@ -14,6 +14,9 @@ workspace = true
 qe-domain.workspace = true
 qe-signal.workspace = true
 qe-storage.workspace = true
+# QE-431: the single content-addressed slippage/impact calibration (upstream shared source of truth).
+# `qe-risk` reaches only `qe-domain`/`qe-error` — no search⟂portfolio firewall edge (never `qe-wfo`).
+qe-risk.workspace = true
 # RngCore bound for the discrete-DE binomial crossover (QE-115). NOTE: deliberately no `qe-wfo`
 # dependency — the search ⟂ portfolio firewall (QE-001/QE-132) keeps ensemble independent of WFO.
 rand_core.workspace = true
