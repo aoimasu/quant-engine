@@ -7,9 +7,20 @@
 
 use crate::stats::{kurtosis, normal_cdf, normal_ppf, sharpe_ratio, skewness, EULER_MASCHERONI};
 
-/// The effective number of independent trials `N = cells · generations · windows` (QE-131): every
-/// archive cell, evolved over every generation, evaluated over every window, is a draw the deflation
-/// must account for.
+/// The effective number of independent trials `N = cells · generations · windows` (QE-131) — the
+/// **analytic floor** the DSR deflation bar is computed against.
+///
+/// **Basis coherence (QE-439).** This is the current, deliberately *conservative* independent-trials
+/// basis. The **cell** factor is coherent with the trial-Sharpe dispersion `V`: QE-414 estimates `V`
+/// from the champion of every occupied cell, so `N`'s cell factor and `V`'s population are the same
+/// niches. The **generations** and **windows** factors are *not* independent — serial mutations of one
+/// persistent elite and re-evaluations of one strategy over windows are correlated draws — so the
+/// product **over-counts** hypotheses. Over-counting raises the noise bar ⇒ **over-deflates** ⇒
+/// false-*reject*, which is the safe direction (under-deflation / false-accept is the dangerous one),
+/// so the floor is kept as-is. The coherent tightening — `N = max(distinct-canonical formulas ever
+/// scored, this floor, a complexity floor)` with a GP evaluation ledger — is deferred to the GP program
+/// (QE-451 / see `docs/architecture/qe-439-dsr-trial-basis-design.md`), which has an evaluation count to
+/// distil; there is nothing to count on the hand catalogue.
 #[must_use]
 pub fn effective_trials(cells: usize, generations: usize, windows: usize) -> usize {
     cells.saturating_mul(generations).saturating_mul(windows)
@@ -50,16 +61,81 @@ pub fn probabilistic_sharpe_ratio(returns: &[f64], sr_benchmark: f64) -> f64 {
 ///
 /// This is the "deflation bar": with more trials or more dispersed trial Sharpes, best-of-`N` noise clears
 /// a higher bar. Returns `0.0` for `n_trials ≤ 1` or non-positive variance.
+///
+/// **Log-N numerical fix (QE-439).** The upper-tail argument `1 − 1/N` loses all precision once `1/N`
+/// drops below the ULP of `1.0` (`2⁻⁵³ ≈ 1.11e-16`, i.e. `N ≳ 4.5e15`): it rounds to exactly `1.0`,
+/// `normal_ppf(1.0)` returns `+∞`, and the bar degenerates to `+∞` (DSR ≡ 0 for every candidate,
+/// carrying no information). Below that regime this keeps the **exact** path (byte-identical to the
+/// pre-QE-439 behaviour); at or above it, it switches to the numerically-stable [`expected_max_sharpe_ln`]
+/// log-space path (`≈ √(2 ln N)`), so the bar stays finite and self-caps near 8–13 even at `N ~ 1e20`.
+/// The two paths are continuous: the log path reuses the same Acklam upper-tail rational `normal_ppf`
+/// already runs for `p > P_HIGH`, only avoiding the cancellation of forming `1 − 1/N`.
 #[must_use]
 pub fn expected_max_sharpe(trial_variance: f64, n_trials: usize) -> f64 {
     if n_trials <= 1 || trial_variance <= 0.0 {
         return 0.0;
     }
     let n = n_trials as f64;
+    let p1 = 1.0 - 1.0 / n;
+    let p2 = 1.0 - 1.0 / (n * std::f64::consts::E);
+    // Degenerate regime: forming `1 − 1/N` in f64 lost the tail ⇒ `normal_ppf` would return `+∞`.
+    // Take the log-space path, which never forms `1 − 1/N`.
+    if p1 >= 1.0 || p2 >= 1.0 {
+        return expected_max_sharpe_ln(trial_variance, n.ln());
+    }
     let gamma = EULER_MASCHERONI;
-    let z1 = normal_ppf(1.0 - 1.0 / n);
-    let z2 = normal_ppf(1.0 - 1.0 / (n * std::f64::consts::E));
+    let z1 = normal_ppf(p1);
+    let z2 = normal_ppf(p2);
     trial_variance.sqrt() * ((1.0 - gamma) * z1 + gamma * z2)
+}
+
+/// The best-of-`N` noise Sharpe bar computed in **log space** from `ln_n = ln N` (QE-439), for the
+/// large-`N` regime where forming `1 − 1/N` in `f64` underflows to `1.0` and [`expected_max_sharpe`]'s
+/// direct `normal_ppf` path degenerates to `+∞`.
+///
+/// The two upper-tail quantiles `Φ⁻¹(1 − 1/N)` and `Φ⁻¹(1 − 1/(N·e))` have tail probabilities
+/// `p = 1/N` and `1/(N·e)`, so `ln p = −ln N` and `−ln N − 1`. By symmetry `Φ⁻¹(1 − p) = −Φ⁻¹(p)`, and
+/// Acklam's lower-tail branch uses `q = √(−2 ln p) = √(2 ln N)` — the classic `E[max SR] ≈ √(2 ln N)`
+/// asymptotic — so the bar self-caps (`√(2 ln 1e20) ≈ 9.6`) rather than blowing up. This is the identical
+/// rational `normal_ppf` runs in its `p > P_HIGH` branch, evaluated directly from `ln N`.
+///
+/// Returns `0.0` for non-positive `trial_variance` or non-finite / non-positive `ln_n` (`N ≤ 1`).
+#[must_use]
+pub fn expected_max_sharpe_ln(trial_variance: f64, ln_n: f64) -> f64 {
+    if trial_variance <= 0.0 || !ln_n.is_finite() || ln_n <= 0.0 {
+        return 0.0;
+    }
+    let gamma = EULER_MASCHERONI;
+    // Tail log-probabilities: p1 = 1/N ⇒ ln p1 = −ln N; p2 = 1/(N·e) ⇒ ln p2 = −ln N − 1.
+    let z1 = normal_ppf_upper_tail_from_ln(-ln_n);
+    let z2 = normal_ppf_upper_tail_from_ln(-ln_n - 1.0);
+    trial_variance.sqrt() * ((1.0 - gamma) * z1 + gamma * z2)
+}
+
+/// `Φ⁻¹(1 − p)` for a small upper-tail probability `p`, computed from `ln_p = ln p` (`≤ 0`) so it never
+/// underflows. Acklam's low-`p` rational on `q = √(−2 ln p)`, negated by the symmetry
+/// `Φ⁻¹(1 − p) = −Φ⁻¹(p)` — the same coefficients `stats::normal_ppf` uses in its tail branches.
+fn normal_ppf_upper_tail_from_ln(ln_p: f64) -> f64 {
+    // Acklam's C/D coefficients (tail region), identical to `stats::normal_ppf`.
+    const C: [f64; 6] = [
+        -7.784_894_002_430_293e-3,
+        -3.223_964_580_411_365e-1,
+        -2.400_758_277_161_838e0,
+        -2.549_732_539_343_734e0,
+        4.374_664_141_464_968e0,
+        2.938_163_982_698_783e0,
+    ];
+    const D: [f64; 4] = [
+        7.784_695_709_041_462e-3,
+        3.224_671_290_700_398e-1,
+        2.445_134_137_142_996e0,
+        3.754_408_661_907_416e0,
+    ];
+    let q = (-2.0 * ln_p).sqrt();
+    let num = ((((C[0] * q + C[1]) * q + C[2]) * q + C[3]) * q + C[4]) * q + C[5];
+    let den = (((D[0] * q + D[1]) * q + D[2]) * q + D[3]) * q + 1.0;
+    // Acklam's low branch yields Φ⁻¹(p) (negative for small p); negate for the upper tail Φ⁻¹(1−p).
+    -(num / den)
 }
 
 /// The Deflated Sharpe Ratio: `PSR(E[max SR])` — the probability the strategy's true Sharpe beats what
@@ -165,6 +241,110 @@ mod tests {
             dsr_full < dsr_top10,
             "the censored top-10 should visibly inflate the DSR here: {dsr_full} vs {dsr_top10}"
         );
+    }
+
+    #[test]
+    fn expected_max_sharpe_is_finite_and_self_caps_at_gp_scale() {
+        // QE-439 headline: the pre-fix path formed `1 − 1/N`, which rounds to 1.0 for N ≳ 4.5e15, so
+        // `normal_ppf(1.0) = +∞` degenerated the bar. The fix keeps it finite and self-caps near
+        // √(2 ln N) — ≈ 8–13 at unit variance.
+        //
+        // `usize` tops out at ~1.84e19, so the `usize`-typed entry point is exercised up to the degenerate
+        // regime it can represent; the N ~ 1e20 claim runs through the log-space entry point directly.
+        for &n in &[
+            5_000_000_000_000_000usize, // 5e15, just into the degenerate regime
+            1_000_000_000_000_000_000,  // 1e18
+            10_000_000_000_000_000_000, // 1e19
+            usize::MAX,                 // ~1.84e19, the largest representable trial count
+        ] {
+            let bar = expected_max_sharpe(1.0, n);
+            assert!(bar.is_finite(), "bar must be finite at N={n}, got {bar}");
+            assert!(
+                (8.0..=13.0).contains(&bar),
+                "bar must self-cap in ~[8,13] at unit variance (N={n}), got {bar}"
+            );
+        }
+        // The headline finite-at-1e20 result: √(2 ln 1e20) ≈ 9.6, via the log-space path (1e20 > usize::MAX).
+        let ln_1e20 = 1e20_f64.ln();
+        let at_1e20 = expected_max_sharpe_ln(1.0, ln_1e20);
+        assert!(
+            at_1e20.is_finite(),
+            "N=1e20 bar must be finite, got {at_1e20}"
+        );
+        assert!(
+            (9.0..=10.5).contains(&at_1e20),
+            "N=1e20 bar should sit near √(2 ln N) ≈ 9.6, got {at_1e20}"
+        );
+        // Variance scales the bar by √V (a pure multiplier), still finite.
+        let scaled = expected_max_sharpe_ln(0.04, ln_1e20);
+        assert!(
+            scaled.is_finite() && (scaled - at_1e20 * 0.2).abs() < 1e-9,
+            "√V scaling must hold in the log path: {scaled} vs {}",
+            at_1e20 * 0.2
+        );
+    }
+
+    #[test]
+    fn small_n_path_is_unchanged_and_exact() {
+        // Below the degenerate threshold the exact `normal_ppf` path is retained byte-for-bit — the fix
+        // must not perturb any current DSR value (the fixture / all real runs live here).
+        for &n in &[2usize, 10, 41, 42, 1_000, 20_000, 1_000_000_000] {
+            let nf = n as f64;
+            let gamma = EULER_MASCHERONI;
+            let z1 = normal_ppf(1.0 - 1.0 / nf);
+            let z2 = normal_ppf(1.0 - 1.0 / (nf * std::f64::consts::E));
+            let expected = (0.05_f64).sqrt() * ((1.0 - gamma) * z1 + gamma * z2);
+            let got = expected_max_sharpe(0.05, n);
+            assert_eq!(got, expected, "small-N path must be bit-identical at N={n}");
+            assert!(got.is_finite());
+        }
+    }
+
+    #[test]
+    fn log_path_is_continuous_with_the_exact_path() {
+        // Where both are valid, `expected_max_sharpe_ln` tracks the exact `expected_max_sharpe` — the log
+        // path is the same Acklam rational, not a divergent approximation. The only residual is the exact
+        // path's catastrophic `1 − 1/N` cancellation (which grows with N and the log path avoids), so the
+        // agreement is asserted as a small *relative* tolerance — the log path is the more accurate side.
+        for &n in &[100usize, 10_000, 1_000_000, 1_000_000_000_000] {
+            let exact = expected_max_sharpe(0.03, n);
+            let via_ln = expected_max_sharpe_ln(0.03, (n as f64).ln());
+            let rel = (exact - via_ln).abs() / exact.abs();
+            assert!(
+                rel < 1e-5,
+                "log path must track exact at N={n} (rel {rel:e}): {exact} vs {via_ln}"
+            );
+        }
+        // Guards: N ≤ 1 and non-positive variance ⇒ 0.
+        assert_eq!(expected_max_sharpe_ln(1.0, 0.0), 0.0);
+        assert_eq!(expected_max_sharpe_ln(0.0, 10.0), 0.0);
+        assert_eq!(expected_max_sharpe_ln(-1.0, 10.0), 0.0);
+    }
+
+    #[test]
+    fn deflation_bar_is_monotone_across_the_switch_and_stays_bounded() {
+        // The bar rises with N through the exact→log switch without a discontinuity or blow-up, and stays
+        // below the √(2 ln N) ceiling (14·√V) all the way to N = 1e20.
+        let ns: [usize; 6] = [
+            1_000,
+            1_000_000,
+            1_000_000_000_000,          // 1e12, exact path
+            10_000_000_000_000_000,     // 1e16, log path
+            1_000_000_000_000_000_000,  // 1e18
+            10_000_000_000_000_000_000, // 1e19, near usize::MAX
+        ];
+        let v = 0.02_f64;
+        let mut prev = 0.0;
+        for &n in &ns {
+            let bar = expected_max_sharpe(v, n);
+            assert!(bar.is_finite(), "bar must stay finite at N={n}");
+            assert!(bar > prev, "bar must rise with N: {prev} !< {bar} at N={n}");
+            assert!(
+                bar < 14.0 * v.sqrt(),
+                "bar must stay under the √(2 ln N) ceiling at N={n}, got {bar}"
+            );
+            prev = bar;
+        }
     }
 
     #[test]

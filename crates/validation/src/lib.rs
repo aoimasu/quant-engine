@@ -28,8 +28,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub use dsr::{
-    deflated_sharpe_ratio, effective_trials, expected_max_sharpe, probabilistic_sharpe_ratio,
-    trial_sharpe_variance,
+    deflated_sharpe_ratio, effective_trials, expected_max_sharpe, expected_max_sharpe_ln,
+    probabilistic_sharpe_ratio, trial_sharpe_variance,
 };
 pub use ic::{
     benjamini_hochberg, forward_returns, rank_ic, screen_catalogue, spearman_pvalue, HorizonIc,
