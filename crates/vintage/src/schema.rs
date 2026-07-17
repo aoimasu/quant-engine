@@ -74,7 +74,7 @@ mod tests {
     use super::*;
     use crate::{Vintage, VintageRepository};
     use qe_determinism::Lineage;
-    use qe_risk::{CalibrationProfile, Fraction, PortfolioSizer, SlippageCalibration};
+    use qe_risk::{CalibrationProfile, Fraction, PortfolioSizer, ShockConfig, SlippageCalibration};
     use qe_signal::{
         CatalogueConfig, Clause, ExitParams, FeatureSchema, Genome, RiskParams, RuleSet,
         CLAUSES_PER_SET,
@@ -144,6 +144,7 @@ mod tests {
             calibration: CalibrationProfile::new(Fraction::new(Decimal::new(2, 1)).unwrap()),
             slippage: SlippageCalibration::default(),
             sizer: PortfolioSizer::default(),
+            shocks: ShockConfig::default(),
             worst_case_loss: None,
             catalogue,
             lineage: Lineage::new("cfg", "snap", "commit", vec![1]),

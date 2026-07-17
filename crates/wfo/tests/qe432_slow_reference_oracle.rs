@@ -567,6 +567,8 @@ fn random_backtest_cfg(rng: &mut DetRng, mult_lo: i64, mult_hi: i64) -> Backtest
         friction: random_friction(rng, mult_lo, mult_hi),
         min_trades: 1 + below(rng, 12) as usize,
         windows: 1 + below(rng, 6) as usize,
+        // QE-441: the slow-reference oracle checks the raw net-of-cost path (no injected shocks).
+        shocks: None,
     }
 }
 

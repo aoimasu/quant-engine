@@ -15,7 +15,7 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 
 use qe_determinism::Lineage;
-use qe_risk::{CalibrationProfile, PortfolioSizer, SlippageCalibration};
+use qe_risk::{CalibrationProfile, PortfolioSizer, ShockConfig, SlippageCalibration};
 use qe_signal::{CatalogueIdentity, Genome};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -35,7 +35,10 @@ pub mod schema;
 /// - `6` (QE-440): reshaped [`VintageContent::slippage`] to the concave √-in-participation impact model —
 ///   the `SlippageCalibration` hashed fields changed (`impact_per_notional` + `reference_mark` →
 ///   participation `impact_coeff` + `impact_exponent` β).
-pub const VINTAGE_FORMAT_VERSION: u16 = 6;
+/// - `7` (QE-441): added [`VintageContent::shocks`] (the frozen, content-addressed bar-level scenario-shock
+///   set that shaped the tail-aware `size_bps` in the single-strategy sizing fitness), riding the lineage
+///   alongside `slippage` / `sizer`.
+pub const VINTAGE_FORMAT_VERSION: u16 = 7;
 
 /// The hashed content of a vintage — everything the content hash covers.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -62,6 +65,15 @@ pub struct VintageContent {
     /// content ties the chosen size into the vintage's reproducible lineage, like `slippage`. Part of the
     /// hashed content, so it changes the vintage id.
     pub sizer: PortfolioSizer,
+    /// The frozen, content-addressed **bar-level scenario-shock set** (QE-441) that shaped the tail-aware
+    /// `size_bps` in the single-strategy sizing fitness. The MAP-Elites / DE selection fitness ran the
+    /// backtester with these bounded synthetic gap / funding-spike / ADL shocks injected at the price/bar
+    /// level (drawn from the seeded portable RNG), so a larger size produced a larger drawdown and
+    /// `log_growth` self-selected a lower leverage. Its severity/frequency are un-deflated researcher DOF,
+    /// so the set is **frozen / pre-registered** (a fixed seed, not the run seed) and sealed here in the
+    /// hashed content — pinning the exact shocks that priced sizing into the vintage's reproducible
+    /// lineage, like `slippage` / `sizer`. Part of the hashed content, so it changes the vintage id.
+    pub shocks: ShockConfig,
     /// Worst-case capital loss (a positive fraction) under the QE-130 stress set — the figure the
     /// vintage carries to gate G3 (QE-308). `None` until the stress engine
     /// (`qe_ensemble::stress::worst_case_loss`) has been run and its bare figure attached. Stored as a
@@ -425,6 +437,7 @@ mod tests {
             calibration: calibration(),
             slippage: SlippageCalibration::default(),
             sizer: PortfolioSizer::default(),
+            shocks: ShockConfig::default(),
             worst_case_loss: Some(0.28), // QE-130 stress figure
             catalogue: CatalogueIdentity::current(), // QE-402 pinned identity
             lineage: lineage(),
@@ -509,6 +522,35 @@ mod tests {
         sized.write(&mut buf).unwrap();
         let loaded = Vintage::load(buf.as_slice()).unwrap();
         assert_eq!(loaded.content.sizer, sized.content.sizer);
+    }
+
+    #[test]
+    fn shocks_are_part_of_the_hash() {
+        // QE-441: the frozen bar-level scenario-shock set rides the hashed content, so a different shock
+        // set (e.g. a heavier gap) yields a different vintage id — the shocks that shaped `size_bps` are
+        // pinned into the reproducible lineage (content-addressed / frozen-per-vintage).
+        assert_eq!(
+            VINTAGE_FORMAT_VERSION, 7,
+            "the shocks field bumped the format version"
+        );
+        let base = Vintage::seal(content()).unwrap();
+        let mut other = content();
+        other.shocks = ShockConfig::new(
+            other.shocks.seed,
+            other.shocks.frequency_per_million,
+            rust_decimal::Decimal::new(20, 2), // 0.20 gap vs default 0.10
+            other.shocks.funding_per_period,
+            other.shocks.funding_periods,
+            other.shocks.adl_haircut,
+        );
+        let shocked = Vintage::seal(other).unwrap();
+        assert_ne!(shocked.content_hash, base.content_hash);
+
+        // And it round-trips through disk verify.
+        let mut buf: Vec<u8> = Vec::new();
+        shocked.write(&mut buf).unwrap();
+        let loaded = Vintage::load(buf.as_slice()).unwrap();
+        assert_eq!(loaded.content.shocks, shocked.content.shocks);
     }
 
     #[test]

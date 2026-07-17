@@ -8,8 +8,11 @@
 //! [`should_replace`](crate::fitness::should_replace) the result feeds never churns an elite on a noisy
 //! single draw. Elite robustness gates are QE-124.
 
+use qe_determinism::{seed_rng, DetRng};
 use qe_domain::{Direction, Side};
+use qe_risk::ShockConfig;
 use qe_signal::FeatureVector;
+use rand_core::RngCore;
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 
@@ -54,6 +57,12 @@ pub struct BacktestConfig {
     pub min_trades: usize,
     /// Contiguous sub-windows for the noise-robust fitness (`≥ 1`; `≥ 2` for a real SE).
     pub windows: usize,
+    /// Bar-level tail-aware scenario shocks injected into the *sizing fitness* (QE-441). `None` (the
+    /// default) is the pre-QE-441 raw-historical path — the reporting / holdout / DSR / Kelly-sizer
+    /// backtests keep it. The MAP-Elites / DE **selection** fitness runs with `Some` of the frozen,
+    /// content-addressed [`ShockConfig`] so a larger size produces a larger shocked drawdown and
+    /// `log_growth` self-selects a lower, tail-aware leverage. Frozen/seeded ⇒ byte-reproducible.
+    pub shocks: Option<ShockConfig>,
 }
 
 impl Default for BacktestConfig {
@@ -62,6 +71,7 @@ impl Default for BacktestConfig {
             friction: FrictionConfig::default(),
             min_trades: DEFAULT_MIN_TRADES,
             windows: DEFAULT_WINDOWS,
+            shocks: None,
         }
     }
 }
@@ -185,6 +195,12 @@ pub fn backtest_with_trades(
         std::collections::VecDeque::with_capacity(DEFAULT_ADV_WINDOW);
     let mut adv_sum = Decimal::ZERO;
 
+    // QE-441: bar-level tail-aware scenario shocks. Seed one portable ChaCha8 RNG per call from the
+    // FROZEN, pre-registered `shock.seed` (deliberately not the run seed), so `backtest` stays a pure
+    // function of `(genome, bars, cfg)` — byte-reproducible independent of thread count and across
+    // repeated calls. Draws are consumed in bar order below.
+    let mut shock_rng: Option<DetRng> = cfg.shocks.as_ref().map(|s| seed_rng(s.seed));
+
     for (i, bar) in bars.iter().enumerate() {
         let price = bar.price;
 
@@ -253,6 +269,23 @@ pub fn backtest_with_trades(
             let flow = -pos_qty * price * rate;
             cash += flow;
             funding_accrued += flow;
+        }
+
+        // (2b) QE-441: inject a bar-level synthetic shock (gap / funding-spike / ADL) onto the HELD
+        // notional, BEFORE the bar is marked. Two rolls are consumed EVERY bar (fire? + shape),
+        // unconditionally, so the shock schedule is a pure function of `(seed, bar index)` and is
+        // position-independent — every genome hits the same shock bars. The loss is an exact `Decimal`
+        // fraction of the held notional (`|pos_qty·price|·e = size_frac·equity_prev·e`), so it scales
+        // linearly with size: a larger `size_bps` takes a larger drawdown (and past a leverage threshold
+        // drives the bar return ≤ −1 → ruin), pulling the fitness-maximising leverage down (tail-aware).
+        if let (Some(shock), Some(rng)) = (cfg.shocks.as_ref(), shock_rng.as_mut()) {
+            let fire_roll = rng.next_u64();
+            let shape_roll = rng.next_u64();
+            if shock.fires(fire_roll) && pos_qty != Decimal::ZERO {
+                let notional_abs = (pos_qty * price).abs();
+                let shock_loss = notional_abs * shock.adverse_fraction(shape_roll);
+                cash -= shock_loss;
+            }
         }
 
         // (3) Mark equity and record the net-of-cost per-bar return.
@@ -746,6 +779,213 @@ mod tests {
         assert!(
             fills.is_empty(),
             "an unclosed position is not a completed round-trip"
+        );
+    }
+
+    // --- QE-441 bar-level tail-aware scenario shocks ------------------------------------------------
+    use crate::fitness::log_growth;
+    use qe_risk::ShockConfig;
+
+    /// A flat-price series that fires the long genome's entry once (feature-0 high only at bar 0) and
+    /// holds through the rest, so the only P&L is entry cost + injected shocks (no price drift).
+    fn flat_hold_bars(schema: &FeatureSchema, n: usize) -> Vec<Bar> {
+        (0..n)
+            .map(|i| {
+                let state0 = if i == 0 { 4 } else { 0 };
+                bar(schema, i as i64 * 60_000, Decimal::from(100), state0)
+            })
+            .collect()
+    }
+
+    /// The worst peak-to-trough drawdown of an equity curve built from per-bar returns (a positive
+    /// fraction). Local test helper (the wfo crate has no drawdown util).
+    fn max_drawdown(returns: &[f64]) -> f64 {
+        let (mut equity, mut peak, mut worst) = (1.0_f64, 1.0_f64, 0.0_f64);
+        for &r in returns {
+            equity *= 1.0 + r;
+            peak = peak.max(equity);
+            let dd = if peak > 0.0 { 1.0 - equity / peak } else { 1.0 };
+            worst = worst.max(dd);
+        }
+        worst
+    }
+
+    fn shocks(seed: u64, freq: u32, gap: Decimal, fund: Decimal, adl: Decimal) -> ShockConfig {
+        ShockConfig::new(seed, freq, gap, fund, 8, adl)
+    }
+
+    fn shock_cfg(shocks: Option<ShockConfig>) -> BacktestConfig {
+        BacktestConfig {
+            min_trades: 1,
+            windows: 1,
+            shocks,
+            ..BacktestConfig::default()
+        }
+    }
+
+    /// AC: a **larger size** produces a **strictly deeper shocked drawdown** (same window + seed). On a
+    /// flat series the only loss is the injected shock, which scales with the held notional (= size), so a
+    /// bigger `size_bps` loses strictly more.
+    #[test]
+    fn larger_size_produces_a_deeper_shocked_drawdown() {
+        let s = schema();
+        let bars = flat_hold_bars(&s, 60);
+        let cfg = shock_cfg(Some(shocks(
+            7,
+            150_000,
+            Decimal::new(10, 2), // 0.10 gap
+            Decimal::new(5, 3),  // 0.005 funding/period
+            Decimal::new(5, 2),  // 0.05 adl
+        )));
+
+        let small = backtest(&long_genome(1_000, 1_000), &bars, &cfg); // 0.1×
+        let large = backtest(&long_genome(1_000, 8_000), &bars, &cfg); // 0.8×
+
+        assert!(small.accepted && large.accepted, "both must trade");
+        // Same shock bars (position-independent schedule); the larger position takes the bigger hit.
+        assert!(
+            max_drawdown(&large.returns) > max_drawdown(&small.returns),
+            "larger size must deepen the shocked drawdown: large {} !> small {}",
+            max_drawdown(&large.returns),
+            max_drawdown(&small.returns)
+        );
+        assert!(
+            large.net_pnl < small.net_pnl,
+            "larger size must lose strictly more to shocks"
+        );
+    }
+
+    /// The `size_bps` that maximises `log_growth` over a sweep, for the given shock config.
+    fn argmax_size(bars: &[Bar], sizes: &[u16], shocks: Option<ShockConfig>) -> u16 {
+        let cfg = shock_cfg(shocks);
+        sizes
+            .iter()
+            .copied()
+            .max_by(|&a, &b| {
+                let fa = log_growth(&backtest(&long_genome(1_000, a), bars, &cfg).returns);
+                let fb = log_growth(&backtest(&long_genome(1_000, b), bars, &cfg).returns);
+                fa.total_cmp(&fb)
+            })
+            .unwrap()
+    }
+
+    /// AC: the fitness-maximising `size_bps` is **strictly lower with shocks than without** — the
+    /// tail-aware Kelly pull-down. Construction: a pure uptrend (no down bars ⇒ without shocks, more size
+    /// is always better ⇒ the optimum sits at the top of the sweep); injecting bar-level shocks adds
+    /// size-scaled losses that create an interior optimum below the top.
+    #[test]
+    fn tail_aware_shocks_pull_the_optimal_size_below_the_no_shock_optimum() {
+        let s = schema();
+        let bars = single_entry_uptrend(&s, 60); // +1/bar, enter once, hold
+        let sizes = [500u16, 1_000, 2_000, 4_000, 8_000];
+
+        let opt_none = argmax_size(&bars, &sizes, None);
+        let opt_shock = argmax_size(
+            &bars,
+            &sizes,
+            Some(shocks(
+                42,
+                150_000,
+                Decimal::new(20, 2), // 0.20 gap
+                Decimal::new(10, 3), // 0.010 funding/period
+                Decimal::new(10, 2), // 0.10 adl
+            )),
+        );
+
+        assert_eq!(
+            opt_none,
+            *sizes.last().unwrap(),
+            "on a pure uptrend the no-shock optimum must be the largest size"
+        );
+        assert!(
+            opt_shock < opt_none,
+            "tail-aware shocks must pull the optimal size down: shock {opt_shock} !< none {opt_none}"
+        );
+    }
+
+    /// AC: the pull-down is **monotone in severity** — a heavier shock set (deeper magnitudes, SAME seed +
+    /// frequency ⇒ identical shock bars) pulls the optimum at-or-below a milder one, and both at-or-below
+    /// the no-shock optimum.
+    #[test]
+    fn optimal_size_is_monotone_non_increasing_in_shock_severity() {
+        let s = schema();
+        let bars = single_entry_uptrend(&s, 60);
+        let sizes = [500u16, 1_000, 2_000, 4_000, 8_000];
+
+        let opt_none = argmax_size(&bars, &sizes, None);
+        // Mild and severe share seed + frequency, so the SAME bars are shocked — only the depth differs.
+        let opt_mild = argmax_size(
+            &bars,
+            &sizes,
+            Some(shocks(
+                42,
+                150_000,
+                Decimal::new(5, 2),  // 0.05 gap
+                Decimal::new(25, 4), // 0.0025 funding/period
+                Decimal::new(25, 3), // 0.025 adl
+            )),
+        );
+        let opt_severe = argmax_size(
+            &bars,
+            &sizes,
+            Some(shocks(
+                42,
+                150_000,
+                Decimal::new(20, 2), // 0.20 gap
+                Decimal::new(10, 3), // 0.010 funding/period
+                Decimal::new(10, 2), // 0.10 adl
+            )),
+        );
+
+        assert!(
+            opt_mild <= opt_none && opt_severe <= opt_mild,
+            "optimum must be monotone non-increasing in severity: none {opt_none} ≥ mild {opt_mild} ≥ severe {opt_severe}"
+        );
+        assert!(
+            opt_severe < opt_none,
+            "a fat-tailed shock set must pull the optimum strictly below the no-shock optimum"
+        );
+    }
+
+    /// AC: shocks are **seeded / reproducible** — same config ⇒ identical returns; a different
+    /// `ShockConfig::seed` ⇒ different shock bars ⇒ different returns; and `shocks: None` reproduces the
+    /// pre-QE-441 raw-historical path byte-for-byte.
+    #[test]
+    fn shocks_are_seeded_reproducible_and_off_by_default() {
+        let s = schema();
+        let bars = single_entry_uptrend(&s, 60);
+        let g = long_genome(1_000, 8_000);
+
+        let a = shock_cfg(Some(shocks(
+            99,
+            150_000,
+            Decimal::new(10, 2),
+            Decimal::new(5, 3),
+            Decimal::new(5, 2),
+        )));
+        // Same seed ⇒ byte-identical result (pure function of genome/bars/cfg).
+        assert_eq!(backtest(&g, &bars, &a), backtest(&g, &bars, &a));
+
+        // A different seed shocks different bars ⇒ a different net path.
+        let b = shock_cfg(Some(shocks(
+            100,
+            150_000,
+            Decimal::new(10, 2),
+            Decimal::new(5, 3),
+            Decimal::new(5, 2),
+        )));
+        assert_ne!(
+            backtest(&g, &bars, &a).returns,
+            backtest(&g, &bars, &b).returns,
+            "a different shock seed must change the shocked path"
+        );
+
+        // `shocks: None` (the default) is the untouched historical path — strictly better than any shocked
+        // run here (shocks only ever subtract), and unaffected by the shock seed.
+        let none = shock_cfg(None);
+        assert!(
+            backtest(&g, &bars, &none).net_pnl > backtest(&g, &bars, &a).net_pnl,
+            "the no-shock path must not be dragged by shocks"
         );
     }
 
