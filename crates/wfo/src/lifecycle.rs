@@ -13,7 +13,9 @@
 //! ready-to-enable alternative — `from_distribution` is source-agnostic, so switching is just passing a
 //! different distribution; not enabled now, per spec fidelity.
 
-use crate::fitness::{NoiseRobustFitness, DEFAULT_K_SIGMA};
+use std::cmp::Ordering;
+
+use crate::fitness::{within_noise_band, NoiseRobustFitness, DEFAULT_K_SIGMA};
 
 /// Default exploration→exploitation transition: windows a candidate must be evaluated on to graduate.
 pub const DEFAULT_MIN_EXPLOITATION_WINDOWS: usize = 5;
@@ -162,6 +164,76 @@ impl QualityGate {
         lower >= threshold.value()
     }
 
+    /// The **lifecycle lower bound** `mean − k_sigma·se` — the robust fitness a candidate is judged on
+    /// (the quantity [`persists`](Self::persists) compares against the threshold). Exposed so the
+    /// parsimony tie-break (QE-436) can rank equal-robust candidates. `−∞` for a ruined fitness.
+    #[must_use]
+    pub fn robust_lower_bound(&self, fitness: &NoiseRobustFitness) -> f64 {
+        if !fitness.mean.is_finite() {
+            return f64::NEG_INFINITY;
+        }
+        fitness.mean - self.k_sigma * fitness.std_error
+    }
+
+    /// Rank two graduation candidates **fitness-first, parsimony-second** (QE-436). Returns
+    /// [`Ordering::Greater`] when `a` is the better pick, [`Ordering::Less`] when `b` is, and
+    /// [`Ordering::Equal`] when they are indistinguishable on both axes.
+    ///
+    /// A finite candidate always beats a ruined one. When the two are **within the noise band** (equal
+    /// robust fitness) the tie breaks toward parsimony — *lower* complexity is better. Otherwise the
+    /// higher robust lower bound wins. The MDL/complexity term is a pure tie-break here: it is consulted
+    /// only inside the noise band and never alters the robust-fitness ordering, so it stays out of the
+    /// DSR-facing fitness.
+    #[must_use]
+    pub fn graduation_cmp(
+        &self,
+        a: (&NoiseRobustFitness, u32),
+        b: (&NoiseRobustFitness, u32),
+    ) -> Ordering {
+        let (fa, ca) = a;
+        let (fb, cb) = b;
+        match (fa.mean.is_finite(), fb.mean.is_finite()) {
+            (false, false) => return Ordering::Equal,
+            (true, false) => return Ordering::Greater,
+            (false, true) => return Ordering::Less,
+            (true, true) => {}
+        }
+        if within_noise_band(fa, fb, self.k_sigma) {
+            // Equal robust fitness: fewer clauses/features (lower complexity) is the better pick.
+            return cb.cmp(&ca);
+        }
+        // Materially different fitness: the higher robust lower bound wins.
+        self.robust_lower_bound(fa)
+            .total_cmp(&self.robust_lower_bound(fb))
+    }
+
+    /// The most parsimonious among `candidates` at the **best robust fitness** (QE-436): picks the
+    /// highest robust lower bound, breaking ties *within the noise band* toward the lowest
+    /// [`Genome::mdl_complexity`](crate::genome::Genome::mdl_complexity). Candidates are
+    /// `(&T, fitness, complexity)`. Deterministic — an exact tie on both axes keeps the earliest in input
+    /// order. `None` for an empty input. Note this only *selects among* candidates; it does not change
+    /// which candidates [`persists`](Self::persists) admits, so it never moves the graduation set.
+    #[must_use]
+    pub fn most_parsimonious<'a, T>(
+        &self,
+        candidates: &[(&'a T, NoiseRobustFitness, u32)],
+    ) -> Option<&'a T> {
+        let mut best: Option<&(&'a T, NoiseRobustFitness, u32)> = None;
+        for cand in candidates {
+            match best {
+                None => best = Some(cand),
+                Some(cur) => {
+                    // Strictly better ⇒ take `cand`; Equal/worse ⇒ keep the earlier `cur` (determinism).
+                    if self.graduation_cmp((&cand.1, cand.2), (&cur.1, cur.2)) == Ordering::Greater
+                    {
+                        best = Some(cand);
+                    }
+                }
+            }
+        }
+        best.map(|(t, _, _)| *t)
+    }
+
     /// The candidates that persist, preserving input order.
     #[must_use]
     pub fn survivors<'a, T>(
@@ -288,5 +360,70 @@ mod tests {
         ];
         let survivors = gate.survivors(&candidates, &t);
         assert_eq!(survivors, vec![&ids[0], &ids[3]]);
+    }
+
+    // --- QE-436 parsimony (MDL) tie-break at the gate ----------------------------------------
+
+    #[test]
+    fn most_parsimonious_picks_simplest_at_equal_robust_fitness() {
+        let gate = QualityGate::with_defaults();
+        // Three survivors with essentially equal robust fitness (all inside the 1σ band) but different
+        // structural complexity. The simplest (complexity 2) must win.
+        let ids = [10usize, 20, 30];
+        let candidates = [
+            (&ids[0], fit(0.10, 0.02, 6), 6),   // 4-clause-ish
+            (&ids[1], fit(0.1005, 0.02, 6), 2), // 1-clause, simplest
+            (&ids[2], fit(0.0997, 0.02, 6), 4),
+        ];
+        assert_eq!(gate.most_parsimonious(&candidates), Some(&ids[1]));
+    }
+
+    #[test]
+    fn material_fitness_beats_parsimony_at_the_gate() {
+        let gate = QualityGate::with_defaults();
+        let ids = [1usize, 2];
+        // A far simpler but materially worse candidate must NOT be chosen over a much stronger one.
+        let candidates = [
+            (&ids[0], fit(0.30, 0.02, 6), 10), // strong, complex
+            (&ids[1], fit(0.05, 0.02, 6), 1),  // simplest, but far weaker
+        ];
+        assert_eq!(gate.most_parsimonious(&candidates), Some(&ids[0]));
+        // graduation_cmp agrees: the strong complex one is the better pick.
+        assert_eq!(
+            gate.graduation_cmp((&fit(0.30, 0.02, 6), 10), (&fit(0.05, 0.02, 6), 1)),
+            Ordering::Greater
+        );
+    }
+
+    #[test]
+    fn graduation_cmp_and_selection_are_deterministic_and_ruin_aware() {
+        let gate = QualityGate::with_defaults();
+        // Finite beats ruined regardless of complexity.
+        assert_eq!(
+            gate.graduation_cmp(
+                (&fit(0.01, 0.0, 6), 9),
+                (&fit(f64::NEG_INFINITY, 0.0, 6), 0)
+            ),
+            Ordering::Greater
+        );
+        // An exact tie on both axes keeps the earliest in input order (determinism).
+        let ids = [7usize, 8];
+        let candidates = [
+            (&ids[0], fit(0.10, 0.02, 6), 3),
+            (&ids[1], fit(0.10, 0.02, 6), 3),
+        ];
+        assert_eq!(gate.most_parsimonious(&candidates), Some(&ids[0]));
+        // Empty input → None.
+        let empty: [(&usize, NoiseRobustFitness, u32); 0] = [];
+        assert_eq!(gate.most_parsimonious(&empty), None);
+        // robust_lower_bound is the named mean − k·se.
+        approx(
+            gate.robust_lower_bound(&fit(0.20, 0.02, 6)),
+            0.20 - DEFAULT_K_SIGMA * 0.02,
+        );
+        assert_eq!(
+            gate.robust_lower_bound(&fit(f64::NEG_INFINITY, 0.0, 6)),
+            f64::NEG_INFINITY
+        );
     }
 }

@@ -40,7 +40,7 @@ use qe_wfo::cv_fitness::{
 };
 use qe_wfo::regularise::coverage;
 use qe_wfo::{
-    fractional_kelly, Genome, MapElitesArchive, OperatorSelector, VariationDriver,
+    fractional_kelly, Genome, MapElitesArchive, OperatorSelector, QualityGate, VariationDriver,
     DEFAULT_KELLY_FRACTION,
 };
 use rust_decimal::prelude::ToPrimitive;
@@ -393,7 +393,18 @@ pub fn run_train_job(
     if selected.is_empty() {
         return Err(RunError::EmptyEnsemble);
     }
-    let chromosomes: Vec<Genome> = selected.iter().map(|&i| pool_genomes[i].clone()).collect();
+    // QE-436: graduation-champion parsimony (MDL) tie-break. Among the archived elites that are TIED with
+    // each selected member on selection fitness *within its own niche*, deploy the most parsimonious
+    // (fewest clauses / distinct features). This is a strict equal-fitness lexicographic tie-break: it
+    // leaves the DSR trial-variance basis (`cell_champion_returns` / `best()`), `n_trials`
+    // (`archive.occupied_cells()`), and the DSR/PBO/SPA trial columns (`pool`) byte-identical — only the
+    // deployed candidate may shift to an equal-fitness but simpler genome, which the unchanged deflation
+    // bar then honestly evaluates. The MDL term never enters any fitness value.
+    let grad_gate = QualityGate::with_defaults();
+    let chromosomes: Vec<Genome> = selected
+        .iter()
+        .map(|&i| archive.parsimonious_equal(&pool_genomes[i], &grad_gate))
+        .collect();
     // Catalogue-schema backstop: the evolved+repaired genomes must be valid against the schema the
     // backtest job assembles against (QE-251 alignment). This never fires for search output, but makes
     // the invariant explicit at the seal boundary.
