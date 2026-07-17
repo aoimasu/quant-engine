@@ -39,6 +39,13 @@ pub const DEFAULT_IMPACT_COEFF: Decimal = Decimal::from_parts(1, 0, 0, false, 2)
 /// The canonical default impact **exponent** β (QE-440): the concavity of impact in participation,
 /// `β ∈ [0.2, 0.5]`. Default `0.5` is the square-root law (maxdama §7.7); `β < 1` makes impact concave.
 pub const DEFAULT_IMPACT_EXPONENT: Decimal = Decimal::from_parts(5, 0, 0, false, 1); // 0.5
+/// The canonical default **decision-to-fill alpha-loss** (implementation-shortfall) coefficient (QE-444,
+/// maxdama §7.3): the adverse close→open directional drift charged **in the trade direction** as a fraction
+/// of notional. Default **`0`** — the term is present, wired, and tested but **inert**: the realised drift
+/// can only be *measured* from live/shadow data (QE-435), which does not exist yet, so we refuse to invent a
+/// directional cost. Zero keeps the calibration serialization (and every golden/`content_hash`) byte-stable
+/// via the field's `skip_serializing_if`. Live-fitted wiring is follow-up (see [`AlphaLossAccumulator`]).
+pub const DEFAULT_ALPHA_LOSS: Decimal = Decimal::ZERO; // 0 — measurement-deferred, golden-safe
 
 /// Quantize a coefficient to [`SLIPPAGE_SCALE`] and normalize to its minimal scale, so it round-trips
 /// byte-identically through serde (excess-precision division results would otherwise change the content
@@ -65,6 +72,22 @@ pub struct SlippageCalibration {
     pub impact_coeff: Decimal,
     /// Impact exponent β — the concavity of impact in participation (`u^β`, `β ∈ [0.2, 0.5]`, `< 1`).
     pub impact_exponent: Decimal,
+    /// Decision-to-fill **alpha-loss** (implementation-shortfall) coefficient (QE-444, maxdama §7.3): the
+    /// adverse close→open directional drift, as a fraction of notional, charged **in the trade direction**
+    /// (a buy pays the up-drift, a sell pays the down-drift — an *odd* function of side, unlike the
+    /// side-blind `half_spread`; see [`SlippageCalibration::directional_drift`]). It is a **separate**,
+    /// friction-only term — deliberately **not** part of [`SlippageCalibration::cost_fraction`] /
+    /// [`SlippageCalibration::notional_cost`], which `capacity.rs` also consumes (capacity models sizing
+    /// headroom, not per-fill decision-to-fill drift, so folding it in would break the QE-431
+    /// friction↔capacity parity).
+    ///
+    /// Default **`0`** ([`DEFAULT_ALPHA_LOSS`]) — measurement-deferred (QE-435: realised drift needs
+    /// live/shadow data that does not exist yet). `#[serde(default, skip_serializing_if)]` omits the field
+    /// at `0`, so a default calibration serialises byte-identically to the pre-QE-444 record and its
+    /// `content_hash` (hence every downstream golden/vintage) is **unmoved**; only a fitted non-zero value
+    /// makes the key — and the hash — move.
+    #[serde(default, skip_serializing_if = "Decimal::is_zero")]
+    pub alpha_loss: Decimal,
 }
 
 impl Default for SlippageCalibration {
@@ -75,19 +98,53 @@ impl Default for SlippageCalibration {
             half_spread: DEFAULT_HALF_SPREAD,
             impact_coeff: DEFAULT_IMPACT_COEFF,
             impact_exponent: DEFAULT_IMPACT_EXPONENT,
+            alpha_loss: DEFAULT_ALPHA_LOSS,
         }
     }
 }
 
 impl SlippageCalibration {
-    /// Construct from raw coefficients, quantizing each so the value is serialize-idempotent.
+    /// Construct from raw coefficients, quantizing each so the value is serialize-idempotent. The
+    /// decision-to-fill `alpha_loss` defaults to [`DEFAULT_ALPHA_LOSS`] (`0`, measurement-deferred); set it
+    /// with [`SlippageCalibration::with_alpha_loss`] once fitted from live/shadow data.
     #[must_use]
     pub fn new(half_spread: Decimal, impact_coeff: Decimal, impact_exponent: Decimal) -> Self {
         SlippageCalibration {
             half_spread: quantize(half_spread),
             impact_coeff: quantize(impact_coeff),
             impact_exponent: quantize(impact_exponent),
+            alpha_loss: DEFAULT_ALPHA_LOSS,
         }
+    }
+
+    /// A copy with the decision-to-fill `alpha_loss` (implementation-shortfall) coefficient replaced,
+    /// quantized so it stays serialize-idempotent (QE-444). This is the sink the live/shadow measurement
+    /// (`AlphaLossAccumulator::mean`) feeds once realised close→open drift can be measured (QE-435).
+    #[must_use]
+    pub fn with_alpha_loss(mut self, alpha_loss: Decimal) -> Self {
+        self.alpha_loss = quantize(alpha_loss);
+        self
+    }
+
+    /// The **signed** per-notional decision-to-fill drift for a trade of `side` (QE-444, maxdama §7.3):
+    /// `+alpha_loss` for a **buy** (the fill drifted **up** from the decision price) and `−alpha_loss` for a
+    /// **sell** (the fill drifted **down**). An **odd** function of side — the directional signature that
+    /// distinguishes alpha-loss from the side-blind (even) `half_spread`. Exact `Decimal`.
+    #[must_use]
+    pub fn directional_drift(&self, side: Side) -> Decimal {
+        match side {
+            Side::Buy => self.alpha_loss,
+            Side::Sell => -self.alpha_loss,
+        }
+    }
+
+    /// The **adverse** decision-to-fill alpha-loss cost on a fill of `notional_abs` (QE-444): the drift is
+    /// signal-aligned (adverse to *whichever* way the trade points), so the cost magnitude is
+    /// `notional_abs · alpha_loss` in the trade's own direction — it always **reduces** net return. The
+    /// direction (sign) is carried by [`directional_drift`](Self::directional_drift); this is its magnitude.
+    #[must_use]
+    pub fn alpha_loss_cost(&self, notional_abs: Decimal) -> Decimal {
+        notional_abs * self.alpha_loss
     }
 
     /// The impact fraction of notional at participation `u` (QE-440): `impact_coeff · u^β`, concave in
@@ -307,6 +364,77 @@ fn binned_slope(points: &[(Decimal, Decimal)], bins: usize) -> Option<Decimal> {
     Some(numer / denom)
 }
 
+/// The realised decision-to-fill **implementation shortfall** for one fill (QE-444, maxdama §7.3), as a
+/// **signed fraction of the decision price, charged in the trade direction** — the measurement primitive the
+/// live/shadow path (QE-435) accumulates to *fit* the [`SlippageCalibration::alpha_loss`] coefficient.
+///
+/// - `side` — the fill's aggressor side (the perp feed carries it, as in [`SizedTrade`]).
+/// - `decision_price` — the bar-**close** mark the signal decided on (`> 0`).
+/// - `fill_price` — the achieved **next-bar-open** fill.
+///
+/// Returns, per unit of the trade's direction:
+/// - Buy: `(fill − decision) / decision` — **positive when adverse** (price drifted up before the buy).
+/// - Sell: `(decision − fill) / decision` — **positive when adverse** (price drifted down before the sell).
+///
+/// A non-positive `decision_price` yields `0` (undefined baseline). Exact `Decimal`, deterministic.
+#[must_use]
+pub fn realized_alpha_loss(side: Side, decision_price: Decimal, fill_price: Decimal) -> Decimal {
+    if decision_price <= Decimal::ZERO {
+        return Decimal::ZERO;
+    }
+    let dir = match side {
+        Side::Buy => Decimal::ONE,
+        Side::Sell => Decimal::NEGATIVE_ONE,
+    };
+    dir * (fill_price - decision_price) / decision_price
+}
+
+/// Accumulates realised decision-to-fill shortfalls ([`realized_alpha_loss`]) over live/shadow fills and
+/// yields their **mean** — the deferred calibration of [`SlippageCalibration::alpha_loss`] (QE-444/QE-435).
+///
+/// The historical backtest has no realised close→open drift to observe, so this stays empty (and the
+/// coefficient stays `0`) until the live/shadow execution path exists. When it does, feed each fill's
+/// `(side, decision_price, fill_price)` via [`observe`](Self::observe); [`mean`](Self::mean) — clamped at
+/// `0` so a *favourable* drift is never credited as a negative cost into the selection fitness — is the
+/// fitted coefficient handed to [`SlippageCalibration::with_alpha_loss`]. Exact `Decimal`, order-independent.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AlphaLossAccumulator {
+    sum: Decimal,
+    count: u64,
+}
+
+impl AlphaLossAccumulator {
+    /// A fresh, empty accumulator.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record one realised fill's decision-to-fill shortfall (`decision_price` = bar-close mark,
+    /// `fill_price` = next-bar-open fill).
+    pub fn observe(&mut self, side: Side, decision_price: Decimal, fill_price: Decimal) {
+        self.sum += realized_alpha_loss(side, decision_price, fill_price);
+        self.count += 1;
+    }
+
+    /// Number of observed fills.
+    #[must_use]
+    pub fn count(&self) -> u64 {
+        self.count
+    }
+
+    /// The mean realised shortfall, **clamped at `0`** (a favourable net drift is not credited as a negative
+    /// cost), or `None` if nothing has been observed. This is the fitted `alpha_loss` coefficient.
+    #[must_use]
+    pub fn mean(&self) -> Option<Decimal> {
+        if self.count == 0 {
+            return None;
+        }
+        let mean = self.sum / Decimal::from(self.count);
+        Some(mean.max(Decimal::ZERO))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -471,5 +599,124 @@ mod tests {
         let down = fit_slippage_calibration(&[sell], &[], d("10000"), 1);
         assert!(up.impact_coeff > Decimal::ZERO);
         assert!(down.impact_coeff > Decimal::ZERO);
+    }
+
+    // --- QE-444 decision-to-fill alpha-loss (implementation shortfall) -------------------------------
+
+    #[test]
+    fn default_alpha_loss_is_zero_and_serialises_byte_identically_hash_unmoved() {
+        // Measurement-deferred, golden-safe: the default coefficient is 0, and `skip_serializing_if` OMITS
+        // the field at 0, so a default calibration serialises to the SAME bytes as the pre-QE-444 3-field
+        // record — its content_hash (hence every downstream golden/vintage) is unmoved.
+        let cal = SlippageCalibration::default();
+        assert_eq!(cal.alpha_loss, Decimal::ZERO);
+        assert_eq!(cal.alpha_loss, DEFAULT_ALPHA_LOSS);
+        let json = serde_json::to_string(&cal).unwrap();
+        assert!(
+            !json.contains("alpha_loss"),
+            "default alpha_loss must be omitted from JSON so the content_hash is byte-stable: {json}"
+        );
+        // Old JSON that predates the field deserialises (serde default) and round-trips byte-identically.
+        let back: SlippageCalibration = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, cal);
+        assert_eq!(back.alpha_loss, Decimal::ZERO);
+        assert_eq!(serde_json::to_string(&back).unwrap(), json);
+    }
+
+    #[test]
+    fn directional_drift_is_odd_in_side_unlike_the_side_blind_half_spread() {
+        // QE-444: alpha-loss is DIRECTIONAL — a buy pays the up-drift (+γ), a sell the down-drift (−γ), an
+        // ODD function of side; whereas half_spread is side-blind (EVEN). This is why alpha-loss cannot be
+        // folded into half_spread.
+        let cal = SlippageCalibration::default().with_alpha_loss(d("0.001"));
+        assert_eq!(cal.directional_drift(Side::Buy), d("0.001"));
+        assert_eq!(cal.directional_drift(Side::Sell), d("-0.001"));
+        assert_eq!(
+            cal.directional_drift(Side::Buy),
+            -cal.directional_drift(Side::Sell),
+            "drift must be odd in side (directional)"
+        );
+        // half_spread is even in side (the existing symmetric cost takes no side at all).
+        assert_ne!(
+            cal.directional_drift(Side::Buy),
+            cal.directional_drift(Side::Sell),
+            "a non-zero alpha-loss must actually distinguish the two sides"
+        );
+        // The cost magnitude is symmetric (signal-aligned adverse drift), always ≥ 0.
+        let notional = d("1000");
+        assert_eq!(cal.alpha_loss_cost(notional), d("1")); // 1000 · 0.001
+        assert!(cal.alpha_loss_cost(notional) >= Decimal::ZERO);
+    }
+
+    #[test]
+    fn alpha_loss_is_separate_from_the_symmetric_shared_cost_capacity_parity_preserved() {
+        // The shared symmetric cost that capacity ALSO consumes must NOT include alpha-loss — otherwise a
+        // directional friction term would leak into capacity and break the QE-431 parity. A non-zero
+        // alpha-loss leaves cost_fraction / notional_cost untouched.
+        let base = SlippageCalibration::default();
+        let with = base.clone().with_alpha_loss(d("0.005"));
+        let u = d("0.01");
+        assert_eq!(with.cost_fraction(u), base.cost_fraction(u));
+        assert_eq!(
+            with.notional_cost(d("1000"), d("100000")),
+            base.notional_cost(d("1000"), d("100000"))
+        );
+    }
+
+    #[test]
+    fn non_zero_alpha_loss_moves_the_content_hash_field_only_diff() {
+        // Only a fitted, non-zero coefficient makes the field appear and the hash move (a clean field-only
+        // diff) — the golden-move path, taken via real code when live data exists.
+        let base = SlippageCalibration::default();
+        let fitted = base.clone().with_alpha_loss(d("0.0007"));
+        assert_ne!(base.content_hash(), fitted.content_hash());
+        let json = serde_json::to_string(&fitted).unwrap();
+        assert!(json.contains("alpha_loss"));
+        // Quantized + serialize-idempotent (the content-hash invariant holds for the new field too).
+        let back: SlippageCalibration = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, fitted);
+        assert_eq!(back.content_hash(), fitted.content_hash());
+    }
+
+    #[test]
+    fn realized_alpha_loss_signs_adverse_drift_by_trade_direction() {
+        // Buy filled ABOVE the decision price ⇒ adverse (positive). Sell filled BELOW ⇒ adverse (positive).
+        // The opposite drifts are favourable (negative).
+        let decision = d("100");
+        assert_eq!(
+            realized_alpha_loss(Side::Buy, decision, d("100.1")),
+            d("0.001")
+        );
+        assert_eq!(
+            realized_alpha_loss(Side::Sell, decision, d("99.9")),
+            d("0.001")
+        );
+        assert!(realized_alpha_loss(Side::Buy, decision, d("99.9")) < Decimal::ZERO);
+        assert!(realized_alpha_loss(Side::Sell, decision, d("100.1")) < Decimal::ZERO);
+        // Undefined baseline ⇒ 0.
+        assert_eq!(
+            realized_alpha_loss(Side::Buy, Decimal::ZERO, d("100")),
+            Decimal::ZERO
+        );
+    }
+
+    #[test]
+    fn accumulator_means_realised_shortfalls_and_feeds_the_coefficient() {
+        // Two adverse buys (0.001 and 0.003) mean to 0.002 → the fitted alpha_loss.
+        let mut acc = AlphaLossAccumulator::new();
+        assert_eq!(acc.mean(), None); // empty ⇒ nothing to fit
+        acc.observe(Side::Buy, d("100"), d("100.1")); // +0.001
+        acc.observe(Side::Buy, d("100"), d("100.3")); // +0.003
+        assert_eq!(acc.count(), 2);
+        assert_eq!(acc.mean(), Some(d("0.002")));
+
+        // Feeds the coefficient sink verbatim.
+        let cal = SlippageCalibration::default().with_alpha_loss(acc.mean().unwrap());
+        assert_eq!(cal.alpha_loss, d("0.002"));
+
+        // A net-favourable sample is clamped to 0 (never credited as negative cost).
+        let mut fav = AlphaLossAccumulator::new();
+        fav.observe(Side::Buy, d("100"), d("99.5")); // favourable
+        assert_eq!(fav.mean(), Some(Decimal::ZERO));
     }
 }
