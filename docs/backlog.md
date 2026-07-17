@@ -300,7 +300,6 @@ _All R1.c tickets delivered — see [`reviewed/`](mds/reviewed/)._
 
 | Ticket | Title | Depends on | Status |
 |--------|-------|------------|:------:|
-| [QE-441](./reviews/2026-07-16-maxdama-panel-review.md#qe-441) | Inject bar-level scenario shocks into the single-strategy sizing fitness (tail-aware Kelly), with seeded/content-addressed shocks  *(panel #12, majority)* | QE-130, QE-120, QE-006 | — |
 | [QE-442](./reviews/2026-07-16-maxdama-panel-review.md#qe-442) | Make signal combination graded (probability surface) rather than hard-boolean k-of-n  *(panel #13, majority)* | QE-110, QE-107 | — |
 | [QE-443](./reviews/2026-07-16-maxdama-panel-review.md#qe-443) | Seed member weights with inverse-vol (EWMA) risk parity, then apply the existing capacity water-fill  *(panel #14, split)* | QE-219 | — |
 | [QE-444](./reviews/2026-07-16-maxdama-panel-review.md#qe-444) | Add a decision-to-fill alpha-loss (implementation-shortfall) term to friction  *(panel #15, majority)* | QE-109 | — |
