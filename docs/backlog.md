@@ -323,6 +323,28 @@ _All R1.c tickets delivered — see [`reviewed/`](mds/reviewed/)._
 
 ---
 
+<a id="gp-indicator-evolution"></a>
+# GP indicator evolution (design QE-450)
+
+> **Spec of record:** [`docs/architecture/qe-450-gp-indicator-evolution-design.md`](./architecture/qe-450-gp-indicator-evolution-design.md)
+> — a constrained Level-3 / FIR symbolic-regression stage that evolves indicator formulas behind the Indicator
+> trait, freezes a `K≤16` pool into `CatalogueIdentity`, and is governed by an admin UI whose approval gate is a
+> hard safety control (§13). Produced by two six-expert design panels (2026-07-17).
+>
+> **Hard gate:** no evolved pool may reach a **production** vintage until the deflation prerequisites
+> **QE-439, QE-434, QE-436, QE-432, QE-430** (maxdama recs #10/#5/#7/#3/#1) land — the server enforces this via a
+> compiled `DEFLATION_BASIS_VERSION` const (QE-454). **Sandbox / research** mode (illuminate + inspect, cannot
+> seal to production) can be built and used first. Not new spec features; do not change the P0–P2 gates.
+
+| Ticket | Title | Depends on | Status |
+|--------|-------|------------|:------:|
+| [QE-451](./architecture/qe-450-gp-indicator-evolution-design.md#4-design) | `evolve` CLI job + GP campaign runner + frozen-pool artifact (`qe-formula-pool` crate)  *(P2 — research/sandbox first; production blocked on deflation prereqs)* | QE-006, QE-106, QE-107, QE-120, QE-113, QE-430, QE-432, QE-434, QE-436, QE-439 | — |
+| [QE-452](./architecture/qe-450-gp-indicator-evolution-design.md#132-integration-surface-reuse-dont-rebuild) | Server: `evolve` run kind + formula-pool endpoints + separate pool lifecycle + firewall extension  *(P2)* | QE-451, QE-255, QE-257, QE-407 | — |
+| [QE-453](./architecture/qe-450-gp-indicator-evolution-design.md#134-screens--a-new-websrcappevolve-area-mirrors-apptraining) | Admin SPA `evolve/` area: NewCampaign · CampaignMonitor (archive heatmap + trial-count-vs-bar) · FormulaSexpr · PoolReview (the gate) · PoolBrowser  *(P2 — frontend CI only)* | QE-452, QE-258, QE-259 | — |
+| [QE-454](./architecture/qe-450-gp-indicator-evolution-design.md#136-sandbox-vs-production--three-independent-structural-barriers) | Ops-safety & governance: RBAC (`require_role`) + sandbox↔production (3 structural barriers) + server-authoritative `seal_allowed` + tamper-evident audit + `GovernanceRecord` + run supervision (deadline/semaphore/halt)  *(P1 — safety control for a dangerous capability)* | QE-452, QE-256, QE-439 | — |
+
+---
+
 # Phase 3 — Live, attribution & ops   *(gated by G2; live capital gated by G3)*
 
 | Ticket | Title | Depends on | Status |
