@@ -110,17 +110,37 @@ pub struct QualityGate {
     pub min_exploitation_windows: usize,
     /// Lower-confidence-bound margin (in standard errors) for "survive exploitation".
     pub k_sigma: f64,
+    /// **Optional** peak-to-trough drawdown ceiling (QE-446), as a non-negative magnitude in `[0, 1]`
+    /// (e.g. `0.30` = reject a graduation candidate whose equity path drew down more than 30 %).
+    /// **`None` = OFF (no ceiling)** — the default, so graduation behaviour is byte-identical to the
+    /// pre-QE-446 gate unless a ceiling is explicitly configured. Consumed only by
+    /// [`persists_with_drawdown`](Self::persists_with_drawdown); the log-growth-only
+    /// [`persists`](Self::persists) ignores it entirely.
+    pub max_drawdown_ceiling: Option<f64>,
 }
 
 impl QualityGate {
-    /// Build a gate explicitly.
+    /// Build a gate explicitly. The drawdown ceiling is **OFF** (`None`); opt in with
+    /// [`with_drawdown_ceiling`](Self::with_drawdown_ceiling).
     #[must_use]
     pub fn new(policy: ThresholdPolicy, min_exploitation_windows: usize, k_sigma: f64) -> Self {
         QualityGate {
             policy,
             min_exploitation_windows,
             k_sigma,
+            max_drawdown_ceiling: None,
         }
+    }
+
+    /// Return a copy of this gate with an **optional drawdown ceiling** applied (QE-446) — the
+    /// behaviour-changing opt-in. `ceiling` is a non-negative peak-to-trough magnitude in `[0, 1]`
+    /// (see [`max_drawdown`](crate::fitness::max_drawdown)); a candidate whose realised drawdown
+    /// exceeds it is rejected by [`persists_with_drawdown`](Self::persists_with_drawdown) even if its
+    /// log-growth lower bound clears the quality bar. The value is clamped to `[0, 1]`.
+    #[must_use]
+    pub fn with_drawdown_ceiling(mut self, ceiling: f64) -> Self {
+        self.max_drawdown_ceiling = Some(ceiling.clamp(0.0, 1.0));
+        self
     }
 
     /// The QE-114 defaults: top-quartile baseline, 5-window graduation, 1σ robustness margin.
@@ -162,6 +182,34 @@ impl QualityGate {
         }
         let lower = fitness.mean - self.k_sigma * fitness.std_error;
         lower >= threshold.value()
+    }
+
+    /// Whether a candidate's `max_drawdown` (a non-negative peak-to-trough magnitude, see
+    /// [`max_drawdown`](crate::fitness::max_drawdown)) is within the configured drawdown ceiling
+    /// (QE-446). **`true` whenever the ceiling is OFF (`None`)** — the golden-safe default — otherwise
+    /// `true` iff `max_drawdown ≤ ceiling`. A non-finite drawdown never passes a set ceiling.
+    #[must_use]
+    pub fn drawdown_within_ceiling(&self, max_drawdown: f64) -> bool {
+        match self.max_drawdown_ceiling {
+            None => true,
+            Some(ceiling) => max_drawdown.is_finite() && max_drawdown <= ceiling,
+        }
+    }
+
+    /// Like [`persists`](Self::persists) but **additionally** enforces the optional drawdown ceiling
+    /// (QE-446): a candidate persists iff it clears the log-growth quality bar **and**
+    /// [`drawdown_within_ceiling`](Self::drawdown_within_ceiling) holds for its realised
+    /// `max_drawdown`. When the ceiling is OFF (`None`, the default) this is **exactly** `persists` —
+    /// so graduation behaviour is byte-identical unless a ceiling is configured. When a ceiling IS set,
+    /// a high-growth / deep-drawdown genome that would otherwise graduate on growth alone is blocked.
+    #[must_use]
+    pub fn persists_with_drawdown(
+        &self,
+        fitness: &NoiseRobustFitness,
+        max_drawdown: f64,
+        threshold: &QualityThreshold,
+    ) -> bool {
+        self.persists(fitness, threshold) && self.drawdown_within_ceiling(max_drawdown)
     }
 
     /// The **lifecycle lower bound** `mean − k_sigma·se` — the robust fitness a candidate is judged on
@@ -360,6 +408,71 @@ mod tests {
         ];
         let survivors = gate.survivors(&candidates, &t);
         assert_eq!(survivors, vec![&ids[0], &ids[3]]);
+    }
+
+    // --- QE-446 optional drawdown ceiling at the graduation gate -----------------------------
+
+    #[test]
+    fn drawdown_ceiling_is_off_by_default() {
+        // Default gate carries no ceiling: any drawdown passes, and persists_with_drawdown ==
+        // persists across the board (ceiling OFF ⇒ graduation behaviour byte-identical).
+        let gate = QualityGate::with_defaults();
+        assert_eq!(gate.max_drawdown_ceiling, None);
+        let t = QualityThreshold::at(0.10);
+        for (mean, se, n, dd) in [
+            (0.20, 0.02, 6, 0.05), // graduates, shallow dd
+            (0.20, 0.02, 6, 0.99), // graduates, deep dd — still passes because ceiling is OFF
+            (0.05, 0.0, 6, 0.01),  // below bar
+            (0.20, 0.02, 1, 0.01), // exploration
+        ] {
+            let f = fit(mean, se, n);
+            assert!(gate.drawdown_within_ceiling(dd));
+            assert_eq!(
+                gate.persists_with_drawdown(&f, dd, &t),
+                gate.persists(&f, &t),
+                "ceiling OFF must not change the persist decision"
+            );
+        }
+    }
+
+    #[test]
+    fn drawdown_ceiling_blocks_high_growth_deep_drawdown_genome() {
+        // A candidate that clears the log-growth bar comfortably but whose equity path drew down 45%.
+        let gate = QualityGate::with_defaults().with_drawdown_ceiling(0.30);
+        assert_eq!(gate.max_drawdown_ceiling, Some(0.30));
+        let t = QualityThreshold::at(0.10);
+        let high_growth = fit(0.20, 0.02, 6); // lower bound 0.18 ≥ 0.10 → clears the growth bar
+
+        // Without the ceiling it would graduate …
+        assert!(QualityGate::with_defaults().persists(&high_growth, &t));
+        // … but a 45% drawdown exceeds the 30% ceiling → blocked.
+        assert!(!gate.drawdown_within_ceiling(0.45));
+        assert!(!gate.persists_with_drawdown(&high_growth, 0.45, &t));
+        // A shallow-drawdown genome with the SAME growth still graduates under the ceiling.
+        assert!(gate.drawdown_within_ceiling(0.20));
+        assert!(gate.persists_with_drawdown(&high_growth, 0.20, &t));
+        // Exactly at the ceiling passes (≤), just over does not.
+        assert!(gate.persists_with_drawdown(&high_growth, 0.30, &t));
+        assert!(!gate.persists_with_drawdown(&high_growth, 0.3000001, &t));
+    }
+
+    #[test]
+    fn drawdown_ceiling_never_rescues_a_below_bar_candidate() {
+        // The ceiling only *tightens* admission — a candidate that fails the growth bar is rejected
+        // regardless of how shallow its drawdown is.
+        let gate = QualityGate::with_defaults().with_drawdown_ceiling(0.50);
+        let t = QualityThreshold::at(0.10);
+        let below_bar = fit(0.05, 0.0, 6); // below the growth bar
+        assert!(!gate.persists_with_drawdown(&below_bar, 0.0, &t));
+        // Ceiling is clamped into [0, 1].
+        assert_eq!(
+            QualityGate::with_defaults()
+                .with_drawdown_ceiling(1.5)
+                .max_drawdown_ceiling,
+            Some(1.0)
+        );
+        // A non-finite drawdown never passes a set ceiling.
+        assert!(!gate.drawdown_within_ceiling(f64::NAN));
     }
 
     // --- QE-436 parsimony (MDL) tie-break at the gate ----------------------------------------

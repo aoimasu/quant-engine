@@ -71,8 +71,8 @@ pub use cv_fitness::{
     DEFAULT_LABEL_HORIZON,
 };
 pub use fitness::{
-    geom_return, log_growth, should_replace, should_replace_parsimonious, within_noise_band,
-    NoiseRobustFitness, DEFAULT_K_SIGMA,
+    geom_return, log_growth, max_drawdown, should_replace, should_replace_parsimonious,
+    within_noise_band, NoiseRobustFitness, DEFAULT_K_SIGMA,
 };
 pub use friction::{
     cost_sweep, simulate, Event, FeeSchedule, Fill, FrictionConfig, FundingStamp, Liquidity,
