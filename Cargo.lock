@@ -1823,6 +1823,7 @@ dependencies = [
  "qe-signal",
  "qe-venue",
  "qe-vintage",
+ "qe-wfo",
  "rust_decimal",
 ]
 
