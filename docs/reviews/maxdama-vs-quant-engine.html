@@ -1,0 +1,671 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Max Dama vs quant-engine — 6-Expert Panel Review</title>
+<style>
+  :root {
+    --bg:#f6f7f9; --panel:#ffffff; --ink:#12161c; --muted:#5b6672;
+    --line:#e5e9ee; --accent:#2f6df6; --accent-soft:#eaf1ff;
+    --exceeds:#0f9d6a; --exceeds-bg:#e6f7ef; --correct:#2f9e5f; --correct-bg:#e9f6ee;
+    --partial:#c98a12; --partial-bg:#fbf3e1; --gap:#d9534f; --gap-bg:#fbeaea;
+    --unan:#0f9d6a; --maj:#2f6df6; --split:#8a5cf6;
+    --phigh:#d9534f; --pmed:#c98a12; --plow:#5b6672;
+    --code:#f0f2f5; --shadow:0 1px 2px rgba(16,22,30,.06),0 4px 14px rgba(16,22,30,.05);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg:#0e1116; --panel:#161b22; --ink:#e6edf3; --muted:#9aa5b1; --line:#252c36;
+      --accent:#4f8bff; --accent-soft:#16233c; --code:#1b2129;
+      --exceeds-bg:#0f2a1f; --correct-bg:#12241a; --partial-bg:#2a2110; --gap-bg:#2a1414;
+      --shadow:0 1px 2px rgba(0,0,0,.4),0 6px 18px rgba(0,0,0,.35);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg:#0e1116; --panel:#161b22; --ink:#e6edf3; --muted:#9aa5b1; --line:#252c36;
+    --accent:#4f8bff; --accent-soft:#16233c; --code:#1b2129;
+    --exceeds-bg:#0f2a1f; --correct-bg:#12241a; --partial-bg:#2a2110; --gap-bg:#2a1414;
+    --shadow:0 1px 2px rgba(0,0,0,.4),0 6px 18px rgba(0,0,0,.35);
+  }
+  :root[data-theme="light"] {
+    --bg:#f6f7f9; --panel:#ffffff; --ink:#12161c; --muted:#5b6672; --line:#e5e9ee;
+    --accent:#2f6df6; --accent-soft:#eaf1ff; --code:#f0f2f5;
+    --exceeds-bg:#e6f7ef; --correct-bg:#e9f6ee; --partial-bg:#fbf3e1; --gap-bg:#fbeaea;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink);
+    font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    -webkit-font-smoothing:antialiased; }
+  .wrap { max-width:940px; margin:0 auto; padding:0 20px 80px; }
+  header.hero { padding:56px 20px 36px; background:
+      radial-gradient(1200px 400px at 50% -180px, var(--accent-soft), transparent 70%);
+    border-bottom:1px solid var(--line); }
+  .hero-inner { max-width:940px; margin:0 auto; }
+  .kicker { font-size:12.5px; font-weight:700; letter-spacing:.08em; text-transform:uppercase; color:var(--accent); }
+  h1 { font-size:clamp(26px,4.4vw,40px); line-height:1.15; margin:.35em 0 .3em; letter-spacing:-.02em; }
+  .sub { color:var(--muted); font-size:16px; max-width:70ch; }
+  .meta-row { margin-top:18px; display:flex; flex-wrap:wrap; gap:8px 10px; font-size:13px; color:var(--muted); }
+  .chip { background:var(--panel); border:1px solid var(--line); border-radius:999px; padding:5px 12px; }
+  .verdict-banner { margin:26px auto 0; max-width:940px; }
+  .verdict-banner .card { border-left:4px solid var(--accent); }
+  .stat-strip { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; margin:22px 0 8px; }
+  .stat { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:16px; text-align:center; box-shadow:var(--shadow); }
+  .stat .n { font-size:30px; font-weight:800; letter-spacing:-.02em; }
+  .stat .l { font-size:12.5px; color:var(--muted); margin-top:2px; }
+  .stat.good .n { color:var(--exceeds); } .stat.warn .n { color:var(--partial); }
+  .stat.bad .n { color:var(--gap); } .stat.acc .n { color:var(--accent); }
+  section { margin-top:44px; scroll-margin-top:20px; }
+  h2 { font-size:22px; letter-spacing:-.01em; margin:0 0 4px; display:flex; align-items:center; gap:10px; }
+  h2 .num { font-size:13px; color:#fff; background:var(--accent); width:26px; height:26px; border-radius:8px;
+    display:inline-flex; align-items:center; justify-content:center; font-weight:700; flex:none; }
+  .sec-note { color:var(--muted); font-size:14.5px; margin:0 0 18px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:16px; padding:20px 22px;
+    box-shadow:var(--shadow); margin-bottom:14px; }
+  .card h3 { font-size:17px; margin:0; letter-spacing:-.01em; }
+  .card p { margin:.5em 0 0; color:var(--ink); }
+  .badges { display:flex; flex-wrap:wrap; gap:6px; margin-top:4px; }
+  .badge { font-size:11.5px; font-weight:700; padding:3px 9px; border-radius:999px; white-space:nowrap; letter-spacing:.01em; }
+  .v-exceeds { background:var(--exceeds-bg); color:var(--exceeds); }
+  .v-correct { background:var(--correct-bg); color:var(--correct); }
+  .v-partial { background:var(--partial-bg); color:var(--partial); }
+  .v-gap { background:var(--gap-bg); color:var(--gap); }
+  .c-unan { background:transparent; color:var(--unan); border:1px solid var(--unan); }
+  .c-maj { background:transparent; color:var(--maj); border:1px solid var(--maj); }
+  .c-split { background:transparent; color:var(--split); border:1px solid var(--split); }
+  .p-high { background:var(--gap-bg); color:var(--phigh); }
+  .p-med { background:var(--partial-bg); color:var(--pmed); }
+  .p-low { background:var(--code); color:var(--plow); }
+  .eff { background:var(--code); color:var(--muted); }
+  .area-head { display:flex; justify-content:space-between; align-items:flex-start; gap:14px; flex-wrap:wrap; }
+  .area-head h3 { flex:1; min-width:240px; }
+  .dissent { margin-top:12px; padding:11px 14px; background:var(--code); border-radius:10px; font-size:14px; color:var(--muted); }
+  .dissent.none { opacity:.7; }
+  .dlabel { display:block; font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); margin-bottom:3px; }
+  /* recs */
+  .rec-head { display:flex; gap:14px; align-items:flex-start; }
+  .rank { flex:none; width:42px; height:42px; border-radius:12px; background:var(--accent); color:#fff;
+    font-weight:800; font-size:16px; display:flex; align-items:center; justify-content:center; }
+  .rec[data-prio="medium"] .rank { background:var(--pmed); }
+  .rec[data-prio="low"] .rank { background:var(--plow); }
+  .rec-title-wrap { flex:1; }
+  .rec-body { margin-top:14px; }
+  .field { margin-top:11px; }
+  .field .flabel { display:block; font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.06em; color:var(--accent); margin-bottom:2px; }
+  .field.two { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+  .field.resolution .flabel { color:var(--exceeds); }
+  .mono { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:13px;
+    background:var(--code); padding:2px 6px; border-radius:6px; display:inline-block; line-height:1.5; word-break:break-word; }
+  .debate .field.resolution { margin-top:12px; padding-top:12px; border-top:1px dashed var(--line); }
+  ul.exceeds { list-style:none; padding:0; margin:0; }
+  ul.exceeds li { position:relative; padding:12px 16px 12px 42px; background:var(--panel); border:1px solid var(--line);
+    border-radius:12px; margin-bottom:10px; box-shadow:var(--shadow); }
+  ul.exceeds li::before { content:"✓"; position:absolute; left:14px; top:12px; color:var(--exceeds); font-weight:800; }
+  .experts { display:grid; grid-template-columns:repeat(2,1fr); gap:12px; }
+  .expert { display:flex; gap:12px; align-items:center; background:var(--panel); border:1px solid var(--line);
+    border-radius:14px; padding:13px 15px; box-shadow:var(--shadow); }
+  .ava { flex:none; width:40px; height:40px; border-radius:10px; background:var(--accent-soft); color:var(--accent);
+    font-weight:800; font-size:13px; display:flex; align-items:center; justify-content:center; }
+  .ename { font-weight:700; font-size:14.5px; }
+  .elens { font-size:12.5px; color:var(--muted); }
+  .flow { margin-top:12px; font-size:13.5px; color:var(--muted); text-align:center; }
+  .flow b { color:var(--ink); }
+  footer { margin-top:56px; padding-top:22px; border-top:1px solid var(--line); font-size:13px; color:var(--muted); }
+  a.toplink { color:var(--accent); text-decoration:none; }
+  .toc { display:flex; flex-wrap:wrap; gap:8px; margin-top:18px; }
+  .toc a { font-size:13px; text-decoration:none; color:var(--ink); background:var(--panel); border:1px solid var(--line);
+    padding:6px 12px; border-radius:999px; }
+  .toc a:hover { border-color:var(--accent); color:var(--accent); }
+  @media (max-width:640px) {
+    .stat-strip { grid-template-columns:repeat(2,1fr); }
+    .experts { grid-template-columns:1fr; }
+    .field.two { grid-template-columns:1fr; }
+  }
+</style>
+</head>
+<body>
+<header class="hero">
+  <div class="hero-inner">
+    <div class="kicker">6-Expert Panel Review · Debate &amp; Synthesis</div>
+    <h1>Max Dama on Automated Trading <span style="color:var(--muted);font-weight:400;">vs</span> quant-engine</h1>
+    <p class="sub">A panel of two senior quant researchers, two mathematicians, one senior software engineer,
+    and one trading expert independently analyzed the 2008–2011 ebook against the production repo, debated each
+    other's claims, and reconciled a verdict: <b>is the repo's approach correct, and what should it adopt or improve?</b></p>
+    <div class="meta-row">
+      <span class="chip">Repo: <b>quant-engine</b> (Rust workspace, 25 crates)</span>
+      <span class="chip">Source: <b>Max Dama on Automated Trading</b></span>
+      <span class="chip">13 agents · 3 phases · 2026-07-16</span>
+    </div>
+    <div class="toc">
+      <a href="#verdict">Verdict</a>
+      <a href="#panel">The panel</a>
+      <a href="#exceeds">Where it exceeds the book</a>
+      <a href="#areas">Area-by-area</a>
+      <a href="#debate">Debate highlights</a>
+      <a href="#recs">Recommendations</a>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+
+  <div class="verdict-banner" id="verdict">
+    <div class="card">
+      <div class="kicker" style="color:var(--accent)">Bottom line</div>
+      <p style="font-size:17px;margin-top:6px"><b>Correct and in several dimensions ahead of the 2008 book — the architecture, determinism, deflation, and tail objective are sound — but with one real statistical defect (un-deflated correlation estimates driving allocation) and a cluster of &quot;optimize-a-proxy&quot; and &quot;guessed-coefficient&quot; gaps that should be closed before scaling capital.</b></p>
+      <p>The quant-engine&#x27;s approach is fundamentally correct and in several areas materially exceeds &quot;Max Dama on Automated Trading&quot; (2008) — most clearly in multiple-testing deflation, purge/embargo leakage control, byte-level determinism, and a tail-risk (CVaR/CDaR) portfolio objective the book only gestures at. The core design decisions the panel initially worried might violate the book — QD/MAP-Elites instead of grid search, and 1/N member weighting instead of mean-variance — are defensible and, on inspection, faithful to Dama&#x27;s actual intent (illumination over convergence; 1/N&#x27;s proven out-of-sample robustness). The genuine weaknesses are narrower and specific: the rigorous deflation applied to the Sharpe is NOT applied to the pairwise-correlation estimates that drive capital allocation (the one clear statistical defect); several selection-critical numbers are hardcoded guesses (impact/half-spread); the search optimizes on proxies that differ from what is deployed (equal-weight vs capacity-capped; a training friction ledger vs the live money model); the book is never sized with a fractional or portfolio-level Kelly pass; and no independent slow-reference oracle exists to catch a shared-code logic bug that would otherwise reproduce byte-identically through every &quot;parity&quot; check. None of these is fatal; all are addressable, and most are cheap.</p>
+    </div>
+    <div class="stat-strip">
+      <div class="stat good"><div class="n">7</div><div class="l">areas match or beat the book</div></div>
+      <div class="stat warn"><div class="n">3</div><div class="l">areas partially correct</div></div>
+      <div class="stat bad"><div class="n">3</div><div class="l">genuine gaps</div></div>
+      <div class="stat acc"><div class="n">5</div><div class="l">high-priority fixes</div></div>
+    </div>
+  </div>
+
+  <section id="panel">
+    <h2><span class="num">1</span>The panel</h2>
+    <p class="sec-note">Each expert first analyzed the PDF against the actual repo source through their own lens, then
+    read every other expert's findings and openly challenged, defended, or conceded them before the chair synthesized a consensus.</p>
+    <div class="experts">
+      <div class="expert"><div class="ava">QR1</div><div><div class="ename">Senior Quant Researcher #1</div><div class="elens">Alpha generation &amp; search methodology</div></div></div>
+<div class="expert"><div class="ava">QR2</div><div><div class="ename">Senior Quant Researcher #2</div><div class="elens">Risk, portfolio allocation &amp; ensemble</div></div></div>
+<div class="expert"><div class="ava">M1</div><div><div class="ename">Mathematician #1</div><div class="elens">Kelly &amp; position-sizing math</div></div></div>
+<div class="expert"><div class="ava">M2</div><div><div class="ename">Mathematician #2</div><div class="elens">Statistical validity &amp; overfitting</div></div></div>
+<div class="expert"><div class="ava">SWE</div><div><div class="ename">Senior Software Engineer</div><div class="elens">Determinism, parity &amp; architecture</div></div></div>
+<div class="expert"><div class="ava">TRD</div><div><div class="ename">Trading / Execution Expert</div><div class="elens">Execution &amp; transaction costs</div></div></div>
+    </div>
+    <p class="flow">Phase 1 · <b>Independent analysis</b> &nbsp;→&nbsp; Phase 2 · <b>Debate &amp; cross-examination</b> &nbsp;→&nbsp; Phase 3 · <b>Chair synthesis</b></p>
+  </section>
+
+  <section id="exceeds">
+    <h2><span class="num">2</span>Where the repo already exceeds the 2008 book</h2>
+    <p class="sec-note">The book is a foundational primer; the repo is a modern engine. The panel was unanimous that in
+    these dimensions the repo is not just correct but well ahead of anything in the source.</p>
+    <ul class="exceeds">
+      <li>Quantitative multiple-testing deflation (Deflated Sharpe with extreme-value E[max], PBO/CSCV, White RC/SPA, benchmark nulls) where the 2008 book offers only the verbal &#x27;if Sharpe&gt;3 check for omniscience&#x27; with no correction (crates/validation).</li>
+<li>Machine-enforced purge+embargo cross-validation with a windows_disjoint invariant, versus the book&#x27;s manual-vigilance-only prescription for the timetravel/lookahead pitfall (crates/wfo/src/cv.rs).</li>
+<li>Byte-level determinism: portable ChaCha8 RNG with per-task seed derivation, golden-value stream pins guarding a crate bump, injectable clock, and content-addressed config+world lineage — the book only names &#x27;control the seed and clock&#x27; (crates/determinism, crates/venue/src/clock.rs).</li>
+<li>A CVaR/CDaR tail-risk portfolio objective on the net combined series that captures skew and higher moments Markowitz variance discards — strictly better founded for fat-tailed crypto perps (§6.5), which the book only notes as a limitation without a remedy (crates/ensemble/src/objective.rs).</li>
+<li>A calibrated, latching, per-vintage 3-tier runtime circuit breaker and hard leverage/drawdown limit set — the 2008 book has no runtime risk-halt machinery at all (crates/risk).</li>
+<li>Perpetual-swap funding modeled as a first-order signed cashflow and a closed-form capacity/breakeven-AUM formula with water-fill weight capping — both beyond the book&#x27;s 2008 equities cost walk-through (crates/wfo/src/friction.rs, crates/ensemble/src/capacity.rs).</li>
+<li>The four Dubno external servers realized as real crate seams with a search-portfolio-live firewall enforced as a CI test over the actual manifest graph, plus the absolute-target/delta-closing split verified stateless by test — a stricter operationalization than the book&#x27;s prose (crates/architecture).</li>
+    </ul>
+  </section>
+
+  <section id="areas">
+    <h2><span class="num">3</span>Area-by-area verdict</h2>
+    <p class="sec-note">Every topic where the book and the repo overlap, with the panel's verdict, consensus level, and any surviving dissent.</p>
+    <div class="card area">
+  <div class="area-head">
+    <h3>Search methodology (QD/MAP-Elites vs §5.4 grid / &#x27;GA is overkill&#x27;)</h3>
+    <div class="badges"><span class="badge v-exceeds">Exceeds book</span><span class="badge c-maj">Majority</span></div>
+  </div>
+  <p>MAP-Elites is an illumination algorithm (best robust elite per niche), categorically different from the convergent GA/anneal family §5.4 warns against; grid is infeasible at ~30 genome loci (Dama himself balks at 3^10). Uniform-cell sampling, Deep-Grid subpops, and cross-fold cv_fitness are the honest realization of his intent, and the whole run is deflated for the exact trial budget — a quantitative answer the book only prose-gestures at.</p>
+  <div class="dissent"><span class="dlabel">Dissent / caveat</span>A §5.4 purist reading Dama&#x27;s literal words (&#x27;fewer parameters&#x27;, &#x27;prefer grid&#x27;) will still call this the optimizer he cautions against; the illumination-not-convergence defense is a reinterpretation, not his text. Recommend documenting the rationale explicitly (currently implicit).</div>
+</div>
+<div class="card area">
+  <div class="area-head">
+    <h3>Overfitting deflation (DSR / PBO / SPA / benchmark nulls)</h3>
+    <div class="badges"><span class="badge v-exceeds">Exceeds book</span><span class="badge c-unan">Unanimous</span></div>
+  </div>
+  <p>crates/validation implements Deflated Sharpe (PSR + extreme-value E[max]), PBO/CSCV, White RC/SPA with stationary bootstrap, and BTC-HODL/random-entry nulls. The 2008 book offers only &#x27;if Sharpe&gt;3, check for omniscience&#x27; — no correction at all. This is the panel&#x27;s clearest example of the repo surpassing the book.</p>
+  <div class="dissent"><span class="dlabel">Dissent / caveat</span>Two residual weaknesses (not defects): PBO is computed but never gated on (decorative), and the DSR effective-trials count multiplies cells x gens x windows with a variance basis only coherent on the cell axis. Math#2 walked back &#x27;incoherent basis&#x27; to &#x27;conservative/safe-direction&#x27; after verifying QE-414 fixed the cell-axis variance — remaining error over-deflates (false-reject), the safe direction for a gate.</div>
+</div>
+<div class="card area">
+  <div class="area-head">
+    <h3>Purge+embargo CV / timetravel-lookahead (§5.3)</h3>
+    <div class="badges"><span class="badge v-exceeds">Exceeds book</span><span class="badge c-unan">Unanimous</span></div>
+  </div>
+  <p>cv.rs is a faithful Lopez de Prado purge+embargo with a machine-checked windows_disjoint invariant; combined with byte-identical batch/streaming signal parity it kills both the CV-leakage and intra-bar subspecies of timetravel. The book prescribes only manual vigilance for a bug it calls &#x27;hard to catch&#x27;.</p>
+  <div class="dissent"><span class="dlabel">Dissent / caveat</span>None. Guarantee is only as strong as the declared lookback+label_horizon, but those are statically bounded (QE-107).</div>
+</div>
+<div class="card area">
+  <div class="area-head">
+    <h3>Determinism &amp; state control (§5.5 Dubno)</h3>
+    <div class="badges"><span class="badge v-exceeds">Exceeds book</span><span class="badge c-unan">Unanimous</span></div>
+  </div>
+  <p>Portable ChaCha8 RNG with per-task seed derivation and golden-value pins, injectable clock, content-addressed lineage (config+world hashed to a SHA), and the four Dubno seams enforced as a CI firewall test. Dama only names &#x27;control the seed and clock&#x27;; the repo operationalizes it to an executable degree the prose only gestured at.</p>
+  <div class="dissent"><span class="dlabel">Dissent / caveat</span>SSE honestly downgraded his own round-1 &#x27;exceeds the idea&#x27; to &#x27;operationalizes Dubno&#x27;s doctrine&#x27; — the concept (state = config + world) is Dubno&#x27;s; the CI enforcement and golden pins are the genuine 2008-&gt;2026 advance.</div>
+</div>
+<div class="card area">
+  <div class="area-head">
+    <h3>Backtest = live parity / independent oracle (§5.5)</h3>
+    <div class="badges"><span class="badge v-partial">Partially correct</span><span class="badge c-unan">Unanimous</span></div>
+  </div>
+  <p>Replay&lt;-&gt;Live parity (one object, label-only flip) and Live&lt;-&gt;Shadow parity (shared plan_delta) are excellent. But two gaps: (1) the TRAINING backtest (wfo/backtest.rs) runs a separate fill/cost/ledger from the live hedger-&gt;pretrade-&gt;edge-&gt;VenueSimulator path, so parity is proven only at the signal-decision layer, not the money layer the fitness selector actually optimizes; (2) there is NO independent slow-reference oracle — reproduce() re-runs one closure, reconstruct_batch drives the SAME reconstructor, so a shared-fold logic bug reproduces byte-identically and is invisible to every &#x27;parity&#x27; check.</p>
+  <div class="dissent"><span class="dlabel">Dissent / caveat</span>None on existence; Math#2 sharpens that the oracle gap is UPSTREAM of statistical validity — DSR/PBO/SPA all certify a return series that shared buggy code could silently corrupt.</div>
+</div>
+<div class="card area">
+  <div class="area-head">
+    <h3>Kelly objective (log_growth fitness)</h3>
+    <div class="badges"><span class="badge v-correct">Correct</span><span class="badge c-unan">Unanimous</span></div>
+  </div>
+  <p>fitness.rs log_growth = mean ln(1+r) on net-of-cost compounding returns is the textbook ergodic/Kelly criterion: vol-drag penalized, ruin absorbing (r&lt;=-1 =&gt; -inf), empirical over the real fat-tailed histogram. backtest.rs bets a genuine fraction of current equity. The math is sound and needs no change.</p>
+  <div class="dissent"><span class="dlabel">Dissent / caveat</span>Honesty note the panel adopted: this MATCHES the book&#x27;s best method (§6.4 empirical Kelly), it does not exceed it — §6.1&#x27;s mu/sigma^2 closed form is only the Gaussian special case. The improvable part is the deployed SOLUTION, not the objective.</div>
+</div>
+<div class="card area">
+  <div class="area-head">
+    <h3>Position sizing: fractional-Kelly + portfolio-level Kelly (§6.3/§6.4)</h3>
+    <div class="badges"><span class="badge v-gap">Gap</span><span class="badge c-maj">Majority</span></div>
+  </div>
+  <p>The repo does step 1 of §6.3 (mask-&gt;1/N-&gt;capacity cap) but never step 2: no growth-optimal f* is solved on the combined net PnL, and size_bps (Kelly-fit standalone per strategy) is summed under weights — Kelly is non-additive under correlation, so combined leverage is an accident. The search also pins the IN-SAMPLE log-growth peak, which systematically overbets out-of-sample on crypto&#x27;s short, regime-concentrated history.</p>
+  <div class="dissent"><span class="dlabel">Dissent / caveat</span>A risk purist argues the stacked guards (MAX_SIZE_BPS, capacity water-fill, CVaR, DSR, leverage cap) already deliver de-facto fractional Kelly and any f* sizer adds fat-tail fragility. Resolution: none of those guards discounts the SIZE coordinate for estimation error; the fix is FRACTIONAL (&lt;=1/2), clamped strictly below the existing hard cap — a soft advisory sizer that can cut as easily as raise leverage, not a replacement for the cap.</div>
+</div>
+<div class="card area">
+  <div class="area-head">
+    <h3>Signal engineering (FIR, normalization, EMA, leakage-safety, perp flow factors)</h3>
+    <div class="badges"><span class="badge v-exceeds">Exceeds book</span><span class="badge c-unan">Unanimous</span></div>
+  </div>
+  <p>Point-wise quantized FIR indicators, normalized ratio signals (matches §4.8&#x27;s IC-boosting normalization), EMA smoothing, batch/streaming-identical, provably leakage-safe, plus perp microstructure flow factors (funding/OI/premium) beyond the 2008 equities book. Fixed indicator periods deliberately foreclose §5.4&#x27;s single named overfitting vector (tuned MA lengths).</p>
+  <div class="dissent none"><span class="dlabel">Dissent</span>None — full agreement.</div>
+</div>
+<div class="card area">
+  <div class="area-head">
+    <h3>Signal validation: per-indicator IC / information-horizon (§4.8, §4.10)</h3>
+    <div class="badges"><span class="badge v-gap">Gap</span><span class="badge c-split">Split</span></div>
+  </div>
+  <p>grep-confirmed: NO regression, information-coefficient, or forward-return diagnostic anywhere in crates/signal or crates/validation. Every catalogue indicator enters the search unconditionally; the genome discovers sign/threshold by evolutionary band selection with no prior evidence the factor predicts forward return. §4.8 treats IC/&#x27;does the signal even work, at what horizon&#x27; as table stakes.</p>
+  <div class="dissent"><span class="dlabel">Dissent / caveat</span>Genuinely contested severity: defenders argue evolutionary band-selection is a legitimate non-parametric substitute that already handles sign-flip and thresholding, making explicit IC a nice-to-have diagnostic rather than a correctness defect. SQR#1 holds it is a real gap AND shrinks effective search dimensionality (fewer dead factors to deflate against). Panel keeps it high-value but flags the split honestly.</div>
+</div>
+<div class="card area">
+  <div class="area-head">
+    <h3>Genome representation &amp; in-search parsimony (§5.4 &#x27;fewer parameters&#x27;, §4.9 Voodoo Spectrum)</h3>
+    <div class="badges"><span class="badge v-partial">Partially correct</span><span class="badge c-maj">Majority</span></div>
+  </div>
+  <p>Structurally sound where it matters (fixed periods, stops excluded from genome). But the representation still performs free variable selection over ~24 correlated indicators plus band/k-of-n structure, and NOTHING in fitness.rs or lifecycle.rs rewards fewer clauses/features — a 1-clause and a 4-clause genome compete on fitness alone, so search drifts to maximal complexity. Compounded: size_bps co-evolves under the same log_growth scalar, so leverage can compensate for weak alpha inside a niche.</p>
+  <div class="dissent"><span class="dlabel">Dissent / caveat</span>Minority view that DSR/PBO post-hoc already punish over-complex genomes; majority holds &#x27;fewer parameters&#x27; should be operationalized INSIDE the illumination, not only caught downstream.</div>
+</div>
+<div class="card area">
+  <div class="area-head">
+    <h3>Ensemble correlation estimation (§6.2 spurious correlation)</h3>
+    <div class="badges"><span class="badge v-gap">Gap</span><span class="badge c-unan">Unanimous</span></div>
+  </div>
+  <p>THE clearest statistical defect. objective.rs pearson-&gt;positive_mean_pairwise_corr is raw sample Pearson with NO minimum-N floor, no shrinkage, no bootstrap error, and no deflation — yet the DE mask SELECTS the membership minimizing it over K(K-1)/2 pairs, and fold-CV (search.rs) computes it on t/4 slices, squarely in Dama&#x27;s N=10=&gt;|r|&gt;0.63 unreliable regime. The repo built full deflation for the Sharpe and subjects the correlation estimates that drive capital allocation to none of it.</p>
+  <div class="dissent"><span class="dlabel">Dissent / caveat</span>Some argued the CVaR-of-combined term makes the penalty redundant, so spurious error is bounded. Math#2 and SQR#1 rebut decisively: CVaR is evaluated AFTER selection, so it cannot undo a member admitted on a phantom diversification signal — the penalty steers selection, the tail objective cannot retroactively fix it. Consensus: needs a significance floor.</div>
+</div>
+<div class="card area">
+  <div class="area-head">
+    <h3>Portfolio construction (1/N + CVaR/CDaR tail objective + capacity)</h3>
+    <div class="badges"><span class="badge v-exceeds">Exceeds book</span><span class="badge c-maj">Majority</span></div>
+  </div>
+  <p>CVaR/CDaR on the combined net series is strictly better than Markowitz variance for fat-tailed/skewed perps (§6.5 notes MV loses skew sensitivity); member-selection-under-1/N with fold-CV, leave-one-out robustness, regime floors, capacity caps and stress overlay is a deliberate low-parameter substitute the book explicitly endorses (§6.2 pt 9), not a failed mean-variance. Closed-form capacity and the calibrated 3-tier circuit breaker (crates/risk) exceed anything in 2008.</p>
+  <div class="dissent"><span class="dlabel">Dissent / caveat</span>Improvable, not wrong: pure 1/N ignores §6.2&#x27;s own point that unequal weights cancel risk better when volatilities differ (a high-vol member dominates the combined tail at 1/N); and the search scores equal-weight but deploys capacity-capped weights. Inverse-vol seed weighting is a genuine trade-off (1/N wins OOS in DeMiguel), so panel holds it medium, not a clear win. Full RMT/Barra correctly omitted as dimensionality-mismatched.</div>
+</div>
+<div class="card area">
+  <div class="area-head">
+    <h3>Execution &amp; transaction-cost model (§7)</h3>
+    <div class="badges"><span class="badge v-partial">Partially correct</span><span class="badge c-unan">Unanimous</span></div>
+  </div>
+  <p>Perp funding as a first-order signed cashflow and closed-form capacity exceed the 2008 equities book; taker-only fills are correctly conservative and the absence of TWAP/VWAP slicing is CORRECT for a 1h/next-open/near-zero-participation engine (over-engineering to add). But the impact model is the wrong shape — linear-marginal/quadratic-total vs §7.7&#x27;s concave square-root-in-participation (the CLI even advertises a &#x27;square-root-impact&#x27; tag while running linear) — and half_spread/impact coefficients are hardcoded guesses, the load-bearing weak number across capacity binding, portfolio-Kelly, and the un-deflatable cost bias Math#2 flags.</p>
+  <div class="dissent"><span class="dlabel">Dissent / caveat</span>Trading expert ranks live calibration (§7.7) the #1 cross-domain payoff; some argue conservative uncalibrated defaults are safer / more deterministic. Resolution (SSE): a coefficient fitted on a pinned input and shipped as a content-addressed calibration vintage is byte-reproducible and MORE Dubno-faithful than a magic number.</div>
+</div>
+<div class="card area">
+  <div class="area-head">
+    <h3>Runtime risk-halt / circuit breaker (crates/risk)</h3>
+    <div class="badges"><span class="badge v-exceeds">Exceeds book</span><span class="badge c-unan">Unanimous</span></div>
+  </div>
+  <p>3-tier CircuitBreaker + MarkEma observer + per-vintage CalibrationProfile (threshold calibrated from the in-sample drawdown distribution) + MaxLeverage/DrawdownCap limits with Clamp/Reject/Halt and an out-of-band kill switch. §6 discusses sizing to avoid ruin but offers no runtime halt machinery — this is a strict superset.</p>
+  <div class="dissent none"><span class="dlabel">Dissent</span>None — full agreement.</div>
+</div>
+  </section>
+
+  <section id="debate">
+    <h2><span class="num">4</span>The sharpest debates &amp; how they resolved</h2>
+    <p class="sec-note">Where the experts genuinely disagreed. Several round-1 positions were revised after panelists
+    re-read the source during the debate — those reversals are recorded honestly rather than smoothed over.</p>
+    <div class="card debate">
+  <h3>Does the repo need an explicit fractional-Kelly / portfolio-Kelly sizer, or do the stacked implicit guards already deliver Kelly-like prudence?</h3>
+  <div class="field"><span class="flabel">Positions</span><span>Risk purist (raised in both mathematicians&#x27; and SQR#2&#x27;s contested notes): MAX_SIZE_BPS cap + capacity water-fill + CVaR + DSR + leverage cap already deliver de-facto fractional Kelly, and any f* sizer adds fat-tail fragility since Kelly is notoriously over-levered. Mathematicians #1/#2 and SQR#2: add it.</span></div>
+  <div class="field resolution"><span class="flabel">Resolution</span><span>Add it, but strictly fractional (&lt;=1/2 empirical Kelly) and clamped BELOW the existing hard cap — a soft advisory sizer between 0 and the cap. Decisive point: none of the guards discounts the SIZE coordinate for estimation error, and the search actively pushes size toward the in-sample log-growth peak, which overbets out-of-sample on crypto&#x27;s short history. The purist&#x27;s fragility worry applies to FULL Kelly, which is exactly why the fix is fractional. Reframed on the record: the portfolio pass can CUT leverage as readily as raise it (under BTC-beta correlation, summed standalone Kellys over-allocate), so it is a correctness fix in either direction, not a leverage grab.</span></div>
+</div>
+<div class="card debate">
+  <h3>Is QD/MAP-Elites the right search, or the &#x27;GA optimizer overkill&#x27; Dama warns against in §5.4?</h3>
+  <div class="field"><span class="flabel">Positions</span><span>Orthodox §5.4 purist: the repo uses precisely the genetic-algo optimizer Dama calls overkill with &#x27;hard to detect problems&#x27;, over ~30 parameters when he says &#x27;fewer parameters than many&#x27;. SQR#1, SQR#2, both mathematicians, SSE: it is correct.</span></div>
+  <div class="field resolution"><span class="flabel">Resolution</span><span>Correct — MAP-Elites is an ILLUMINATION algorithm (keeps the best robust elite per niche) categorically different from the convergent hill-climb/anneal/GA family Dama warns about, grid is infeasible at ~30 loci, and the run is deflated for its exact trial budget. SSE adds that seeded byte-reproducibility + firewall + purge/embargo CV structurally neutralize Dama&#x27;s specific &#x27;hard-to-detect problems&#x27; fear (a simulator bug reproduces deterministically rather than as a heisenbug). Honest dissent retained: this is a reinterpretation of Dama&#x27;s intent, not his literal words, so a purist can reject it — the panel recommends documenting the illumination-not-convergence rationale explicitly. Corollary from SSE: the more powerful the search, the MORE it needs the independent oracle it cannot game (rec #3).</span></div>
+</div>
+<div class="card debate">
+  <h3>Is the ensemble correlation penalty&#x27;s spurious-correlation exposure a real defect, or bounded because the primary objective is a correlation-free CVaR/CDaR tail?</h3>
+  <div class="field"><span class="flabel">Positions</span><span>Skeptic (raised by SQR#2/Math#2 as a foil): the correlation term is a soft tiebreaker and CVaR-of-combined already reflects the joint tail, so spurious-correlation error is bounded and possibly redundant. Math#2, SQR#1, SQR#2: it is a genuine statistical defect.</span></div>
+  <div class="field resolution"><span class="flabel">Resolution</span><span>Genuine defect. The DE mask SELECTS the membership minimizing a raw Pearson over K(K-1)/2 pairs computed on t/4 fold slices — Dama §6.2&#x27;s exact spurious-correlation machine — with none of the deflation the Sharpe path gets. CVaR cannot neutralize it because CVaR is evaluated AFTER the biased selection has already chosen return-redundant-but-apparently-diverse members; it cannot retroactively undo a member admitted on a phantom diversification signal. The penalty and CVaR are therefore NOT redundant (they play different roles), which is precisely why the significance floor is needed. Two experts converged independently on the same fix (Fisher-z / R(N) floor) — elevated to the panel&#x27;s #1 recommendation.</span></div>
+</div>
+<div class="card debate">
+  <h3>Is the DSR effective-trials count (cells*gens*windows) statistically incoherent?</h3>
+  <div class="field"><span class="flabel">Positions</span><span>Math#2 round-1: N and V are drawn from inconsistent populations — a false-accept path when the archive is homogeneous. SQR#1: the &#x27;right N&#x27; for illumination search is genuinely unsettled.</span></div>
+  <div class="field resolution"><span class="flabel">Resolution</span><span>Partially walked back. Math#2 verified QE-414 already estimates trial-variance V from ALL occupied cells (matching N&#x27;s cell factor), fixing cell-axis coherence; he explicitly withdrew &#x27;incoherent basis&#x27; and downgraded to &#x27;coherent on cells, conservative on gens/windows&#x27;. The residual issue — N still multiplies by gens*windows with no variance counterpart, and those are serial re-uses of one elite, not independent trials — errs in the CONSERVATIVE direction (over-deflates, false-reject), the safe direction for a promotion gate. Result: real tightening available (base N on occupied-niche count), but low urgency because it currently errs safe. This is a case where source verification during the debate softened a round-1 finding.</span></div>
+</div>
+<div class="card debate">
+  <h3>Is the missing per-indicator IC / regression step a correctness gap or a nice-to-have?</h3>
+  <div class="field"><span class="flabel">Positions</span><span>SQR#1: real gap — §4.8 treats IC (&#x27;does the signal even work, at what horizon&#x27;) as table stakes, and grep confirms none exists. Defender view (SQR#1&#x27;s own contested note): evolutionary band-selection is a legitimate non-parametric substitute that already handles sign-flip and thresholding, making explicit IC redundant.</span></div>
+  <div class="field resolution"><span class="flabel">Resolution</span><span>Left as an honest split. The panel adopts IC screening as a high-VALUE recommendation (it also shrinks effective search dimensionality and lowers the trial count DSR must deflate against) while explicitly flagging that its SEVERITY is contested — it is not a unanimous correctness defect the way the correlation-estimation gap is. Reported as consensus:&#x27;split&#x27; rather than papered over.</span></div>
+</div>
+<div class="card debate">
+  <h3>Should the repo claim it &#x27;exceeds&#x27; the 2008 book on Kelly?</h3>
+  <div class="field"><span class="flabel">Positions</span><span>Math#1 round-1: the repo EXCEEDS the baseline via empirical Kelly. Math#1&#x27;s own contested note and SQR#1: §6.4&#x27;s empirical method IS what the repo implements, so this is faithful implementation, not surpassing.</span></div>
+  <div class="field resolution"><span class="flabel">Resolution</span><span>Downgraded to &#x27;matches&#x27; for the Kelly OBJECTIVE specifically — log_growth = empirical E[ln(1+r)] is exactly §6.4&#x27;s recommended method, and §6.1&#x27;s mu/sigma^2 is only the Gaussian special case, so the repo faithfully implements the book&#x27;s best method rather than exceeding it. The repo genuinely EXCEEDS the book elsewhere (deflation, determinism, purge/embargo CV, tail objective, circuit breaker) — an honesty adjustment that keeps the &#x27;exceeds&#x27; credits credible by not overclaiming.</span></div>
+</div>
+  </section>
+
+  <section id="recs">
+    <h2><span class="num">5</span>What to adopt or improve — ranked</h2>
+    <p class="sec-note">Deduplicated and reconciled across all six experts, ranked by real payoff for a deterministic,
+    1h-bar, crypto-perp engine. High-priority items first.</p>
+    <div class="card rec" data-prio="high">
+  <div class="rec-head">
+    <div class="rank">#1</div>
+    <div class="rec-title-wrap">
+      <h3>Add a sample-size significance floor / Fisher-z shrinkage to the ensemble correlation penalty</h3>
+      <div class="badges"><span class="badge p-high">High priority</span><span class="badge eff">Effort: Small</span><span class="badge c-unan">Unanimous</span></div>
+    </div>
+  </div>
+  <div class="rec-body">
+    <div class="field"><span class="flabel">What</span><span>Before flooring/averaging, shrink each pairwise |r| below Dama&#x27;s R(N)=(e^{2Z}-1)/(e^{2Z}+1), Z=1.96/sqrt(N-3) to 0, or Fisher-z shrink with SE=1/sqrt(N-3) using the ACTUAL fold-slice length; expose the effective N alongside the penalty exactly as TailRisk already exposes tail_n.</span></div>
+    <div class="field"><span class="flabel">Why it matters</span><span>The single clearest statistical defect: the DE mask selects capital allocation by minimizing a raw Pearson over K(K-1)/2 pairs computed on t/4 fold slices, with none of the deflation the Sharpe path enjoys — Dama §6.2&#x27;s exact spurious-correlation machine. CVaR does not cover it because selection precedes the tail objective.</span></div>
+    <div class="field two"><div><span class="flabel">Book source</span><span class="mono">§6.2 &#x27;Spurious Correlation&#x27; (the R(N) minimum-significant-r curve) and method 3 (regularize toward identity).</span></div><div><span class="flabel">Repo change</span><span class="mono">crates/ensemble/src/objective.rs (pearson / positive_mean_pairwise_corr); slice length threaded from search.rs.</span></div></div>
+    <div class="dissent"><span class="dlabel">Debate / dissent</span>Two experts (Math#2, SQR#2) rated the current state a defect; some panel discussion of CVaR-redundancy was raised and rejected. No surviving dissent.</div>
+  </div>
+</div>
+<div class="card rec" data-prio="high">
+  <div class="rec-head">
+    <div class="rank">#2</div>
+    <div class="rec-title-wrap">
+      <h3>Calibrate half_spread and impact from real perp trade/quote data and ship as one content-addressed calibration vintage read by BOTH friction and capacity</h3>
+      <div class="badges"><span class="badge p-high">High priority</span><span class="badge eff">Effort: Medium</span><span class="badge c-unan">Unanimous</span></div>
+    </div>
+  </div>
+  <div class="rec-body">
+    <div class="field"><span class="flabel">What</span><span>Fit impact (exponent + coefficient) and half_spread on the venue&#x27;s own BTC/ETH-perp trade+quote history (aggressor side is in the perp feed — skip Lee-Ready), emit as a single content-addressed calibration vintage that friction.rs (per-contract), capacity.rs (per-dollar), and ideally the live VenueSimulator all read.</span></div>
+    <div class="field"><span class="flabel">Why it matters</span><span>The hardcoded impact_coeff (2e-9/$), friction impact (1e-4/contract) and 1bp half_spread are a load-bearing guess across four domains: they decide whether capacity binds (deployed-weight skew), whether a portfolio-Kelly pass levers into an unmeasured cost regime, and they are precisely the systematic per-trade cost bias DSR cannot deflate (PSR is absolute). One shared data input also removes the silent friction&lt;-&gt;capacity drift without breaking the search-portfolio code firewall.</span></div>
+    <div class="field two"><div><span class="flabel">Book source</span><span class="mono">§7.7 &#x27;Measuring Impact&#x27; (bin trades by size, fit impact = volume^beta).</span></div><div><span class="flabel">Repo change</span><span class="mono">crates/wfo/src/friction.rs, crates/ensemble/src/capacity.rs; new calibration vintage in the lineage model alongside CalibrationProfile.</span></div></div>
+    <div class="dissent"><span class="dlabel">Debate / dissent</span>Debate over whether data-dependence conflicts with the determinism ethos; resolved (SSE) — a fit on a pinned input is byte-reproducible and lineage-tracked, strictly more Dubno-faithful than a magic number.</div>
+  </div>
+</div>
+<div class="card rec" data-prio="high">
+  <div class="rec-head">
+    <div class="rank">#3</div>
+    <div class="rec-title-wrap">
+      <h3>Add an independent slow-reference oracle for the selection-critical numeric paths</h3>
+      <div class="badges"><span class="badge p-high">High priority</span><span class="badge eff">Effort: Medium</span><span class="badge c-unan">Unanimous</span></div>
+    </div>
+  </div>
+  <div class="rec-body">
+    <div class="field"><span class="flabel">What</span><span>Write a deliberately naive, INDEPENDENT reference for the reconstruct roll-up fold and the wfo cost-ledger/fitness path (recompute each coarse bar by an O(n) fresh window scan; recompute net-of-cost fitness with a dead-simple loop) and property-test optimized==reference over randomized inputs and seeds.</span></div>
+    <div class="field"><span class="flabel">Why it matters</span><span>Every current &#x27;parity&#x27; guarantee is same-code-vs-same-code: reproduce() re-runs one closure (determinism only) and reconstruct_batch drives the SAME reconstructor it is checked against (a tautology). A shared-fold logic bug in the fitness path mis-ranks every genome identically, reproduces byte-for-byte, and is baked into every vintage — and it silently corrupts the return series the entire DSR/PBO/SPA apparatus certifies. This is the one Dubno §5.5 principle the repo does not yet honor, and it is a precondition for statistical validity.</span></div>
+    <div class="field two"><div><span class="flabel">Book source</span><span class="mono">§5.5 &#x27;make a backtester that is slow but works, then optimize and verify results exactly match the slow version.&#x27;</span></div><div><span class="flabel">Repo change</span><span class="mono">crates/wfo/src/reconstruct.rs, crates/wfo/src/backtest.rs + friction.rs (add reference impls + property tests).</span></div></div>
+    <div class="dissent"><span class="dlabel">Debate / dissent</span>Minority &#x27;hand-computed goldens are good enough&#x27; view rejected — goldens cover fixed points, not the randomized space the optimizer searches.</div>
+  </div>
+</div>
+<div class="card rec" data-prio="high">
+  <div class="rec-head">
+    <div class="rank">#4</div>
+    <div class="rec-title-wrap">
+      <h3>Add a portfolio-level fractional (&lt;=1/2) empirical Kelly pass on the combined net PnL, clamped strictly below the hard leverage cap</h3>
+      <div class="badges"><span class="badge p-high">High priority</span><span class="badge eff">Effort: Medium</span><span class="badge c-maj">Majority</span></div>
+    </div>
+  </div>
+  <div class="rec-body">
+    <div class="field"><span class="flabel">What</span><span>After mask+capacity weights are fixed, solve f* = argmax mean ln(1+f*r_combined) on the realized combined net-of-cost series (reuse log_growth), apply a fractional multiple kappa in [0.3,0.5], and deploy as an advisory sizer scaling between 0 and the existing pretrade cap — never above it. Merge the two mathematicians&#x27; &#x27;kappa discount&#x27; and &#x27;portfolio pass&#x27; recs into one deliverable, recomputed per-vintage and ridden in the artifact like CalibrationProfile.</span></div>
+    <div class="field"><span class="flabel">Why it matters</span><span>The repo does §6.3 step 1 (mask-&gt;1/N-&gt;capacity) but never step 2; summed standalone Kellys are non-optimal under correlation and crypto&#x27;s dominant BTC-beta means positively-correlated members over-allocate the shared directional bet. Critically the pass is correlation-robust by construction (reads the realized joint path, estimates no covariance), so it also sidesteps the correlation-estimation gap. It can CUT as easily as raise leverage — empirical Kelly on a fat left tail (§6.4) comes out below Gaussian mu/sigma^2.</span></div>
+    <div class="field two"><div><span class="flabel">Book source</span><span class="mono">§6.3 (treat the portfolio as one strategy, apply Kelly to net PnL) + §6.4 (empirical Kelly for skewed/fat-tailed returns) + §6.5 (half-Kelly robustness).</span></div><div><span class="flabel">Repo change</span><span class="mono">cli/src/jobs/train.rs (weights), crates/ensemble/src/objective.rs, crates/hedger live_netter.rs; reuse crates/wfo fitness log_growth.</span></div></div>
+    <div class="dissent"><span class="dlabel">Debate / dissent</span>Risk purist argues stacked guards already deliver de-facto fractional Kelly and any f* sizer adds fat-tail fragility. Resolved: no guard discounts the SIZE coordinate for estimation error, and fractional+sub-cap is downward-capable insurance, not a leverage grab. Some question payoff for a book rarely near the cap — rebutted: it corrects the RELATIVE allocation under correlation regardless of absolute level.</div>
+  </div>
+</div>
+<div class="card rec" data-prio="high">
+  <div class="rec-head">
+    <div class="rank">#5</div>
+    <div class="rec-title-wrap">
+      <h3>Add per-indicator IC / information-horizon screening as a catalogue-admission pre-filter</h3>
+      <div class="badges"><span class="badge p-high">High priority</span><span class="badge eff">Effort: Medium</span><span class="badge c-split">Split</span></div>
+    </div>
+  </div>
+  <div class="rec-body">
+    <div class="field"><span class="flabel">What</span><span>Compute rank-IC and IC-by-horizon for each catalogue indicator against forward net returns, out-of-fold, on the training/CV span; drop or flag zero-IC factors before they enter the search.</span></div>
+    <div class="field"><span class="flabel">Why it matters</span><span>grep-confirmed there is no regression/IC/forward-return diagnostic anywhere; every indicator enters unconditionally and the genome discovers sign/threshold with no prior evidence the factor predicts forward return. Screening gives Dama&#x27;s table-stakes &#x27;does the signal even work, at what horizon&#x27; AND shrinks effective search dimensionality — fewer dead factors to select over directly lowers the cells*gens*windows count DSR must deflate against.</span></div>
+    <div class="field two"><div><span class="flabel">Book source</span><span class="mono">§4.8 &#x27;Regression&#x27; (IC, sign-flip, unit conversion) and §4.10 checklist &#x27;information horizon&#x27;.</span></div><div><span class="flabel">Repo change</span><span class="mono">crates/signal (catalogue admission / reporting layer) or crates/validation.</span></div></div>
+    <div class="dissent"><span class="dlabel">Debate / dissent</span>Defenders argue evolutionary band-selection is a legitimate non-parametric substitute for explicit IC (handles sign-flip and thresholding), making this a nice-to-have diagnostic rather than a correctness defect. SQR#1 holds it a real gap with the highest single-repo payoff. Panel reports the split honestly — adopt as high-value, acknowledge severity is contested.</div>
+  </div>
+</div>
+<div class="card rec" data-prio="medium">
+  <div class="rec-head">
+    <div class="rank">#6</div>
+    <div class="rec-title-wrap">
+      <h3>Close the train-backtest &lt;-&gt; live execution/money-model parity gap</h3>
+      <div class="badges"><span class="badge p-med">Medium priority</span><span class="badge eff">Effort: Large</span><span class="badge c-unan">Unanimous</span></div>
+    </div>
+  </div>
+  <div class="rec-body">
+    <div class="field"><span class="flabel">What</span><span>Route the wfo backtest&#x27;s fills through the same VenueSimulator/plan_delta the live edge uses, OR add an oracle test asserting wfo friction cost for (side, qty, mark, spread) equals the VenueSimulator fill for identical inputs. Fold in the §7.7 calibration vintage so both price the same money.</span></div>
+    <div class="field"><span class="flabel">Why it matters</span><span>Archive selection rides on net-of-friction log_growth, so the MONEY model — not just the decision — must match live. Today only Genome::decide/PositionState::advance are shared; fills/costs/sizing are two independent implementations. A genome tuned to the wfo linear-slippage ledger can be selected and sized on fills it never gets live. Same defect class as the equal-weight-scored / capacity-weight-deployed inconsistency.</span></div>
+    <div class="field two"><div><span class="flabel">Book source</span><span class="mono">§5.5 &#x27;backtesting on recorded data should produce the same results as the live run.&#x27;</span></div><div><span class="flabel">Repo change</span><span class="mono">crates/wfo/src/backtest.rs vs crates/hedger + crates/edge (VenueSimulator).</span></div></div>
+    <div class="dissent"><span class="dlabel">Debate / dissent</span>&#x27;Immaterial at 1h frequency&#x27; rejected as the same assume-it-away move the deployed-weight gap makes; fix by proving the optimized object equals the deployed one, not by betting the divergence is small.</div>
+  </div>
+</div>
+<div class="card rec" data-prio="medium">
+  <div class="rec-head">
+    <div class="rank">#7</div>
+    <div class="rec-title-wrap">
+      <h3>Add an in-search parsimony (MDL) penalty and decouple size discovery from rule discovery</h3>
+      <div class="badges"><span class="badge p-med">Medium priority</span><span class="badge eff">Effort: Small</span><span class="badge c-maj">Majority</span></div>
+    </div>
+  </div>
+  <div class="rec-body">
+    <div class="field"><span class="flabel">What</span><span>Subtract a small cost per enabled clause / distinct referenced feature in the selection fitness or the lifecycle lower-bound (tie-break toward parsimony at equal robust fitness); and either two-stage the search (discover rules under a size-normalized/unit-risk fitness, THEN solve f*) or add an alpha-quality term so leverage cannot substitute for edge inside a niche.</span></div>
+    <div class="field"><span class="flabel">Why it matters</span><span>Nothing in fitness.rs, lifecycle.rs, or regularise.rs (which is behavioral novelty, not complexity) rewards fewer clauses/features, so a 1-clause and a 4-clause genome compete on fitness alone and search drifts to maximal complexity over correlated indicators. Because size_bps co-evolves under the same log_growth scalar, the illumination cannot distinguish real edge from tolerable edge levered up — operationalizing Dama&#x27;s &#x27;fewer parameters&#x27; INSIDE the search closes both.</span></div>
+    <div class="field two"><div><span class="flabel">Book source</span><span class="mono">§5.4 &#x27;better to have fewer parameters than many&#x27; + §4.9 Voodoo Spectrum (variable selection at the dangerous end).</span></div><div><span class="flabel">Repo change</span><span class="mono">crates/wfo/src/fitness.rs, crates/wfo lifecycle.rs, crates/signal genome.rs.</span></div></div>
+    <div class="dissent"><span class="dlabel">Debate / dissent</span>Minority holds downstream DSR/PBO already punish over-complex genomes; majority wants parsimony operationalized in-search rather than only caught post-hoc.</div>
+  </div>
+</div>
+<div class="card rec" data-prio="medium">
+  <div class="rec-head">
+    <div class="rank">#8</div>
+    <div class="rec-title-wrap">
+      <h3>Gate G1 on the already-computed PBO</h3>
+      <div class="badges"><span class="badge p-med">Medium priority</span><span class="badge eff">Effort: Small</span><span class="badge c-unan">Unanimous</span></div>
+    </div>
+  </div>
+  <div class="rec-body">
+    <div class="field"><span class="flabel">What</span><span>Add a pre-registered criterion pbo &lt; 0.5 to G1Criteria and evaluate_g1.</span></div>
+    <div class="field"><span class="flabel">Why it matters</span><span>pbo.rs is a faithful CSCV and RobustnessReport.pbo is recorded, but evaluate_g1 gates only on holdout Sharpe, DSR, SPA p-value and OOS-tolerance — never reads pbo. The most direct backtest-overfitting probability the book&#x27;s §5.4 concern maps to is decorative. Zero new math; the value already exists.</span></div>
+    <div class="field two"><div><span class="flabel">Book source</span><span class="mono">§5.4 (overfitting is the central risk; PBO is its most direct probability).</span></div><div><span class="flabel">Repo change</span><span class="mono">crates/gate/src/lib.rs (G1Criteria, evaluate_g1).</span></div></div>
+    <div class="dissent"><span class="dlabel">Debate / dissent</span>Noted mild redundancy with DSR/holdout, not a reason to leave a computed overfit probability unused.</div>
+  </div>
+</div>
+<div class="card rec" data-prio="medium">
+  <div class="rec-head">
+    <div class="rank">#9</div>
+    <div class="rec-title-wrap">
+      <h3>Score the DE membership objective on the actual deployed (capacity-capped) weight vector, not equal-weight</h3>
+      <div class="badges"><span class="badge p-med">Medium priority</span><span class="badge eff">Effort: Small</span><span class="badge c-maj">Majority</span></div>
+    </div>
+  </div>
+  <div class="rec-body">
+    <div class="field"><span class="flabel">What</span><span>Thread the deployed weight vector (capacity-capped, and inverse-vol if adopted) into combined_returns during scoring, reusing the weighted_combined already present in stress.rs.</span></div>
+    <div class="field"><span class="flabel">Why it matters</span><span>Membership is optimized on equal-weight combined_returns but deployed under capacity-capped non-1/N weights; when caps bind (a turnover-2, 0.1%-edge member caps ~$100k, a 5x haircut at $1M) the selected set is no longer provably optimal for the book that runs. Whether it bites is itself a function of the guessed impact coefficient — fixing rec #2 makes this answerable. Same &#x27;optimize-X-deploy-Y&#x27; class as the execution-parity gap.</span></div>
+    <div class="field two"><div><span class="flabel">Book source</span><span class="mono">§6.3 (select and deploy the same weighted object).</span></div><div><span class="flabel">Repo change</span><span class="mono">crates/ensemble/src/objective.rs (combined_returns), reuse stress.rs weighted_combined.</span></div></div>
+    <div class="dissent"><span class="dlabel">Debate / dissent</span>&#x27;Moot if caps rarely bind at target AUM&#x27; — but the cheap fix removes the need to argue how often caps bind, and Trading confirmed binding is real for high-turnover members.</div>
+  </div>
+</div>
+<div class="card rec" data-prio="medium">
+  <div class="rec-head">
+    <div class="rank">#10</div>
+    <div class="rec-title-wrap">
+      <h3>Make the DSR deflation basis coherent on the gens/windows axis</h3>
+      <div class="badges"><span class="badge p-med">Medium priority</span><span class="badge eff">Effort: Medium</span><span class="badge c-maj">Majority</span></div>
+    </div>
+  </div>
+  <div class="rec-body">
+    <div class="field"><span class="flabel">What</span><span>Derive an effective independent-trials count from the trial autocorrelation structure (bounded by the number of occupied/behaviorally-distinct niches, since Deep-Grid deliberately correlates within a cell) rather than the raw cells*gens*windows product; or use the BdP analytic per-trial Sharpe variance so N and V share one population on every axis.</span></div>
+    <div class="field"><span class="flabel">Why it matters</span><span>QE-414 fixed cell-axis coherence (V from full occupied-cell champions), but N still multiplies by generations*windows — serial mutations of one persistent elite and re-evaluations of one strategy are not independent trials. Currently errs conservative (over-deflates, false-reject), so low urgency, but the count is not a defensible independent-trials number.</span></div>
+    <div class="field two"><div><span class="flabel">Book source</span><span class="mono">§5.4 / §6.2 (few observations =&gt; optimistic selection); Bailey-Lopez de Prado DSR.</span></div><div><span class="flabel">Repo change</span><span class="mono">crates/validation/src/dsr.rs (effective_trials), cli/src/jobs/train.rs:429.</span></div></div>
+    <div class="dissent"><span class="dlabel">Debate / dissent</span>Math#2 explicitly downgraded round-1 &#x27;incoherent basis&#x27; to &#x27;conservative on gens/windows&#x27; after verifying QE-414 — this is a tightening, not a live risk. SQR#1 co-signs the niche-count basis.</div>
+  </div>
+</div>
+<div class="card rec" data-prio="medium">
+  <div class="rec-head">
+    <div class="rank">#11</div>
+    <div class="rec-title-wrap">
+      <h3>Move the impact model to concave square-root-in-participation and add a rolling ADV input</h3>
+      <div class="badges"><span class="badge p-med">Medium priority</span><span class="badge eff">Effort: Medium</span><span class="badge c-maj">Majority</span></div>
+    </div>
+  </div>
+  <div class="rec-body">
+    <div class="field"><span class="flabel">What</span><span>Replace cost = notional*(half_spread + impact*qty) with impact proportional to (qty/ADV)^beta, beta ~ 0.2-0.5; add a rolling hourly ADV (currently absent — no %ADV anywhere) so the coefficient is dimensionless, asset-portable, and shared between friction and capacity.</span></div>
+    <div class="field"><span class="flabel">Why it matters</span><span>§7.7&#x27;s single-curve collapse shows impact is concave/square-root; the convex (quadratic-total) form overstates large-order cost (conservative on friction) but UNDER-states capacity, cannot be reconciled with any measured impact, and forces asset-specific per-contract coefficients. The CLI already advertises a &#x27;square-root-impact&#x27; contract tag while the engine runs linear — this closes that gap. Pairs naturally with the rec #2 calibration.</span></div>
+    <div class="field two"><div><span class="flabel">Book source</span><span class="mono">§7.1 (depth/impact) and §7.7 (impact = volume^beta, beta&lt;1).</span></div><div><span class="flabel">Repo change</span><span class="mono">crates/wfo/src/friction.rs, crates/ensemble/src/capacity.rs; ingest ADV.</span></div></div>
+    <div class="dissent"><span class="dlabel">Debate / dissent</span>Math#1 notes for the SIZE coordinate at near-zero participation the mis-shape is second-order and safe-direction, so ranks it below fractional/portfolio-Kelly for sizing payoff; it bites mainly in capacity.</div>
+  </div>
+</div>
+<div class="card rec" data-prio="medium">
+  <div class="rec-head">
+    <div class="rank">#12</div>
+    <div class="rec-title-wrap">
+      <h3>Inject bar-level scenario shocks into the single-strategy sizing fitness (tail-aware Kelly), with seeded/content-addressed shocks</h3>
+      <div class="badges"><span class="badge p-med">Medium priority</span><span class="badge eff">Effort: Small</span><span class="badge c-maj">Majority</span></div>
+    </div>
+  </div>
+  <div class="rec-body">
+    <div class="field"><span class="flabel">What</span><span>Inject bounded synthetic gap/funding-spike/ADL shocks at the PRICE/bar level in backtest.rs BEFORE size_frac scales the notional — NOT appended to the post-size return series (which only trips the -inf ruin absorber and rejects every genome uniformly). Draw shocks from the seeded portable RNG and pin the shock set as content-addressed.</span></div>
+    <div class="field"><span class="flabel">Why it matters</span><span>The single-strategy log_growth that sets size_bps sees only the raw historical net path, fitting leverage to crypto&#x27;s empirically thin crash sample; the ensemble stress overlay exists but never reaches the size-setting fitness. Bar-level injection lets a larger size produce a larger drawdown, so log_growth self-selects a lower, tail-aware leverage — Dama&#x27;s imaginary-PnL-before-optimizing-f done correctly.</span></div>
+    <div class="field two"><div><span class="flabel">Book source</span><span class="mono">§6.1 (add imaginary/Black-Swan PnLs in proportion to frequency before optimizing f) + §6.4 (heavy left tail pulls Kelly down).</span></div><div><span class="flabel">Repo change</span><span class="mono">crates/wfo/src/backtest.rs (price path), reuse crates/ensemble stress.rs shocks; crates/determinism/rng.rs seeding.</span></div></div>
+    <div class="dissent"><span class="dlabel">Debate / dissent</span>Math#2 warns the shock severity/frequency become un-deflated researcher DOF — mandatory mitigation: freeze/pre-register the shock set per vintage. SSE adds it MUST be seeded or it voids byte-reproducibility.</div>
+  </div>
+</div>
+<div class="card rec" data-prio="medium">
+  <div class="rec-head">
+    <div class="rank">#13</div>
+    <div class="rec-title-wrap">
+      <h3>Make signal combination graded (probability surface) rather than hard-boolean k-of-n</h3>
+      <div class="badges"><span class="badge p-med">Medium priority</span><span class="badge eff">Effort: Large</span><span class="badge c-maj">Majority</span></div>
+    </div>
+  </div>
+  <div class="rec-body">
+    <div class="field"><span class="flabel">What</span><span>Use the quantiser&#x27;s ordinal QState (distance into band, or count of satisfied clauses) as a graded conviction feeding entry strength and/or size_bps, instead of collapsing it to a bool in RuleSet::fires.</span></div>
+    <div class="field"><span class="flabel">Why it matters</span><span>The ordinal strength the quantiser already computes is discarded at the decision boundary — two genomes fire identically whether a feature barely clears its band or sits deep in it. Dubno&#x27;s dictum is &#x27;signals should be probability surfaces in price and time.&#x27; Graded conviction reduces band-edge sensitivity (an overfitting surface of its own) and carries information into sizing.</span></div>
+    <div class="field two"><div><span class="flabel">Book source</span><span class="mono">§5.5 Dubno (&#x27;probability surfaces&#x27;) + §4.8 (signals as continuous strengths).</span></div><div><span class="flabel">Repo change</span><span class="mono">crates/signal genome.rs (RuleSet::fires -&gt; graded), entry/size path.</span></div></div>
+    <div class="dissent"><span class="dlabel">Debate / dissent</span>Real but medium payoff at 1h cadence; ranked below the IC and correlation/DSR fixes.</div>
+  </div>
+</div>
+<div class="card rec" data-prio="medium">
+  <div class="rec-head">
+    <div class="rank">#14</div>
+    <div class="rec-title-wrap">
+      <h3>Seed member weights with inverse-vol (EWMA) risk parity, then apply the existing capacity water-fill</h3>
+      <div class="badges"><span class="badge p-med">Medium priority</span><span class="badge eff">Effort: Medium</span><span class="badge c-split">Split</span></div>
+    </div>
+  </div>
+  <div class="rec-body">
+    <div class="field"><span class="flabel">What</span><span>Seed weights with inverse-vol using a single EWMA variance decay constant (low-parameter, deterministic), then let capacity cap_weights layer on top; optionally add a single-factor BTC-beta neutralization.</span></div>
+    <div class="field"><span class="flabel">Why it matters</span><span>Pure 1/N ignores §6.2&#x27;s own argument that unequal weights cancel risk better when volatilities differ; capacity caps for turnover, not volatility, so a high-vol member dominates the combined tail at 1/N. A strong shared BTC-beta also concentrates members&#x27; participation into the same bars, so per-strategy capacity under-counts aggregate impact — a one-factor view helps correct aggregate impact accounting.</span></div>
+    <div class="field two"><div><span class="flabel">Book source</span><span class="mono">§6.2 two-strategy MV (unequal risk =&gt; unequal weights) + method 10 (variance is predictable via short EWMA).</span></div><div><span class="flabel">Repo change</span><span class="mono">crates/hedger/src/bootstrap.rs, evaluator.rs; crates/ensemble weighting.</span></div></div>
+    <div class="dissent"><span class="dlabel">Debate / dissent</span>Genuine trade-off, not a clear win: §6.2 method 9 endorses 1/N as OOS-robust and inverse-vol reintroduces an estimated variance. Panel: seed only, medium priority, do NOT present as strictly superior; full RMT/Barra correctly omitted as dimensionality-mismatched.</div>
+  </div>
+</div>
+<div class="card rec" data-prio="medium">
+  <div class="rec-head">
+    <div class="rank">#15</div>
+    <div class="rec-title-wrap">
+      <h3>Add a decision-to-fill alpha-loss (implementation-shortfall) term to friction</h3>
+      <div class="badges"><span class="badge p-med">Medium priority</span><span class="badge eff">Effort: Medium</span><span class="badge c-maj">Majority</span></div>
+    </div>
+  </div>
+  <div class="rec-body">
+    <div class="field"><span class="flabel">What</span><span>Measure realized bar-close (decision) vs next-bar-open (fill) directional drift on the live/shadow path and fold it into friction as an explicit directional slippage term (not just symmetric half-spread), routed through the shared calibration vintage.</span></div>
+    <div class="field"><span class="flabel">Why it matters</span><span>The backtest fills the whole delta at next-bar open with only a static half_spread; if the signal&#x27;s own edge leaks into the close-&gt;open gap, net returns are optimistically biased. This is the one piece of §7.3 that applies at 1h without any TWAP/VWAP machinery, and it is the natural home for the execution-parity fix.</span></div>
+    <div class="field two"><div><span class="flabel">Book source</span><span class="mono">§7.3 Alpha Loss (profit absorbed between signal and fill).</span></div><div><span class="flabel">Repo change</span><span class="mono">crates/wfo/src/friction.rs, live/shadow measurement path.</span></div></div>
+    <div class="dissent"><span class="dlabel">Debate / dissent</span>Trading expert notes generally conservative if omitted; medium not high.</div>
+  </div>
+</div>
+<div class="card rec" data-prio="medium">
+  <div class="rec-head">
+    <div class="rank">#16</div>
+    <div class="rec-title-wrap">
+      <h3>Extend re-run-twice into a permuted-parallelism determinism test</h3>
+      <div class="badges"><span class="badge p-med">Medium priority</span><span class="badge eff">Effort: Small</span><span class="badge c-unan">Unanimous</span></div>
+    </div>
+  </div>
+  <div class="rec-body">
+    <div class="field"><span class="flabel">What</span><span>Run a stochastic stage (MAP-Elites generation or the DE ensemble search) twice with DIFFERENT rayon thread-pool sizes and assert byte-identical artifacts.</span></div>
+    <div class="field"><span class="flabel">Why it matters</span><span>reproduce() re-runs under the same conditions and never varies thread count, so it does not actively exercise the scheduling-independence property task_rng is designed for. This turns a design intent into an enforced invariant and guards the exact property that lets the powerful search be trusted.</span></div>
+    <div class="field two"><div><span class="flabel">Book source</span><span class="mono">§5.5 (control 100% of state for reproducibility).</span></div><div><span class="flabel">Repo change</span><span class="mono">crates/determinism harness.rs.</span></div></div>
+    <div class="dissent"><span class="dlabel">Debate / dissent</span>None; SSE-originated, uncontested.</div>
+  </div>
+</div>
+<div class="card rec" data-prio="low">
+  <div class="rec-head">
+    <div class="rank">#17</div>
+    <div class="rec-title-wrap">
+      <h3>Report strategy-level max/avg drawdown at the lifecycle graduation gate</h3>
+      <div class="badges"><span class="badge p-low">Low priority</span><span class="badge eff">Effort: Small</span><span class="badge c-unan">Unanimous</span></div>
+    </div>
+  </div>
+  <div class="rec-body">
+    <div class="field"><span class="flabel">What</span><span>Attach a max-drawdown (or CDaR) statistic to the per-strategy record and add an optional drawdown ceiling to the graduation gate.</span></div>
+    <div class="field"><span class="flabel">Why it matters</span><span>log_growth penalizes terminal ruin but is indifferent to intermediate max-drawdown at a fixed size, and lifecycle.rs graduates on the log-growth lower bound with no drawdown term — a high-growth/deep-drawdown genome can graduate on growth alone before the ensemble&#x27;s CVaR/CDaR ever sees it.</span></div>
+    <div class="field two"><div><span class="flabel">Book source</span><span class="mono">§5.5 Dubno (&#x27;maximum and average drawdown are better objectives than Sharpe&#x27;).</span></div><div><span class="flabel">Repo change</span><span class="mono">crates/wfo lifecycle.rs (QualityGate).</span></div></div>
+    <div class="dissent"><span class="dlabel">Debate / dissent</span>Largely mitigated by the ensemble tail objective; residual risk only for a single graduated strategy — low priority by agreement.</div>
+  </div>
+</div>
+<div class="card rec" data-prio="low">
+  <div class="rec-head">
+    <div class="rank">#18</div>
+    <div class="rec-title-wrap">
+      <h3>Add a pre-trade %ADV participation guard</h3>
+      <div class="badges"><span class="badge p-low">Low priority</span><span class="badge eff">Effort: Small</span><span class="badge c-unan">Unanimous</span></div>
+    </div>
+  </div>
+  <div class="rec-body">
+    <div class="field"><span class="flabel">What</span><span>Compute rolling hourly ADV and reject/flag any delta-close order exceeding a configured %ADV in pretrade.</span></div>
+    <div class="field"><span class="flabel">Why it matters</span><span>There is no ADV concept anywhere and no participation guardrail; at current AUM participation is ~0 so this is latent, but it only bites when AUM grows or liquidity thins in a stress regime — exactly when it matters. Cheap safety rail that also sanity-checks capacity.</span></div>
+    <div class="field two"><div><span class="flabel">Book source</span><span class="mono">§7 intro (participation = %ADV; 1% is already high).</span></div><div><span class="flabel">Repo change</span><span class="mono">crates/hedger pretrade.</span></div></div>
+    <div class="dissent"><span class="dlabel">Debate / dissent</span>Latent, not a current defect.</div>
+  </div>
+</div>
+<div class="card rec" data-prio="low">
+  <div class="rec-head">
+    <div class="rank">#19</div>
+    <div class="rec-title-wrap">
+      <h3>Correct the SPA label and document the biases deflation cannot see</h3>
+      <div class="badges"><span class="badge p-low">Low priority</span><span class="badge eff">Effort: Small</span><span class="badge c-unan">Unanimous</span></div>
+    </div>
+  </div>
+  <div class="rec-body">
+    <div class="field"><span class="flabel">What</span><span>Relabel spa.rs as White&#x27;s Reality Check (it recenters all k models = SPA-lower), or implement Hansen&#x27;s model-omission recentring (sqrt(2 log log T)) to recover power; separately assert point-in-time / survivorship-safe universe provenance in the vintage lineage SHA and document that DSR/PBO/SPA correct for SELECTION, not per-trade optimistic bias.</span></div>
+    <div class="field"><span class="flabel">Why it matters</span><span>The module claims &#x27;Hansen&#x27;s SPA&#x27; while omitting Hansen&#x27;s defining contribution, so it is conservative but under-powered and mislabeled. DSR is absolute (vs noise ceiling), so any systematic cost/adverse-selection/survivorship bias flows through undeflated — worth documenting as a known boundary.</span></div>
+    <div class="field two"><div><span class="flabel">Book source</span><span class="mono">Hansen 2005 SPA; §5.3 Survivorship/Adverse Selection/Transaction Costs.</span></div><div><span class="flabel">Repo change</span><span class="mono">crates/validation/src/spa.rs; vintage lineage docs.</span></div></div>
+    <div class="dissent"><span class="dlabel">Debate / dissent</span>Safe direction; purely a power/clarity fix by agreement.</div>
+  </div>
+</div>
+<div class="card rec" data-prio="low">
+  <div class="rec-head">
+    <div class="rank">#20</div>
+    <div class="rec-title-wrap">
+      <h3>Guard the unused maker rate against future adverse-selection blindness</h3>
+      <div class="badges"><span class="badge p-low">Low priority</span><span class="badge eff">Effort: Small</span><span class="badge c-unan">Unanimous</span></div>
+    </div>
+  </div>
+  <div class="rec-body">
+    <div class="field"><span class="flabel">What</span><span>Document that the FeeSchedule maker rate must not be used without a paired adverse-selection markout; if post-only orders are ever added to harvest the maker/taker gap, model an expected fill-conditional adverse drift alongside.</span></div>
+    <div class="field"><span class="flabel">Why it matters</span><span>The engine is a confirmed pure taker (no post_only/OrderType in edge or hedger), so adverse selection is a non-issue today — but the 2bp maker rate sitting in FeeSchedule reads as a free rebate. A future maker-rebate optimization would look profitable in backtest while losing to adverse selection live (a classic §7.6 trap), and the inflated Sharpe would pass DSR undeflated.</span></div>
+    <div class="field two"><div><span class="flabel">Book source</span><span class="mono">§7.6 (maker fills carry adverse selection that outweighs the collected spread).</span></div><div><span class="flabel">Repo change</span><span class="mono">FeeSchedule docs; friction.rs if post-only added.</span></div></div>
+    <div class="dissent"><span class="dlabel">Debate / dissent</span>Latent trap to guard, not a current defect — Math#2 and Trading agree.</div>
+  </div>
+</div>
+  </section>
+
+  <footer>
+    <p>Generated by a 13-agent debate workflow (6 specialists × 2 rounds + chair). Each claim was grounded in specific
+    repo files and specific Max Dama sections; verdicts reflect the reconciled panel position, and dissents are preserved
+    where consensus was not reached. This is an analytical review, not a change to the codebase.</p>
+    <p><a class="toplink" href="#verdict">↑ Back to top</a></p>
+  </footer>
+</div>
+
+<script>
+  // honor a host theme toggle if present; otherwise follow prefers-color-scheme (handled in CSS)
+  try {
+    var t = document.documentElement.getAttribute('data-theme');
+    if(!t) { /* leave to media query */ }
+  } catch(e) {}
+</script>
+</body>
+</html>
