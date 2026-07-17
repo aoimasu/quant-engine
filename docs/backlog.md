@@ -295,7 +295,6 @@ _All R1.c tickets delivered — see [`reviewed/`](mds/reviewed/)._
 
 | Ticket | Title | Depends on | Status |
 |--------|-------|------------|:------:|
-| [QE-430](./reviews/2026-07-16-maxdama-panel-review.md#qe-430) | Deflate the ensemble correlation penalty by sample size — R(N) floor / Fisher-z shrinkage  *(P1 — statistical correctness; panel #1, unanimous)* | QE-115, QE-126 | — |
 | [QE-431](./reviews/2026-07-16-maxdama-panel-review.md#qe-431) | Calibrate slippage `half_spread`+`impact` from venue data as one content-addressed input shared by friction & capacity  *(P1 — net-of-cost truth; panel #2, unanimous)* | QE-109, QE-128, QE-116, QE-129, QE-006 | — |
 | [QE-432](./reviews/2026-07-16-maxdama-panel-review.md#qe-432) | Independent slow-reference oracle for the reconstruct roll-up & net-of-cost fitness paths  *(P1 — precondition for statistical validity; panel #3, unanimous)* | QE-106, QE-120, QE-109, QE-006 | — |
 | [QE-433](./reviews/2026-07-16-maxdama-panel-review.md#qe-433) | Portfolio-level fractional (≤½) empirical-Kelly sizing pass on combined net PnL  *(P2 — before scaling capital; panel #4, majority)* | QE-113, QE-126, QE-215, QE-219, QE-431 | — |
