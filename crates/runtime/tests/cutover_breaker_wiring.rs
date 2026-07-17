@@ -123,6 +123,7 @@ fn vintage_with_partial_calibration() -> Vintage {
         weights: vec![0.5, 0.5],
         calibration,
         slippage: qe_risk::SlippageCalibration::default(),
+        sizer: qe_risk::PortfolioSizer::default(),
         worst_case_loss: None,
         catalogue: qe_signal::CatalogueIdentity::current(),
         lineage: Lineage::new("cfg", "snap", "commit", vec![]),

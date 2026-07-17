@@ -24,6 +24,7 @@
 use rust_decimal::Decimal;
 
 use qe_domain::Direction;
+use qe_risk::PortfolioSizer;
 use qe_signal::PositionState;
 
 /// Basis points per whole — `size_bps` is basis points of allowed capital.
@@ -150,6 +151,58 @@ impl PositionNetter {
             .collect();
         Self::net(&legs)
     }
+
+    /// Net the post-breaker `positions` against the vintage `weights`/`sizes`, then apply the vintage's
+    /// **advisory portfolio-Kelly sizer** (QE-433): scale the whole netted book (`net`/`long`/`short`) by
+    /// `sizer.multiplier()`, then clamp the resulting **net leverage** into `[0, leverage_cap]` so the
+    /// advisory size **never exceeds** the pretrade cap.
+    ///
+    /// `NetTarget::net` is a fraction of allowed capital, and the planner sets `notional = net × equity`,
+    /// so `|net|` *is* the net leverage — the same unit the pretrade `MaxLeverage` cap
+    /// ([`crate::pretrade`]) is expressed in, which is what lets the sizer clamp here in leverage units.
+    /// The hard cap in `pretrade.rs` is unchanged and remains the backstop; `leverage_cap = None` skips the
+    /// advisory clamp (the backstop still applies downstream).
+    ///
+    /// A `PortfolioSizer::default()` multiplier of `1.0` with `leverage_cap = None` reproduces
+    /// [`net_positions`](Self::net_positions) exactly (the pre-QE-433 sizing).
+    #[must_use]
+    pub fn net_positions_sized(
+        positions: &[PositionState],
+        weights: &[f64],
+        sizes: &[u16],
+        sizer: &PortfolioSizer,
+        leverage_cap: Option<Decimal>,
+    ) -> NetTarget {
+        let base = Self::net_positions(positions, weights, sizes);
+        Self::apply_sizer(base, sizer, leverage_cap)
+    }
+
+    /// Scale a netted `base` by the advisory Kelly `sizer`, then clamp `|net|` below `leverage_cap`.
+    /// Pure `Decimal` arithmetic — no `unwrap`/`expect`/`panic` (this is the QE-268 order-emission path).
+    #[must_use]
+    fn apply_sizer(
+        base: NetTarget,
+        sizer: &PortfolioSizer,
+        leverage_cap: Option<Decimal>,
+    ) -> NetTarget {
+        let m = sizer.multiplier(); // ≥ 0 by construction
+        let mut net = base.net * m;
+        let mut long = base.long * m;
+        let mut short = base.short * m;
+        if let Some(cap) = leverage_cap {
+            let cap = cap.max(Decimal::ZERO);
+            let mag = net.abs();
+            // Clamp the net leverage to the cap, scaling the whole book uniformly so the per-side split
+            // stays proportional. `mag > cap ≥ 0` ⇒ `mag > 0`, so the division is always safe.
+            if mag > cap {
+                let factor = cap / mag;
+                net *= factor;
+                long *= factor;
+                short *= factor;
+            }
+        }
+        NetTarget { net, long, short }
+    }
 }
 
 #[cfg(test)]
@@ -157,7 +210,10 @@ mod tests {
     use super::*;
     use crate::evaluator::ChromosomeDecision;
     use crate::live_breakers::BreakerLayer;
-    use qe_risk::{BreakerThresholds, Fraction, DEFAULT_FAST_WINDOW};
+    use crate::pretrade::{PreTradeGovernor, PreTradeVerdict};
+    use qe_domain::Notional;
+    use qe_risk::{BreakerThresholds, Fraction, Leverage, RiskLimits, DEFAULT_FAST_WINDOW};
+    use qe_runtime_core::{CapitalView, TargetPosition};
     use qe_signal::Decision;
     use std::str::FromStr;
 
@@ -303,5 +359,100 @@ mod tests {
         // from the `f64` weight `0.25` nets identically to one built from the `Decimal` literal `0.25`.
         let via_f64 = NetLeg::from_position(PositionState::held(Direction::Long, 0), 0.25, 400);
         assert_eq!(via_f64.signed_target(), base.signed_target());
+    }
+
+    /// QE-433 AC1 (cut): a fractional-Kelly multiplier `< 1` (the fat-left-tail / positive-correlation
+    /// outcome) scales the netted leverage **below** the naive summed size, uniformly across the book.
+    #[test]
+    fn sizer_cuts_netted_leverage() {
+        // Two long members: naive summed net = 0.5·0.02 + 0.5·0.02 = 0.02 (2% leverage).
+        let positions = [
+            PositionState::held(Direction::Long, 1),
+            PositionState::held(Direction::Long, 1),
+        ];
+        let weights = [0.5_f64, 0.5];
+        let sizes = [200_u16, 200];
+        let naive = PositionNetter::net_positions(&positions, &weights, &sizes);
+        assert_eq!(naive.net, d("0.02"));
+
+        // Fractional Kelly on a fat-left-tail combined series → multiplier 0.4 → cut.
+        let sizer = PortfolioSizer::new(d("0.4"));
+        let sized = PositionNetter::net_positions_sized(&positions, &weights, &sizes, &sizer, None);
+        assert!(
+            sized.net < naive.net,
+            "sizer must cut the netted leverage below the naive summed size: {} !< {}",
+            sized.net,
+            naive.net
+        );
+        assert_eq!(sized.net, d("0.008")); // 0.02 · 0.4
+        assert_eq!(sized.long, naive.long * d("0.4"));
+        assert_eq!(sized.short, Decimal::ZERO);
+    }
+
+    /// QE-433 AC1 (never exceeds cap): even an aggressive multiplier is clamped so the net leverage never
+    /// exceeds the pretrade cap — and the clamp is in the same leverage units the real
+    /// [`PreTradeGovernor`] `MaxLeverage` cap enforces, so the sized target passes the governor at the cap.
+    #[test]
+    fn sizer_never_exceeds_pretrade_cap() {
+        let positions = [PositionState::held(Direction::Long, 1)];
+        let weights = [1.0_f64];
+        let sizes = [500_u16]; // naive net = 0.05 (5% leverage)
+        let cap = d("0.10"); // max_leverage 0.10
+
+        // A multiplier that would raise leverage to 0.05·5 = 0.25 is clamped down to the cap.
+        let sizer = PortfolioSizer::new(d("5"));
+        let sized =
+            PositionNetter::net_positions_sized(&positions, &weights, &sizes, &sizer, Some(cap));
+        assert_eq!(sized.net.abs(), cap, "net leverage is clamped to the cap");
+        assert!(
+            sized.net.abs() <= cap,
+            "the advisory size never exceeds the cap"
+        );
+
+        // Cross-check against the REAL pretrade cap: plan the sized net into a notional and run the
+        // governor. `notional = net × equity`, `MaxLeverage` caps `|notional| ≤ cap × equity`, so a target
+        // sized exactly at the cap is sent unchanged with no leverage breach — the hard cap is the backstop.
+        let equity = d("100000");
+        let notional = sized.net * equity; // 0.10 · 100_000 = 10_000
+        let gov = PreTradeGovernor::new(
+            RiskLimits {
+                max_leverage: Some(Leverage::new(cap).unwrap()),
+                ..RiskLimits::default()
+            },
+            Fraction::new(Decimal::ZERO).unwrap(),
+        );
+        let decision = gov.check(
+            TargetPosition::single(Notional::new(notional)),
+            CapitalView {
+                equity: Notional::new(equity),
+                available_margin: Notional::new(equity),
+            },
+        );
+        assert_eq!(
+            decision.verdict,
+            PreTradeVerdict::Send(Notional::new(notional)),
+            "sized-at-cap target passes the pretrade governor unchanged"
+        );
+    }
+
+    /// The neutral (`Default`, multiplier `1.0`) sizer with no cap reproduces `net_positions` exactly — the
+    /// pre-QE-433 sizing is unchanged when no Kelly pass is applied.
+    #[test]
+    fn neutral_sizer_is_identity() {
+        let positions = [
+            PositionState::held(Direction::Long, 1),
+            PositionState::held(Direction::Short, 1),
+        ];
+        let weights = [0.6_f64, 0.4];
+        let sizes = [300_u16, 250];
+        let base = PositionNetter::net_positions(&positions, &weights, &sizes);
+        let sized = PositionNetter::net_positions_sized(
+            &positions,
+            &weights,
+            &sizes,
+            &PortfolioSizer::default(),
+            None,
+        );
+        assert_eq!(sized, base);
     }
 }
