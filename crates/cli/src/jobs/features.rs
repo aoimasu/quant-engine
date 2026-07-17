@@ -108,6 +108,7 @@ pub fn to_decision_bars(
             DecisionBar {
                 features: fv,
                 price: b.close().get(),
+                volume: b.volume().get(),
                 funding_rate: funding_by_ms.get(&ms).copied(),
             }
         })

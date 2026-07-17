@@ -49,10 +49,11 @@ pub struct BacktestParams {
     pub taker_fee_bps: f64,
     /// Slippage-model label (recorded verbatim in the contract).
     pub slippage_model: String,
-    /// Reporting size-impact coefficient (QE-428). `None` ⇒ **match selection** — use the selection
-    /// cost model's impact (`SlippageModel::default().impact`, i.e. `FrictionConfig::default()`'s value,
-    /// the one the train search optimises against) so reported net PnL matches selection. `Some(v)` ⇒
-    /// override the reporting impact with `v` (e.g. `0` to reproduce the legacy zero-impact reporting).
+    /// Reporting participation-impact coefficient (QE-428/QE-440). `None` ⇒ **match selection** — use the
+    /// selection cost model's coefficient (`SlippageModel::default().impact_coeff`, i.e.
+    /// `FrictionConfig::default()`'s value, the one the train search optimises against) so reported net
+    /// PnL matches selection. `Some(v)` ⇒ override the reporting `impact_coeff` with `v` (e.g. `0` to
+    /// reproduce the legacy zero-impact reporting).
     pub reporting_impact: Option<Decimal>,
 }
 
@@ -190,11 +191,10 @@ fn parse_strategy_index(sel: &str) -> Option<usize> {
 /// Build the backtest config: map `taker_fee_bps` onto the fee schedule (fills take liquidity) and set
 /// the size-impact coefficient (QE-428).
 ///
-/// The slippage model now defaults to the **selection** cost model (`SlippageModel::default()`, whose
-/// `impact = 0.0001` is exactly what `FrictionConfig::default()` — the config the train search runs on —
-/// prices), so reported net PnL matches selection instead of the legacy zero-impact reporting. QE-403
-/// had pinned `impact = ZERO` here only to keep the golden byte-identical at the time; QE-428 aligns it
-/// (and regenerates the golden). `reporting_impact = Some(v)` overrides the impact (e.g. `0` reproduces
+/// The slippage model now defaults to the **selection** cost model (`SlippageModel::default()`, the
+/// concave √-in-participation impact — QE-440 — that `FrictionConfig::default()` (the config the train
+/// search runs on) prices), so reported net PnL matches selection instead of the legacy zero-impact
+/// reporting. `reporting_impact = Some(v)` overrides the participation `impact_coeff` (e.g. `0` reproduces
 /// the legacy zero-impact reporting); `None` matches selection.
 fn backtest_config(taker_fee_bps: f64, reporting_impact: Option<Decimal>) -> BacktestConfig {
     let default_fees = FeeSchedule::default();
@@ -206,11 +206,11 @@ fn backtest_config(taker_fee_bps: f64, reporting_impact: Option<Decimal>) -> Bac
         taker,
         maker: default_fees.maker,
     };
-    // Default = the selection slippage model (impact 0.0001), so reporting == selection. An explicit
-    // `reporting_impact` overrides only the impact coefficient; the half-spread stays at the default.
+    // Default = the selection slippage model, so reporting == selection. An explicit `reporting_impact`
+    // overrides only the participation impact coefficient; the half-spread and β stay at the default.
     let slippage = match reporting_impact {
-        Some(impact) => SlippageModel {
-            impact,
+        Some(impact_coeff) => SlippageModel {
+            impact_coeff,
             ..SlippageModel::default()
         },
         None => SlippageModel::default(),
@@ -395,11 +395,11 @@ mod tests {
     /// this fails under the old `impact = ZERO` reporting pin.
     #[test]
     fn reporting_impact_defaults_to_selection_impact() {
-        let reporting = backtest_config(2.0, None).friction.slippage.impact;
+        let reporting = backtest_config(2.0, None).friction.slippage.impact_coeff;
         let selection = qe_wfo::backtest::BacktestConfig::default()
             .friction
             .slippage
-            .impact;
+            .impact_coeff;
         assert_eq!(
             reporting, selection,
             "reporting impact must match the selection cost model"
@@ -411,20 +411,27 @@ mod tests {
         );
     }
 
-    /// QE-428: an explicit `--reporting-impact` overrides the coefficient (e.g. `0` reproduces the legacy
-    /// zero-impact reporting), while the half-spread stays at its default.
+    /// QE-428/QE-440: an explicit `--reporting-impact` overrides the participation coefficient (e.g. `0`
+    /// reproduces the legacy zero-impact reporting), while the half-spread and β stay at their defaults.
     #[test]
     fn reporting_impact_flag_overrides() {
         let cfg = backtest_config(2.0, Some(Decimal::ZERO));
-        assert_eq!(cfg.friction.slippage.impact, Decimal::ZERO);
+        assert_eq!(cfg.friction.slippage.impact_coeff, Decimal::ZERO);
         assert_eq!(
             cfg.friction.slippage.half_spread,
             SlippageModel::default().half_spread
         );
+        assert_eq!(
+            cfg.friction.slippage.impact_exponent,
+            SlippageModel::default().impact_exponent
+        );
 
         let custom = Decimal::new(3, 4); // 0.0003
         assert_eq!(
-            backtest_config(2.0, Some(custom)).friction.slippage.impact,
+            backtest_config(2.0, Some(custom))
+                .friction
+                .slippage
+                .impact_coeff,
             custom
         );
     }

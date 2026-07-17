@@ -158,6 +158,7 @@ mod tests {
                 states,
             },
             price,
+            volume: Decimal::from(1000),
             funding_rate: None,
         }
     }

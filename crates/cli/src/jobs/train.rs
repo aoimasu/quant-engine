@@ -385,7 +385,9 @@ pub fn run_train_job(
     // QE-438: per-elite modelled capacity — the deployed-weight scoring input. Same capacity formula the
     // sealed deployed weights use (`strategy_capacities`), so the DE scores membership on the exact
     // capacity-capped object the vintage deploys at `TARGET_AUM_USD`, not on equal-weight.
-    let pool_capacities = strategy_capacities(&pool_genomes, &pool_bt);
+    // QE-440: representative $ ADV over the train window keys every member's participation capacity.
+    let train_adv_notional = mean_dollar_adv(train_bars);
+    let pool_capacities = strategy_capacities(&pool_genomes, &pool_bt, train_adv_notional);
 
     // ---- ensemble --------------------------------------------------------------------------------
     let ens_cfg = qe_ensemble::SearchConfig {
@@ -435,7 +437,7 @@ pub fn run_train_job(
         .map(|g| backtest(g, train_bars, &train_cfg))
         .collect();
     let selected_returns: Vec<Vec<f64>> = selected_bt.iter().map(|b| b.returns.clone()).collect();
-    let weights = capacity_capped_weights(&chromosomes, &selected_bt);
+    let weights = capacity_capped_weights(&chromosomes, &selected_bt, train_adv_notional);
 
     emit(ProgressLine::Ensemble {
         pct: 75,
@@ -698,10 +700,11 @@ fn combine(
 fn capacity_capped_weights(
     chromosomes: &[Genome],
     selected_bt: &[qe_wfo::backtest::BacktestResult],
+    adv_notional: f64,
 ) -> Vec<f64> {
     cap_or_equal(
         chromosomes.len(),
-        &strategy_capacities(chromosomes, selected_bt),
+        &strategy_capacities(chromosomes, selected_bt, adv_notional),
     )
 }
 
@@ -711,7 +714,11 @@ fn capacity_capped_weights(
 /// (`trades · 2 · size_frac / n`). Shared by the sealed deployed weights ([`capacity_capped_weights`])
 /// **and** the QE-438 deployed-weight ensemble scoring (`search_portfolio_weighted`), so the object the
 /// DE selects on and the object the vintage deploys rest on the same capacity model.
-fn strategy_capacities(genomes: &[Genome], bts: &[qe_wfo::backtest::BacktestResult]) -> Vec<f64> {
+fn strategy_capacities(
+    genomes: &[Genome],
+    bts: &[qe_wfo::backtest::BacktestResult],
+    adv_notional: f64,
+) -> Vec<f64> {
     let model = CapacityModel::with_defaults();
     genomes
         .iter()
@@ -725,11 +732,26 @@ fn strategy_capacities(genomes: &[Genome], bts: &[qe_wfo::backtest::BacktestResu
                 &StrategyProfile {
                     gross_edge,
                     turnover,
+                    adv_notional,
                 },
                 &model,
             )
         })
         .collect()
+}
+
+/// Representative rolling ADV in **dollars** over the train window (QE-440): the mean per-bar
+/// dollar-volume `mean(volume·price)`. Single-instrument v1, so one figure keys every member's
+/// participation capacity. Deterministic (the sealed weights it feeds are `hash_stable`-rounded).
+fn mean_dollar_adv(bars: &[DecisionBar]) -> f64 {
+    if bars.is_empty() {
+        return 0.0;
+    }
+    let sum: f64 = bars
+        .iter()
+        .map(|b| (b.volume * b.price).to_f64().unwrap_or(0.0))
+        .sum();
+    sum / bars.len() as f64
 }
 
 /// Cap the equal-weight budget by `capacities` at [`TARGET_AUM_USD`], falling back to equal weights when

@@ -28,7 +28,7 @@ rand_chacha = "0.9"
 # Data-parallel runtime; a dev-dependency of qe-determinism (proving thread-count independence).
 rayon = "1"
 # Fixed-point decimal money (QE-007): exact arithmetic, no binary float. String serde for exactness.
-rust_decimal = { version = "1", features = ["serde", "serde-with-str"] }
+rust_decimal = { version = "1", features = ["serde", "serde-with-str", "maths"] }
 # Embedded typed LMDB key-value store (QE-010 market data, QE-011 synthetic cache).
 # default-features off drops the unmaintained `bincode` (RUSTSEC-2025-0141) pulled by the default
 # serde-bincode codec; we only use the serde-json value codec (enabled per-crate).
