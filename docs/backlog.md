@@ -300,7 +300,6 @@ _All R1.c tickets delivered — see [`reviewed/`](mds/reviewed/)._
 
 | Ticket | Title | Depends on | Status |
 |--------|-------|------------|:------:|
-| [QE-437](./reviews/2026-07-16-maxdama-panel-review.md#qe-437) | Gate G1 on the already-computed PBO  *(panel #8, unanimous)* | QE-134 | — |
 | [QE-438](./reviews/2026-07-16-maxdama-panel-review.md#qe-438) | Score the DE membership objective on the actual deployed (capacity-capped) weight vector, not equal-weight  *(panel #9, majority)* | QE-115, QE-130 | — |
 | [QE-439](./reviews/2026-07-16-maxdama-panel-review.md#qe-439) | Make the DSR deflation basis coherent on the gens/windows axis  *(panel #10, majority)* | QE-131, QE-134 | — |
 | [QE-440](./reviews/2026-07-16-maxdama-panel-review.md#qe-440) | Move the impact model to concave square-root-in-participation and add a rolling ADV input  *(panel #11, majority)* | QE-128, QE-109 | — |
