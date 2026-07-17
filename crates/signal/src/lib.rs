@@ -27,8 +27,8 @@ pub use feature::{
     assemble_batch, CatalogueIdentity, FeatureAssembler, FeatureSchema, FeatureVector,
 };
 pub use genome::{
-    Clause, Decision, ExitParams, Genome, PositionState, RiskParams, RuleSet, CLAUSES_PER_SET,
-    MAX_SIZE_BPS, REP_VERSION,
+    graded_strength_floor, Clause, Decision, ExitParams, Genome, PositionState, RiskParams,
+    RuleSet, CLAUSES_PER_SET, MAX_SIZE_BPS, REP_VERSION,
 };
 pub use indicator::{
     catalogue, compute_batch, max_lookback, CatalogueConfig, Indicator, IndicatorSpec, QState,
