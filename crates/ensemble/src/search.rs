@@ -12,7 +12,9 @@ use qe_determinism::{seed_rng, DetRng};
 use rand_core::RngCore;
 
 use crate::de::{binomial_crossover, de_mutant, EnsembleMask, DEFAULT_CR};
-use crate::objective::{leave_one_out_min, pairwise_corr_penalty, ObjectiveConfig};
+use crate::objective::{
+    leave_one_out_min_weighted, pairwise_corr_penalty, ObjectiveConfig, Weighting,
+};
 
 /// Default DE population size.
 pub const DEFAULT_POP_SIZE: usize = 32;
@@ -80,19 +82,26 @@ pub struct SearchResult {
     pub corr_effective_n: usize,
 }
 
-/// Cross-validated robust-basin score of `members` over `pool` (QE-126/D2): partition the common time
-/// axis into `cfg.folds` contiguous folds, take the [`leave_one_out_min`] wide-basin floor **within each
-/// fold**, and return the **minimum across folds** — the worst-fold, worst-member-dropped objective. An
+/// Cross-validated robust-basin score of `members` over `pool` under the deployed `weighting`
+/// (QE-126/D2, QE-438): partition the common time axis into `cfg.folds` contiguous folds, take the
+/// [`leave_one_out_min_weighted`] wide-basin floor **within each fold**, and return the **minimum across
+/// folds** — the worst-fold, worst-member-dropped deployed-weight objective. Fold slicing is over time
+/// only, so pool indices (and thus the `weighting`'s per-pool capacities) are unchanged per fold. An
 /// empty membership scores `−∞`.
 #[must_use]
-pub fn cross_val_score(pool: &[Vec<f64>], members: &[usize], cfg: &SearchConfig) -> f64 {
+pub fn cross_val_score_weighted(
+    pool: &[Vec<f64>],
+    members: &[usize],
+    cfg: &SearchConfig,
+    weighting: Weighting,
+) -> f64 {
     if members.is_empty() {
         return f64::NEG_INFINITY;
     }
     let t = pool.iter().map(Vec::len).min().unwrap_or(0);
     if t == 0 {
         // No time axis to validate over — fall back to the whole (empty) series score.
-        return leave_one_out_min(pool, members, &cfg.objective);
+        return leave_one_out_min_weighted(pool, members, &cfg.objective, weighting);
     }
     let k = cfg.folds.max(1).min(t);
     let mut worst = f64::INFINITY;
@@ -106,9 +115,21 @@ pub fn cross_val_score(pool: &[Vec<f64>], members: &[usize], cfg: &SearchConfig)
             .iter()
             .map(|s| s[lo..hi.min(s.len())].to_vec())
             .collect();
-        worst = worst.min(leave_one_out_min(&sliced, members, &cfg.objective));
+        worst = worst.min(leave_one_out_min_weighted(
+            &sliced,
+            members,
+            &cfg.objective,
+            weighting,
+        ));
     }
     worst
+}
+
+/// The equal-weight cross-validated robust-basin score — [`cross_val_score_weighted`] under
+/// [`Weighting::EqualWeight`] (byte-identical to the pre-QE-438 behaviour).
+#[must_use]
+pub fn cross_val_score(pool: &[Vec<f64>], members: &[usize], cfg: &SearchConfig) -> f64 {
+    cross_val_score_weighted(pool, members, cfg, Weighting::EqualWeight)
 }
 
 /// A uniform `[0, 1)` draw from one `u64`.
@@ -248,10 +269,19 @@ pub fn corr_penalty_effective_n(pool: &[Vec<f64>], members: &[usize], cfg: &Sear
     }
 }
 
-/// Run the discrete-DE portfolio search over `pool` (per-strategy net-of-cost return series),
-/// maximising the cross-validated robust-basin score. Deterministic in `seed`.
+/// Run the discrete-DE portfolio search over `pool` (per-strategy net-of-cost return series) under the
+/// deployed `weighting` (QE-438), maximising the cross-validated robust-basin score of the object the
+/// vintage actually deploys. Deterministic in `seed`. Under [`Weighting::EqualWeight`] this is
+/// byte-identical to [`search_portfolio`]; under [`Weighting::CapacityCapped`] the DE scores membership
+/// on the capacity-capped weights, so when a cap binds it can select a different set than equal-weight —
+/// closing the optimise-X-deploy-Y gap.
 #[must_use]
-pub fn search_portfolio(pool: &[Vec<f64>], cfg: &SearchConfig, seed: u64) -> SearchResult {
+pub fn search_portfolio_weighted(
+    pool: &[Vec<f64>],
+    cfg: &SearchConfig,
+    weighting: Weighting,
+    seed: u64,
+) -> SearchResult {
     let mut result = run_de(
         pool.len(),
         cfg.pop_size,
@@ -259,10 +289,18 @@ pub fn search_portfolio(pool: &[Vec<f64>], cfg: &SearchConfig, seed: u64) -> Sea
         cfg.cr,
         cfg.init_density,
         seed,
-        |members| cross_val_score(pool, members, cfg),
+        |members| cross_val_score_weighted(pool, members, cfg, weighting),
     );
     result.corr_effective_n = corr_penalty_effective_n(pool, &result.best.members(), cfg);
     result
+}
+
+/// Run the discrete-DE portfolio search over `pool` on the **equal-weight** score —
+/// [`search_portfolio_weighted`] under [`Weighting::EqualWeight`] (byte-identical to the pre-QE-438
+/// behaviour). Deterministic in `seed`.
+#[must_use]
+pub fn search_portfolio(pool: &[Vec<f64>], cfg: &SearchConfig, seed: u64) -> SearchResult {
+    search_portfolio_weighted(pool, cfg, Weighting::EqualWeight, seed)
 }
 
 #[cfg(test)]
@@ -412,5 +450,51 @@ mod tests {
         assert_eq!(result.best.count(), 1);
         assert!(result.best.0[0]);
         assert!(result.score.is_finite());
+    }
+
+    #[test]
+    fn deployed_search_reduces_to_equal_weight_when_caps_dont_bind() {
+        // QE-438 AC: with caps that never bind, the deployed-weight search is byte-identical to the
+        // equal-weight search — same mask, same score, same trace.
+        let pool = fixture_pool(160);
+        let c = cfg();
+        let huge = vec![1e18; 4];
+        let deployed = search_portfolio_weighted(
+            &pool,
+            &c,
+            Weighting::CapacityCapped {
+                capacities: &huge,
+                target_aum: 1_000_000.0,
+            },
+            2024,
+        );
+        let equal = search_portfolio(&pool, &c, 2024);
+        assert_eq!(deployed, equal);
+    }
+
+    #[test]
+    fn deployed_search_scores_on_the_capped_weights_when_caps_bind() {
+        // With binding caps the converged score reflects the deployed (cash-diluted) combined series, so
+        // it is strictly below the equal-weight search score — the search optimises the deployed object.
+        // Determinism is preserved.
+        let pool = fixture_pool(160);
+        let c = cfg();
+        // Every pool member tiny-capacity at $1M ⇒ heavy capping / cash ⇒ diluted combined ⇒ lower score.
+        let caps = vec![40_000.0; 4];
+        let w = Weighting::CapacityCapped {
+            capacities: &caps,
+            target_aum: 1_000_000.0,
+        };
+        let deployed = search_portfolio_weighted(&pool, &c, w, 2024);
+        let equal = search_portfolio(&pool, &c, 2024);
+        assert!(
+            deployed.score < equal.score,
+            "capacity-diluted deployed score must be below equal-weight: {} vs {}",
+            deployed.score,
+            equal.score
+        );
+        // Byte-deterministic in the seed.
+        let again = search_portfolio_weighted(&pool, &c, w, 2024);
+        assert_eq!(deployed, again);
     }
 }

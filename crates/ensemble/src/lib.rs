@@ -26,9 +26,10 @@ pub mod stress;
 pub use capacity::{cap_weights, capacity, CapacityModel, StrategyProfile, DEFAULT_EDGE_RETENTION};
 pub use de::{binomial_crossover, de_mutant, EnsembleMask, DEFAULT_CR};
 pub use objective::{
-    cdar, combined_returns, cvar, leave_one_out_min, min_significant_r, objective,
+    cdar, combined_returns, combined_returns_weighted, cvar, leave_one_out_min,
+    leave_one_out_min_weighted, min_significant_r, objective, objective_weighted,
     pairwise_corr_penalty, pearson, positive_mean_pairwise_corr, stress_overlay, CorrDeflation,
-    CorrPenalty, ObjectiveConfig, TailRisk, DEFAULT_ALPHA, DEFAULT_FISHER_LAMBDA,
+    CorrPenalty, ObjectiveConfig, TailRisk, Weighting, DEFAULT_ALPHA, DEFAULT_FISHER_LAMBDA,
     DEFAULT_SIGNIFICANCE_Z,
 };
 pub use regime::{
@@ -37,8 +38,9 @@ pub use regime::{
     DEFAULT_REGIME_FLOOR, DEFAULT_REGIME_WEIGHT,
 };
 pub use search::{
-    cross_val_score, search_portfolio, SearchConfig, SearchResult, DEFAULT_FOLDS,
-    DEFAULT_GENERATIONS, DEFAULT_INIT_DENSITY, DEFAULT_POP_SIZE,
+    cross_val_score, cross_val_score_weighted, search_portfolio, search_portfolio_weighted,
+    SearchConfig, SearchResult, DEFAULT_FOLDS, DEFAULT_GENERATIONS, DEFAULT_INIT_DENSITY,
+    DEFAULT_POP_SIZE,
 };
 pub use stress::{
     default_synthetic_shocks, max_drawdown, scenario_loss, weighted_combined, worst_case_loss,
