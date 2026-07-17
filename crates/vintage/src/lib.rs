@@ -15,7 +15,7 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 
 use qe_determinism::Lineage;
-use qe_risk::CalibrationProfile;
+use qe_risk::{CalibrationProfile, SlippageCalibration};
 use qe_signal::{CatalogueIdentity, Genome};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -28,7 +28,9 @@ pub mod schema;
 /// - `2` (QE-130): added [`VintageContent::worst_case_loss`].
 /// - `3` (QE-402): added [`VintageContent::catalogue`] (the pinned catalogue identity), asserted
 ///   exactly at the load boundary — see [`schema`].
-pub const VINTAGE_FORMAT_VERSION: u16 = 3;
+/// - `4` (QE-431): added [`VintageContent::slippage`] (the content-addressed slippage/impact
+///   calibration shared by friction & capacity), riding the lineage alongside `calibration`.
+pub const VINTAGE_FORMAT_VERSION: u16 = 4;
 
 /// The hashed content of a vintage — everything the content hash covers.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -43,6 +45,11 @@ pub struct VintageContent {
     pub weights: Vec<f64>,
     /// The per-vintage calibration sidecar (QE-116).
     pub calibration: CalibrationProfile,
+    /// The content-addressed slippage/impact calibration (QE-431) — the single source of truth that both
+    /// the wfo friction cost model and the ensemble capacity model derive from. Riding it here in the
+    /// hashed content (alongside `calibration`) ties the exact cost coefficients that priced selection into
+    /// the vintage's reproducible lineage. Part of the hashed content, so it changes the vintage id.
+    pub slippage: SlippageCalibration,
     /// Worst-case capital loss (a positive fraction) under the QE-130 stress set — the figure the
     /// vintage carries to gate G3 (QE-308). `None` until the stress engine
     /// (`qe_ensemble::stress::worst_case_loss`) has been run and its bare figure attached. Stored as a
@@ -404,6 +411,7 @@ mod tests {
             chromosomes: vec![genome(10), genome(25)],
             weights: vec![0.6, 0.4],
             calibration: calibration(),
+            slippage: SlippageCalibration::default(),
             worst_case_loss: Some(0.28), // QE-130 stress figure
             catalogue: CatalogueIdentity::current(), // QE-402 pinned identity
             lineage: lineage(),

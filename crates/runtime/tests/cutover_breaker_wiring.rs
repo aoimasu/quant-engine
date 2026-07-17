@@ -122,6 +122,7 @@ fn vintage_with_partial_calibration() -> Vintage {
         chromosomes: vec![cycling_genome(3), cycling_genome(2)],
         weights: vec![0.5, 0.5],
         calibration,
+        slippage: qe_risk::SlippageCalibration::default(),
         worst_case_loss: None,
         catalogue: qe_signal::CatalogueIdentity::current(),
         lineage: Lineage::new("cfg", "snap", "commit", vec![]),

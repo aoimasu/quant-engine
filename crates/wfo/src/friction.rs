@@ -9,6 +9,7 @@
 use rust_decimal::Decimal;
 
 use qe_domain::Side;
+use qe_risk::SlippageCalibration;
 
 /// Whether a fill took or made liquidity (selects the fee rate).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,20 +68,31 @@ pub struct SlippageModel {
 
 impl Default for SlippageModel {
     fn default() -> Self {
-        SlippageModel {
-            half_spread: Decimal::new(1, 4), // 0.0001 = 1bp half-spread
-            // QE-403: a non-zero default size-impact so **selection** (the train search runs on
-            // `BacktestConfig::default().friction`) prices size-dependent slippage instead of ignoring it.
-            // Per unit qty, same order as the half-spread; the size term `notional·impact·qty` is quadratic
-            // in position size, so large-`size_bps`/high-turnover genomes pay more. Conservative default;
-            // override with an explicit `SlippageModel` where a different regime is warranted.
-            impact: Decimal::new(1, 4), // 0.0001
-        }
+        // QE-431: the default is **derived** from the one content-addressed [`SlippageCalibration`], not
+        // authored here — so no magic slippage/impact literal remains on the selection path (the train
+        // search runs on `BacktestConfig::default().friction`) and friction can never drift from the
+        // capacity side, which derives from the same calibration. The per-contract `impact` is
+        // `impact_per_notional · reference_mark = 2e-9 · 50000 = 1e-4` — byte-identical to the pre-QE-431
+        // literal, so friction's net-of-cost behaviour is unchanged.
+        SlippageModel::from_calibration(&SlippageCalibration::default())
     }
 }
 
 impl SlippageModel {
-    /// Slippage cost for a fill of `qty_abs` with notional `notional_abs`.
+    /// Derive the friction slippage model from the shared [`SlippageCalibration`] (QE-431): the
+    /// `half_spread` is shared verbatim and the per-contract `impact` is
+    /// [`SlippageCalibration::friction_impact_per_contract`] (`impact_per_notional · reference_mark`).
+    #[must_use]
+    pub fn from_calibration(cal: &SlippageCalibration) -> Self {
+        SlippageModel {
+            half_spread: cal.half_spread,
+            impact: cal.friction_impact_per_contract(),
+        }
+    }
+
+    /// Slippage cost for a fill of `qty_abs` with notional `notional_abs`. The size term
+    /// `notional·impact·qty` is quadratic in position size, so large-`size_bps`/high-turnover genomes pay
+    /// more.
     #[must_use]
     pub fn cost(&self, notional_abs: Decimal, qty_abs: Decimal) -> Decimal {
         notional_abs * (self.half_spread + self.impact * qty_abs)
@@ -386,5 +398,18 @@ mod tests {
     fn maker_is_cheaper_than_taker() {
         let f = FeeSchedule::default();
         assert!(f.fee(d("100"), Liquidity::Maker) < f.fee(d("100"), Liquidity::Taker));
+    }
+
+    #[test]
+    fn default_is_derived_from_the_shared_calibration_no_magic_literal() {
+        // QE-431 AC3: the selection-path friction model authors no slippage/impact literal — it is
+        // exactly the one derived from `SlippageCalibration::default()` (the single source of truth).
+        assert_eq!(
+            SlippageModel::default(),
+            SlippageModel::from_calibration(&SlippageCalibration::default())
+        );
+        // And the derived per-contract impact is byte-identical to the pre-QE-431 default (1e-4).
+        assert_eq!(SlippageModel::default().impact, d("0.0001"));
+        assert_eq!(SlippageModel::default().half_spread, d("0.0001"));
     }
 }
