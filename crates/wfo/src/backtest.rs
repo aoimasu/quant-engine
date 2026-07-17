@@ -63,6 +63,15 @@ pub struct BacktestConfig {
     /// content-addressed [`ShockConfig`] so a larger size produces a larger shocked drawdown and
     /// `log_growth` self-selects a lower, tail-aware leverage. Frozen/seeded ⇒ byte-reproducible.
     pub shocks: Option<ShockConfig>,
+    /// QE-442: when `true`, scale each entry's notional by the genome's graded **entry strength**
+    /// ([`Genome::entry_strength`]) — the ordinal `QState` conviction of the firing bank — so a
+    /// barely-in-band entry sizes near [`graded_strength_floor`](qe_signal::graded_strength_floor) and a
+    /// deep-in-band entry sizes at full. `false` (the default) is the pre-QE-442 hard-boolean path:
+    /// `entry_strength ≡ 1`, byte-identical sizing. The trade **sequence** is unaffected either way (grading
+    /// touches size, not the direction). Enabled on the training / selection / reporting configs so a genome
+    /// is selected and reported on its graded conviction; the money is exact `Decimal`, so it stays
+    /// determinism-safe and batch/streaming identical.
+    pub graded: bool,
 }
 
 impl Default for BacktestConfig {
@@ -72,6 +81,7 @@ impl Default for BacktestConfig {
             min_trades: DEFAULT_MIN_TRADES,
             windows: DEFAULT_WINDOWS,
             shocks: None,
+            graded: false,
         }
     }
 }
@@ -126,8 +136,9 @@ pub struct TradeFill {
 /// An order scheduled by bar `i`'s decision, to fill at bar `i+1`.
 #[derive(Debug, Clone, Copy)]
 enum Pending {
-    /// Open a position in this direction (sized from equity at fill time).
-    Enter(Direction),
+    /// Open a position in this direction, scaling the sized notional by the graded entry strength
+    /// (QE-442; `Decimal::ONE` on the classic hard-boolean path).
+    Enter(Direction, Decimal),
     /// Close the whole open position.
     Close,
 }
@@ -218,8 +229,8 @@ pub fn backtest_with_trades(
         if let Some(order) = pending.take() {
             if price > Decimal::ZERO {
                 match order {
-                    Pending::Enter(dir) => {
-                        let notional = size_frac * equity_prev;
+                    Pending::Enter(dir, strength) => {
+                        let notional = size_frac * strength * equity_prev;
                         let qty = notional / price;
                         if qty > Decimal::ZERO {
                             let side = match dir {
@@ -313,7 +324,18 @@ pub fn backtest_with_trades(
             _ => PositionState::flat(),
         };
         pending = match genome.decide(&bar.features, position) {
-            Decision::Enter(dir) => Some(Pending::Enter(dir)),
+            Decision::Enter(dir) => {
+                // QE-442: grade the entry size by the firing bank's ordinal conviction, computed from the
+                // SAME (decision-bar) features `decide` read — so there is no look-ahead (the sized order
+                // still fills at the next bar). On the classic path (`graded == false`) strength is 1, so
+                // the notional is byte-identical to pre-QE-442.
+                let strength = if cfg.graded {
+                    genome.entry_strength(&bar.features, dir)
+                } else {
+                    Decimal::ONE
+                };
+                Some(Pending::Enter(dir, strength))
+            }
             Decision::Exit => Some(Pending::Close),
             Decision::Hold => None,
         };
@@ -779,6 +801,108 @@ mod tests {
         assert!(
             fills.is_empty(),
             "an unclosed position is not a completed round-trip"
+        );
+    }
+
+    // --- QE-442 graded (probability-surface) entry sizing -------------------------------------------
+
+    /// A long-only genome whose entry band is the WIDE `[2,4]` (span 2 ⇒ graded conviction can be 0.5 at an
+    /// edge state and 1.0 at the centre), so grading actually modulates size (unlike the degenerate span-1
+    /// `[3,4]` band, which is always full-conviction).
+    fn graded_long_genome(hold: u16, size_bps: u16) -> Genome {
+        let mut g = long_genome(hold, size_bps);
+        g.long_entry.clauses[0].lo = 2;
+        g.long_entry.clauses[0].hi = 4;
+        g
+    }
+
+    /// Uptrend bars that fire the `[2,4]` band in bursts with a chosen in-band `entry_state`; the off-burst
+    /// state `0` is out of `[2,4]` so it never fires. Same shape as [`uptrend_bars`], so the trade sequence
+    /// is identical across `entry_state` choices — only the graded conviction (hence size) differs.
+    fn banded_uptrend(schema: &FeatureSchema, n: usize, entry_state: u16) -> Vec<Bar> {
+        (0..n)
+            .map(|i| {
+                let state0 = if (i / 2) % 2 == 0 { entry_state } else { 0 };
+                bar(
+                    schema,
+                    i as i64 * 60_000,
+                    Decimal::from(100 + i as i64),
+                    state0,
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn graded_off_is_byte_identical_to_classic_sizing() {
+        // Additivity: with `graded == false` (default), sizing is byte-for-byte the pre-QE-442 path, and a
+        // full-conviction genome (`[3,4]` span-1 band ⇒ strength ≡ 1) is byte-identical WITH grading on too.
+        let s = schema();
+        let bars = uptrend_bars(&s, 160);
+        let g = long_genome(2, 5_000); // [3,4] ⇒ conviction always 1
+        let classic = BacktestConfig::default();
+        let graded = BacktestConfig {
+            graded: true,
+            ..BacktestConfig::default()
+        };
+        assert_eq!(backtest(&g, &bars, &classic), backtest(&g, &bars, &graded));
+    }
+
+    #[test]
+    fn graded_sizing_scales_notional_by_conviction() {
+        // A deep-in-band entry (centre state 3 ⇒ conviction 1 ⇒ strength 1) sizes strictly LARGER than a
+        // barely-in-band entry (edge state 2 ⇒ conviction 0.5 ⇒ strength 0.75) — same genome, same trade
+        // sequence, so on a winning uptrend the deeper conviction earns strictly more net P&L.
+        let s = schema();
+        let g = graded_long_genome(2, 5_000);
+        let cfg = BacktestConfig {
+            graded: true,
+            ..BacktestConfig::default()
+        };
+        let edge = backtest(&g, &banded_uptrend(&s, 160, 2), &cfg);
+        let deep = backtest(&g, &banded_uptrend(&s, 160, 3), &cfg);
+
+        assert!(edge.accepted && deep.accepted);
+        assert_eq!(
+            edge.trades, deep.trades,
+            "grading must not change the trade sequence"
+        );
+        assert!(
+            deep.net_pnl > edge.net_pnl,
+            "deep-in-band conviction must size larger ⇒ more net P&L on an uptrend: deep {} !> edge {}",
+            deep.net_pnl,
+            edge.net_pnl
+        );
+    }
+
+    #[test]
+    fn grading_at_band_edge_sizes_below_the_hard_boolean() {
+        // vs the hard boolean: on the SAME band-edge series, grading (strength 0.75) sizes strictly below
+        // the classic full-size path (strength 1), with an identical trade sequence — grading modulates
+        // size smoothly instead of the all-or-nothing boolean.
+        let s = schema();
+        let g = graded_long_genome(2, 5_000);
+        let bars = banded_uptrend(&s, 160, 2); // edge state ⇒ conviction 0.5
+        let classic = backtest(
+            &g,
+            &bars,
+            &BacktestConfig {
+                graded: false,
+                ..BacktestConfig::default()
+            },
+        );
+        let graded = backtest(
+            &g,
+            &bars,
+            &BacktestConfig {
+                graded: true,
+                ..BacktestConfig::default()
+            },
+        );
+        assert_eq!(classic.trades, graded.trades, "same trade sequence");
+        assert!(
+            classic.net_pnl > graded.net_pnl,
+            "band-edge grading must size below the full-size boolean on a winning uptrend"
         );
     }
 

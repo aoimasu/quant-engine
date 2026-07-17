@@ -569,6 +569,8 @@ fn random_backtest_cfg(rng: &mut DetRng, mult_lo: i64, mult_hi: i64) -> Backtest
         windows: 1 + below(rng, 6) as usize,
         // QE-441: the slow-reference oracle checks the raw net-of-cost path (no injected shocks).
         shocks: None,
+        // QE-442: the oracle's reference loop sizes ungraded, so the optimised path must too here.
+        graded: false,
     }
 }
 

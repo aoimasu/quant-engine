@@ -316,6 +316,11 @@ pub fn run_train_job(
     let train_cfg = BacktestConfig {
         min_trades: 1,
         windows: 2,
+        // QE-442: grade entry size by the firing bank's ordinal conviction across the whole training
+        // pipeline (selection CV, elite pool, ensemble, DSR, G1 holdout, Kelly sizer), so a genome is
+        // selected and sealed on graded-conviction sizing — deep-in-band entries size full, band-edge
+        // entries size down (reducing band-edge overfitting) — and `search_cfg` inherits it below.
+        graded: true,
         ..BacktestConfig::default()
     };
 

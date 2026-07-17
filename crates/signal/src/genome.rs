@@ -20,6 +20,7 @@ use std::collections::BTreeSet;
 
 use crate::{FeatureSchema, FeatureVector};
 use qe_domain::Direction;
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 /// Representation version, stamped into every genome for lineage and decode-mismatch safety. A future
@@ -32,6 +33,15 @@ pub const CLAUSES_PER_SET: usize = 4;
 
 /// Target notional ceiling, in basis points of allowed capital (`risk.size_bps` upper bound).
 pub const MAX_SIZE_BPS: u16 = 10_000;
+
+/// Minimum graded entry strength (QE-442). A **firing** entry bank always sizes at **least** this fraction
+/// of `size_bps`, so the graded conviction modulates size **smoothly** in `[GRADED_STRENGTH_FLOOR, 1]`
+/// rather than ever zeroing a real signal: a barely-in-band entry sizes near the floor, a deep-in-band
+/// entry sizes at full. Expressed as an exact `Decimal` (`0.5`) so the whole grading path is exact money.
+#[must_use]
+pub fn graded_strength_floor() -> Decimal {
+    Decimal::new(5, 1) // 0.5
+}
 
 /// One band condition over a single quantised indicator state: "feature `feature`'s state is in the
 /// inclusive band `[lo, hi]`". Disabled clauses are ignored.
@@ -98,6 +108,40 @@ impl RuleSet {
             .count();
         let threshold = (self.min_satisfied as usize).clamp(1, active);
         satisfied >= threshold
+    }
+
+    /// Graded **conviction** of this bank for `features`, in `[0, 1]` (QE-442) — the ordinal strength the
+    /// quantiser computed, carried into the decision instead of being collapsed to the [`fires`] bool.
+    ///
+    /// Over the **active** clauses, each contributes an exact integer `contrib / cap`:
+    /// - `cap = 1 + (hi − lo)/2` — the most conviction the clause can carry (a point band `lo==hi` ⇒ `1`);
+    /// - `contrib = 0` when the clause is **unsatisfied**, else `1 + min(s − lo, hi − s)` — `1` at either
+    ///   band **edge**, rising to `cap` at the band **centre** ("distance into band").
+    ///
+    /// Conviction is `Σ contrib / Σ cap`. It captures **both** spec readings of ordinal strength at once:
+    /// *count of satisfied clauses* (more satisfied ⇒ larger numerator) and *distance into band* (a centre
+    /// state outweighs an edge state). It is `0` when no clause is active, and **strictly positive whenever
+    /// the bank fires** (a firing bank has `≥ threshold ≥ 1` satisfied clauses, each contributing `≥ 1`).
+    /// Pure, point-wise, leakage-safe (no rolling/dataset fit) and exact (`Decimal` of small integers).
+    #[must_use]
+    pub fn graded_conviction(&self, features: &FeatureVector) -> Decimal {
+        let mut num: u32 = 0;
+        let mut den: u32 = 0;
+        for c in self.clauses.iter().filter(|c| c.enabled) {
+            let span = c.hi.saturating_sub(c.lo);
+            den += 1 + u32::from(span / 2);
+            if c.satisfied(features) {
+                if let Some(Some(state)) = features.states.get(c.feature as usize) {
+                    let s = state.index();
+                    let depth = (s - c.lo).min(c.hi - s);
+                    num += 1 + u32::from(depth);
+                }
+            }
+        }
+        if den == 0 {
+            return Decimal::ZERO;
+        }
+        Decimal::from(num) / Decimal::from(den)
     }
 }
 
@@ -229,6 +273,34 @@ impl Genome {
                 Decision::Hold
             }
         }
+    }
+
+    /// The graded **conviction** of the `dir` entry bank for `features` (QE-442), in `[0, 1]` — the raw
+    /// ordinal strength ([`RuleSet::graded_conviction`]) of the bank that would arm a `dir` entry. Pure
+    /// function of `(genome, features, dir)`; does not itself decide whether the bank fires.
+    #[must_use]
+    pub fn entry_conviction(&self, features: &FeatureVector, dir: Direction) -> Decimal {
+        let bank = match dir {
+            Direction::Long => &self.long_entry,
+            Direction::Short => &self.short_entry,
+        };
+        bank.graded_conviction(features)
+    }
+
+    /// The graded **entry strength** in `[GRADED_STRENGTH_FLOOR, 1]` for a `dir` entry on `features`
+    /// (QE-442) — `floor + (1 − floor)·conviction`, a deterministic exact-`Decimal` function of the firing
+    /// bank's ordinal conviction. A barely-clearing entry sizes near the floor; a deep-in-band entry sizes
+    /// at full. This is what feeds entry sizing (`size_bps` is scaled by it) so the ordinal `QState` the
+    /// quantiser computed carries into sizing instead of being discarded at the boolean decision boundary.
+    ///
+    /// **Determinism / QE-001.** It is a pure function of `(genome, features, dir)` — no RNG, no clock, no
+    /// hidden state, exact `Decimal` — so it is batch/streaming identical and safe on both the search and
+    /// (future, QE-435) live sizing paths. It deliberately does **not** live in [`decide`], which stays a
+    /// bare directional signal (`Decision` unchanged), so the one shared decision path is untouched.
+    #[must_use]
+    pub fn entry_strength(&self, features: &FeatureVector, dir: Direction) -> Decimal {
+        let floor = graded_strength_floor();
+        floor + (Decimal::ONE - floor) * self.entry_conviction(features, dir)
     }
 
     /// Whether every gene is within its valid domain for `schema` (see QE-110/D5). On an empty schema
@@ -647,5 +719,160 @@ mod tests {
             ..fixture_genome()
         };
         assert_eq!(two_clauses_one_feature.mdl_complexity(), 2 + 1);
+    }
+
+    // --- QE-442: graded (probability-surface) conviction ------------------------------------------
+
+    fn dec(s: &str) -> rust_decimal::Decimal {
+        use std::str::FromStr;
+        rust_decimal::Decimal::from_str(s).unwrap()
+    }
+
+    /// A single-clause bank over a wide band `[0,4]` (span 4 ⇒ cap = 3).
+    fn wide_band_bank() -> RuleSet {
+        RuleSet {
+            clauses: [clause(true, 0, 0, 4), disabled(), disabled(), disabled()],
+            min_satisfied: 1,
+        }
+    }
+
+    #[test]
+    fn graded_conviction_grades_distance_into_band() {
+        let b = wide_band_bank();
+        // cap = 1 + (4-0)/2 = 3. contrib = 1 + min(s, 4-s).
+        assert_eq!(b.graded_conviction(&fv(&[Some(0)])), dec("1") / dec("3")); // edge
+        assert_eq!(b.graded_conviction(&fv(&[Some(4)])), dec("1") / dec("3")); // edge
+        assert_eq!(b.graded_conviction(&fv(&[Some(1)])), dec("2") / dec("3")); // near-centre
+        assert_eq!(b.graded_conviction(&fv(&[Some(2)])), dec("1")); // centre → full
+                                                                    // Strictly ordinal: deeper into the band ⇒ strictly higher conviction.
+        assert!(b.graded_conviction(&fv(&[Some(0)])) < b.graded_conviction(&fv(&[Some(1)])));
+        assert!(b.graded_conviction(&fv(&[Some(1)])) < b.graded_conviction(&fv(&[Some(2)])));
+    }
+
+    #[test]
+    fn graded_conviction_zero_when_unsatisfied_or_no_active_clause() {
+        // A state outside the band is unsatisfied ⇒ contributes 0 to the numerator ⇒ conviction 0.
+        let b = RuleSet {
+            clauses: [clause(true, 0, 3, 4), disabled(), disabled(), disabled()],
+            min_satisfied: 1,
+        };
+        assert_eq!(
+            b.graded_conviction(&fv(&[Some(0)])),
+            rust_decimal::Decimal::ZERO
+        );
+        // No active clause ⇒ conviction 0 (den == 0), mirroring `fires() == false`.
+        let empty = RuleSet {
+            clauses: [disabled(), disabled(), disabled(), disabled()],
+            min_satisfied: 1,
+        };
+        assert_eq!(
+            empty.graded_conviction(&fv(&[Some(2)])),
+            rust_decimal::Decimal::ZERO
+        );
+        assert!(!empty.fires(&fv(&[Some(2)])));
+    }
+
+    #[test]
+    fn graded_conviction_counts_satisfied_clauses() {
+        // Two active clauses over band [0,2] (cap = 2 each ⇒ Σcap = 4), k=1.
+        let b = RuleSet {
+            clauses: [
+                clause(true, 0, 0, 2),
+                clause(true, 1, 0, 2),
+                disabled(),
+                disabled(),
+            ],
+            min_satisfied: 1,
+        };
+        // Both centres satisfied ⇒ num = 2+2 = 4 ⇒ conviction 1.
+        assert_eq!(b.graded_conviction(&fv(&[Some(1), Some(1)])), dec("1"));
+        // One centre satisfied, the other unsatisfied ⇒ num = 2 ⇒ 2/4 = 0.5.
+        assert_eq!(b.graded_conviction(&fv(&[Some(1), Some(9)])), dec("0.5"));
+        // One EDGE satisfied, the other unsatisfied ⇒ num = 1 ⇒ 1/4 = 0.25.
+        assert_eq!(b.graded_conviction(&fv(&[Some(0), Some(9)])), dec("0.25"));
+        // More satisfied clauses ⇒ strictly higher conviction (the "count" reading).
+        assert!(
+            b.graded_conviction(&fv(&[Some(1), Some(9)]))
+                < b.graded_conviction(&fv(&[Some(1), Some(1)]))
+        );
+    }
+
+    #[test]
+    fn entry_strength_exact_decimal_values() {
+        // Long bank over band [0,2] (cap 2): conviction is 0.5 at an edge, 1.0 at the centre — both exact,
+        // so `entry_strength = 0.5 + 0.5·conviction` is exact: 0.75 at the edge, 1.0 at the centre.
+        let g = Genome {
+            long_entry: RuleSet {
+                clauses: [clause(true, 0, 0, 2), disabled(), disabled(), disabled()],
+                min_satisfied: 1,
+            },
+            short_entry: RuleSet {
+                clauses: [disabled(), disabled(), disabled(), disabled()],
+                min_satisfied: 1,
+            },
+            ..fixture_genome()
+        };
+        // `[0,2]`: states 0 and 2 are the band EDGES (conviction 0.5 → strength 0.75); state 1 is the
+        // band CENTRE (conviction 1.0 → strength 1.0).
+        assert_eq!(
+            g.entry_strength(&fv(&[Some(0)]), Direction::Long),
+            dec("0.75")
+        );
+        assert_eq!(
+            g.entry_strength(&fv(&[Some(2)]), Direction::Long),
+            dec("0.75")
+        );
+        assert_eq!(
+            g.entry_strength(&fv(&[Some(1)]), Direction::Long),
+            dec("1.0")
+        );
+        // Always within [floor, 1].
+        let floor = graded_strength_floor();
+        for s in 0..=2u16 {
+            let strength = g.entry_strength(&fv(&[Some(s)]), Direction::Long);
+            assert!(strength >= floor && strength <= rust_decimal::Decimal::ONE);
+        }
+    }
+
+    #[test]
+    fn barely_clears_band_sizes_weaker_than_deep_in_band() {
+        // Direction sanity (QE-442): a genome whose entry sits at the band EDGE gets a strictly smaller
+        // entry strength than the same genome deep IN-band — grading modulates size, the hard boolean did
+        // not (both would have `fires() == true`).
+        let g = Genome {
+            long_entry: wide_band_bank(),
+            short_entry: RuleSet {
+                clauses: [disabled(), disabled(), disabled(), disabled()],
+                min_satisfied: 1,
+            },
+            ..fixture_genome()
+        };
+        assert!(g.long_entry.fires(&fv(&[Some(0)])) && g.long_entry.fires(&fv(&[Some(2)])));
+        let edge = g.entry_strength(&fv(&[Some(0)]), Direction::Long);
+        let deep = g.entry_strength(&fv(&[Some(2)]), Direction::Long);
+        assert!(
+            edge < deep,
+            "band-edge strength {edge} must be < deep-in-band {deep}"
+        );
+        assert_eq!(
+            deep,
+            rust_decimal::Decimal::ONE,
+            "a centred entry sizes at full"
+        );
+    }
+
+    #[test]
+    fn entry_strength_is_pure_and_deterministic() {
+        let g = fixture_genome();
+        let f = fv(&[Some(4), Some(4), Some(0)]);
+        let first = g.entry_strength(&f, Direction::Long);
+        for _ in 0..5 {
+            assert_eq!(g.entry_strength(&f, Direction::Long), first);
+        }
+        // Grading never enters `decide`: the directional decision is unchanged by the graded path.
+        assert_eq!(
+            g.decide(&f, PositionState::flat()),
+            Decision::Enter(Direction::Long)
+        );
     }
 }

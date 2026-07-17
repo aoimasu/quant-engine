@@ -344,6 +344,84 @@ mod tests {
         assert_eq!(batch, assemble_batch(&cfg, &samples));
     }
 
+    /// QE-442: the graded conviction / entry-strength path is batch == streaming byte-identical. Because
+    /// `entry_strength` is a pure function of the (already-proven-identical) `FeatureVector`, `decide` AND
+    /// the graded `entry_conviction` / `entry_strength` must agree bar-for-bar between the batch-reconstructed
+    /// and streaming-reconstructed series — extending the AC1 parity guard onto the new graded surface.
+    #[test]
+    fn graded_entry_strength_is_batch_streaming_identical() {
+        use crate::genome::{
+            Clause, ExitParams, Genome, PositionState, RiskParams, RuleSet, CLAUSES_PER_SET,
+            REP_VERSION,
+        };
+        use qe_domain::Direction;
+
+        let cfg = CatalogueConfig::default();
+        let samples = series(80);
+        let schema = FeatureSchema::from_catalogue(&cfg);
+
+        let batch = assemble_batch(&cfg, &samples);
+        let mut asm = FeatureAssembler::new(&cfg);
+        let streamed: Vec<FeatureVector> = samples.iter().map(|s| asm.push(s)).collect();
+        assert_eq!(
+            batch, streamed,
+            "AC1 precondition: identical feature streams"
+        );
+
+        // A WIDE-band long genome so the graded strength genuinely varies over the series.
+        let off = Clause {
+            enabled: false,
+            feature: 0,
+            lo: 0,
+            hi: 0,
+        };
+        let mut long = [off; CLAUSES_PER_SET];
+        long[0] = Clause {
+            enabled: true,
+            feature: 0,
+            lo: 0,
+            hi: schema.num_states().saturating_sub(1),
+        };
+        let g = Genome {
+            version: REP_VERSION,
+            long_entry: RuleSet {
+                clauses: long,
+                min_satisfied: 1,
+            },
+            short_entry: RuleSet {
+                clauses: [off; CLAUSES_PER_SET],
+                min_satisfied: 1,
+            },
+            exit: ExitParams {
+                max_holding_bars: 3,
+                exit_on_opposite: false,
+            },
+            risk: RiskParams { size_bps: 5_000 },
+        };
+
+        for (b, s) in batch.iter().zip(streamed.iter()) {
+            assert_eq!(
+                g.decide(b, PositionState::flat()),
+                g.decide(s, PositionState::flat())
+            );
+            assert_eq!(
+                g.entry_conviction(b, Direction::Long),
+                g.entry_conviction(s, Direction::Long)
+            );
+            assert_eq!(
+                g.entry_strength(b, Direction::Long),
+                g.entry_strength(s, Direction::Long)
+            );
+        }
+        // Non-vacuous: at least one bar carried a genuinely graded (sub-1) strength.
+        assert!(
+            batch
+                .iter()
+                .any(|v| g.entry_strength(v, Direction::Long) < rust_decimal::Decimal::ONE),
+            "the series must exercise a graded (< 1) entry strength"
+        );
+    }
+
     #[test]
     fn vectors_become_complete_after_max_lookback() {
         let cfg = CatalogueConfig::default();

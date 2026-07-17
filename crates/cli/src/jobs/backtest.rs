@@ -221,6 +221,9 @@ fn backtest_config(taker_fee_bps: f64, reporting_impact: Option<Decimal>) -> Bac
             slippage,
             ..FrictionConfig::default()
         },
+        // QE-442: report on the SAME graded-conviction sizing the genome was selected under (train.rs
+        // `train_cfg.graded == true`), so reported metrics == selection metrics.
+        graded: true,
         ..BacktestConfig::default()
     }
 }
