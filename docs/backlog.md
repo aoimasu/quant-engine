@@ -300,7 +300,6 @@ _All R1.c tickets delivered — see [`reviewed/`](mds/reviewed/)._
 
 | Ticket | Title | Depends on | Status |
 |--------|-------|------------|:------:|
-| [QE-439](./reviews/2026-07-16-maxdama-panel-review.md#qe-439) | Make the DSR deflation basis coherent on the gens/windows axis  *(panel #10, majority)* | QE-131, QE-134 | — |
 | [QE-440](./reviews/2026-07-16-maxdama-panel-review.md#qe-440) | Move the impact model to concave square-root-in-participation and add a rolling ADV input  *(panel #11, majority)* | QE-128, QE-109 | — |
 | [QE-441](./reviews/2026-07-16-maxdama-panel-review.md#qe-441) | Inject bar-level scenario shocks into the single-strategy sizing fitness (tail-aware Kelly), with seeded/content-addressed shocks  *(panel #12, majority)* | QE-130, QE-120, QE-006 | — |
 | [QE-442](./reviews/2026-07-16-maxdama-panel-review.md#qe-442) | Make signal combination graded (probability surface) rather than hard-boolean k-of-n  *(panel #13, majority)* | QE-110, QE-107 | — |
