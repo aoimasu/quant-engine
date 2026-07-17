@@ -29,8 +29,10 @@ pub use capacity::{
 };
 pub use de::{binomial_crossover, de_mutant, EnsembleMask, DEFAULT_CR};
 pub use objective::{
-    cdar, combined_returns, cvar, leave_one_out_min, objective, pearson,
-    positive_mean_pairwise_corr, stress_overlay, ObjectiveConfig, TailRisk, DEFAULT_ALPHA,
+    cdar, combined_returns, cvar, leave_one_out_min, min_significant_r, objective,
+    pairwise_corr_penalty, pearson, positive_mean_pairwise_corr, stress_overlay, CorrDeflation,
+    CorrPenalty, ObjectiveConfig, TailRisk, DEFAULT_ALPHA, DEFAULT_FISHER_LAMBDA,
+    DEFAULT_SIGNIFICANCE_Z,
 };
 pub use regime::{
     leave_one_out_min_regime, per_regime_expectancy, regime_aware_cv_score, regime_aware_objective,

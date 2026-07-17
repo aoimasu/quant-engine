@@ -11,7 +11,7 @@
 use qe_signal::{expectancy_table, ExpectancyTable, Regime};
 
 use crate::objective::{combined_returns, objective};
-use crate::search::{run_de, SearchConfig, SearchResult};
+use crate::search::{corr_penalty_effective_n, run_de, SearchConfig, SearchResult};
 
 /// Default per-regime expectancy floor — an ensemble should be net-positive in every regime.
 pub const DEFAULT_REGIME_FLOOR: f64 = 0.0;
@@ -169,7 +169,7 @@ pub fn search_portfolio_regime_aware(
     cfg: &RegimeAwareConfig,
     seed: u64,
 ) -> SearchResult {
-    run_de(
+    let mut result = run_de(
         pool.len(),
         cfg.search.pop_size,
         cfg.search.generations,
@@ -177,7 +177,9 @@ pub fn search_portfolio_regime_aware(
         cfg.search.init_density,
         seed,
         |members| regime_aware_cv_score(pool, members, labels, cfg),
-    )
+    );
+    result.corr_effective_n = corr_penalty_effective_n(pool, &result.best.members(), &cfg.search);
+    result
 }
 
 #[cfg(test)]

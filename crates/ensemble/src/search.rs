@@ -12,7 +12,7 @@ use qe_determinism::{seed_rng, DetRng};
 use rand_core::RngCore;
 
 use crate::de::{binomial_crossover, de_mutant, EnsembleMask, DEFAULT_CR};
-use crate::objective::{leave_one_out_min, ObjectiveConfig};
+use crate::objective::{leave_one_out_min, pairwise_corr_penalty, ObjectiveConfig};
 
 /// Default DE population size.
 pub const DEFAULT_POP_SIZE: usize = 32;
@@ -72,6 +72,12 @@ pub struct SearchResult {
     pub generations_run: usize,
     /// Best score after each generation — a monotonic non-decreasing convergence trace.
     pub history: Vec<f64>,
+    /// The **smallest** sample size the winning mask's correlation penalty rested on across the CV fold
+    /// slices (QE-430) — the "tiny sample" flag for the score record, mirroring [`TailRisk::tail_n`].
+    /// `0` when the mask is empty or has `< 2` members (the penalty rests on no pair).
+    ///
+    /// [`TailRisk::tail_n`]: crate::objective::TailRisk::tail_n
+    pub corr_effective_n: usize,
 }
 
 /// Cross-validated robust-basin score of `members` over `pool` (QE-126/D2): partition the common time
@@ -158,6 +164,7 @@ pub(crate) fn run_de(
             score: f64::NEG_INFINITY,
             generations_run: 0,
             history: Vec::new(),
+            corr_effective_n: 0,
         };
     }
 
@@ -197,6 +204,47 @@ pub(crate) fn run_de(
         score: bs,
         generations_run: generations,
         history,
+        // Filled by the public entry points, which own the `pool`/`folds` context.
+        corr_effective_n: 0,
+    }
+}
+
+/// The **smallest** sample size the correlation penalty for `members` rests on across the CV fold slices
+/// (QE-430), mirroring [`cross_val_score`]'s fold slicing so it reflects the **actual fold-slice length**
+/// the DE search deflated on — not the full-window length. `< 2` members ⇒ `0` (no pair to correlate);
+/// no time axis ⇒ the full-window effective N.
+#[must_use]
+pub fn corr_penalty_effective_n(pool: &[Vec<f64>], members: &[usize], cfg: &SearchConfig) -> usize {
+    if members.len() < 2 {
+        return 0;
+    }
+    let deflation = cfg.objective.corr_deflation;
+    let sliced_effective_n = |lo: usize, hi: usize| -> usize {
+        let series: Vec<Vec<f64>> = members
+            .iter()
+            .map(|&m| pool[m][lo..hi.min(pool[m].len())].to_vec())
+            .collect();
+        pairwise_corr_penalty(&series, deflation).effective_n
+    };
+
+    let t = pool.iter().map(Vec::len).min().unwrap_or(0);
+    if t == 0 {
+        return sliced_effective_n(0, pool.iter().map(Vec::len).max().unwrap_or(0));
+    }
+    let k = cfg.folds.max(1).min(t);
+    let mut smallest = usize::MAX;
+    for f in 0..k {
+        let lo = f * t / k;
+        let hi = (f + 1) * t / k;
+        if hi <= lo {
+            continue;
+        }
+        smallest = smallest.min(sliced_effective_n(lo, hi));
+    }
+    if smallest == usize::MAX {
+        0
+    } else {
+        smallest
     }
 }
 
@@ -204,7 +252,7 @@ pub(crate) fn run_de(
 /// maximising the cross-validated robust-basin score. Deterministic in `seed`.
 #[must_use]
 pub fn search_portfolio(pool: &[Vec<f64>], cfg: &SearchConfig, seed: u64) -> SearchResult {
-    run_de(
+    let mut result = run_de(
         pool.len(),
         cfg.pop_size,
         cfg.generations,
@@ -212,7 +260,9 @@ pub fn search_portfolio(pool: &[Vec<f64>], cfg: &SearchConfig, seed: u64) -> Sea
         cfg.init_density,
         seed,
         |members| cross_val_score(pool, members, cfg),
-    )
+    );
+    result.corr_effective_n = corr_penalty_effective_n(pool, &result.best.members(), cfg);
+    result
 }
 
 #[cfg(test)]
@@ -319,6 +369,38 @@ mod tests {
         let result = search_portfolio(&[], &cfg(), 1);
         assert!(result.best.is_empty());
         assert_eq!(result.score, f64::NEG_INFINITY);
+        assert_eq!(result.corr_effective_n, 0);
+    }
+
+    #[test]
+    fn winning_mask_records_the_fold_slice_effective_n() {
+        // AC3 (search level): the winner's correlation penalty rests on the fold-slice length, not the
+        // full window — the record mirrors TailRisk.tail_n. The fixture triple is a multi-member basin,
+        // so the penalty rests on real pairs.
+        let t = 160;
+        let pool = fixture_pool(t);
+        let c = cfg();
+        let result = search_portfolio(&pool, &c, 2024);
+        assert!(
+            result.best.count() >= 2,
+            "need a ≥2-member winner for a pair"
+        );
+
+        // Each of the `folds` contiguous slices has length t/folds (evenly here), so the recorded N is
+        // that fold-slice length — provably below the full window t.
+        let expected_fold_n = t / c.folds;
+        assert_eq!(result.corr_effective_n, expected_fold_n);
+        assert!(
+            result.corr_effective_n < t,
+            "effective N must be the fold slice ({}), not the full window ({t})",
+            result.corr_effective_n
+        );
+
+        // The public helper agrees with what the search recorded.
+        assert_eq!(
+            corr_penalty_effective_n(&pool, &result.best.members(), &c),
+            result.corr_effective_n
+        );
     }
 
     #[test]

@@ -206,6 +206,10 @@ pub struct TrainResultDoc {
     pub weights: Vec<f64>,
     /// The converged cross-validated robust-basin ensemble score.
     pub ensemble_score: f64,
+    /// The smallest sample size the selected ensemble's correlation penalty rested on across the CV fold
+    /// slices (QE-430) — the "tiny sample" flag recorded alongside the score, mirroring `TailRisk::tail_n`.
+    /// `0` when fewer than two members were selected (the penalty rests on no pair).
+    pub ensemble_corr_effective_n: usize,
     /// Realised funding cashflow (signed) of the selected ensemble over the train window (QE-403
     /// net-of-cost visibility). Weight-summed across chromosomes; unit starting capital per member.
     pub funding_pnl: f64,
@@ -518,6 +522,7 @@ pub fn run_train_job(
         selected,
         weights,
         ensemble_score: ens.score,
+        ensemble_corr_effective_n: ens.corr_effective_n,
         funding_pnl,
         funding_fraction_of_net,
         robustness,
