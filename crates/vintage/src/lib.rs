@@ -32,7 +32,10 @@ pub mod schema;
 ///   calibration shared by friction & capacity), riding the lineage alongside `calibration`.
 /// - `5` (QE-433): added [`VintageContent::sizer`] (the content-addressed advisory portfolio-Kelly
 ///   leverage multiplier), riding the lineage alongside `slippage`.
-pub const VINTAGE_FORMAT_VERSION: u16 = 5;
+/// - `6` (QE-440): reshaped [`VintageContent::slippage`] to the concave √-in-participation impact model —
+///   the `SlippageCalibration` hashed fields changed (`impact_per_notional` + `reference_mark` →
+///   participation `impact_coeff` + `impact_exponent` β).
+pub const VINTAGE_FORMAT_VERSION: u16 = 6;
 
 /// The hashed content of a vintage — everything the content hash covers.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

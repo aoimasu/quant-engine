@@ -6,7 +6,7 @@
 //! drive: a signed, average-cost position walked over a fill/funding event stream, returning a
 //! **decomposed** `gross / fees / slippage / funding` P&L. All money is exact `rust_decimal`.
 
-use rust_decimal::Decimal;
+use rust_decimal::{Decimal, MathematicalOps};
 
 use qe_domain::Side;
 use qe_risk::SlippageCalibration;
@@ -56,46 +56,65 @@ impl FeeSchedule {
     }
 }
 
-/// Spread-cross + size-dependent slippage. Cost on a fill is
-/// `notional_abs · (half_spread + impact · qty_abs)`.
+/// Spread-cross + **concave (√-in-participation)** size impact (QE-440). Cost on a fill is
+/// `notional_abs · (half_spread + impact_coeff · (qty_abs/adv)^β)`, where `adv` is the rolling ADV (in
+/// the same contract unit as `qty`) so participation `u = qty/adv` is dimensionless.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SlippageModel {
     /// Half the bid/ask spread, as a fraction of price (the spread-cross term).
     pub half_spread: Decimal,
-    /// Size-impact coefficient (per unit qty); the size-dependent term.
-    pub impact: Decimal,
+    /// Participation impact coefficient — the impact fraction of notional at `u = 1` (100 % of ADV).
+    /// Dimensionless and asset-portable (shared verbatim with capacity via the calibration).
+    pub impact_coeff: Decimal,
+    /// Impact exponent β — the concavity of impact in participation (`u^β`, `β < 1`).
+    pub impact_exponent: Decimal,
 }
 
 impl Default for SlippageModel {
     fn default() -> Self {
-        // QE-431: the default is **derived** from the one content-addressed [`SlippageCalibration`], not
-        // authored here — so no magic slippage/impact literal remains on the selection path (the train
+        // QE-431/QE-440: the default is **derived** from the one content-addressed [`SlippageCalibration`],
+        // not authored here — so no magic slippage/impact literal remains on the selection path (the train
         // search runs on `BacktestConfig::default().friction`) and friction can never drift from the
-        // capacity side, which derives from the same calibration. The per-contract `impact` is
-        // `impact_per_notional · reference_mark = 2e-9 · 50000 = 1e-4` — byte-identical to the pre-QE-431
-        // literal, so friction's net-of-cost behaviour is unchanged.
+        // capacity side, which derives the **same** participation-keyed coefficient from the same
+        // calibration.
         SlippageModel::from_calibration(&SlippageCalibration::default())
     }
 }
 
 impl SlippageModel {
-    /// Derive the friction slippage model from the shared [`SlippageCalibration`] (QE-431): the
-    /// `half_spread` is shared verbatim and the per-contract `impact` is
-    /// [`SlippageCalibration::friction_impact_per_contract`] (`impact_per_notional · reference_mark`).
+    /// Derive the friction slippage model from the shared [`SlippageCalibration`] (QE-431/QE-440): the
+    /// `half_spread`, participation `impact_coeff`, and exponent β are all taken verbatim — no
+    /// per-contract conversion (participation is dimensionless), so friction and capacity key impact off
+    /// the identical coefficient.
     #[must_use]
     pub fn from_calibration(cal: &SlippageCalibration) -> Self {
         SlippageModel {
             half_spread: cal.half_spread,
-            impact: cal.friction_impact_per_contract(),
+            impact_coeff: cal.impact_coeff,
+            impact_exponent: cal.impact_exponent,
         }
     }
 
-    /// Slippage cost for a fill of `qty_abs` with notional `notional_abs`. The size term
-    /// `notional·impact·qty` is quadratic in position size, so large-`size_bps`/high-turnover genomes pay
-    /// more.
+    /// Slippage cost for a fill of `qty_abs` (notional `notional_abs`) against rolling ADV `adv` (in the
+    /// same contract unit as `qty`). The size term `impact_coeff · (qty/adv)^β` is **concave** in size
+    /// (`β < 1`): doubling `qty` at fixed `adv` multiplies the impact fraction by `2^β < 2`. A
+    /// non-positive `adv` charges the spread-cross only (participation is undefined without an ADV).
+    ///
+    /// Deterministic across platforms — `(qty/adv)^β` is `rust_decimal`'s pure-Decimal `powd` (no
+    /// hardware `f64`), safe for the sealed/hashed money ledger.
     #[must_use]
-    pub fn cost(&self, notional_abs: Decimal, qty_abs: Decimal) -> Decimal {
-        notional_abs * (self.half_spread + self.impact * qty_abs)
+    pub fn cost(&self, notional_abs: Decimal, qty_abs: Decimal, adv: Decimal) -> Decimal {
+        let participation = if adv > Decimal::ZERO {
+            qty_abs / adv
+        } else {
+            Decimal::ZERO
+        };
+        let impact = if participation > Decimal::ZERO {
+            self.impact_coeff * participation.powd(self.impact_exponent)
+        } else {
+            Decimal::ZERO
+        };
+        notional_abs * (self.half_spread + impact)
     }
 }
 
@@ -142,6 +161,9 @@ pub struct Fill {
     pub qty: Decimal,
     /// Fill price.
     pub price: Decimal,
+    /// Rolling ADV at the fill (same contract unit as `qty`), keying the participation impact (QE-440).
+    /// A non-positive value charges the spread-cross only.
+    pub adv: Decimal,
     /// Whether it took or made liquidity.
     pub liquidity: Liquidity,
 }
@@ -253,7 +275,8 @@ pub fn simulate(events: &[Event], cfg: &FrictionConfig) -> PnlBreakdown {
             Event::Fill(f) => {
                 let notional_abs = (f.qty * f.price).abs();
                 pnl.fees += cfg.fees.fee(notional_abs, f.liquidity) * cfg.cost_multiplier;
-                pnl.slippage += cfg.slippage.cost(notional_abs, f.qty.abs()) * cfg.cost_multiplier;
+                pnl.slippage +=
+                    cfg.slippage.cost(notional_abs, f.qty.abs(), f.adv) * cfg.cost_multiplier;
                 pnl.gross += pos.apply(f.side, f.qty, f.price);
             }
             Event::Funding(s) => {
@@ -289,11 +312,15 @@ mod tests {
         Decimal::from_str(s).unwrap()
     }
 
+    // ADV keeping every fixture order at 1 % participation (`u = 1/100`), so `impact = 0.01·√0.01 =
+    // 0.001` — a clean, concave size term.
+    const ADV: &str = "100";
     fn buy(qty: &str, price: &str) -> Event {
         Event::Fill(Fill {
             side: Side::Buy,
             qty: d(qty),
             price: d(price),
+            adv: d(ADV),
             liquidity: Liquidity::Taker,
         })
     }
@@ -302,6 +329,7 @@ mod tests {
             side: Side::Sell,
             qty: d(qty),
             price: d(price),
+            adv: d(ADV),
             liquidity: Liquidity::Taker,
         })
     }
@@ -326,11 +354,12 @@ mod tests {
         let pnl = simulate(&events, &FrictionConfig::default());
         assert_eq!(pnl.gross, Decimal::ZERO);
         // fees = 2 × (100 × 0.0005) = 0.10;
-        // slippage = 2 × (100 × (0.0001 half-spread + 0.0001 impact × 1 qty)) = 2 × (100 × 0.0002) = 0.04.
+        // participation u = qty/adv = 1/100 = 0.01 ⇒ impact = 0.01·√0.01 = 0.001;
+        // slippage = 2 × (100 × (0.0001 half-spread + 0.001 impact)) = 2 × (100 × 0.0011) = 0.22.
         assert_eq!(pnl.fees, d("0.10"));
-        assert_eq!(pnl.slippage, d("0.04"));
+        assert_eq!(pnl.slippage, d("0.22"));
         assert!(pnl.net() < Decimal::ZERO);
-        assert_eq!(pnl.net(), d("-0.14"));
+        assert_eq!(pnl.net(), d("-0.32"));
     }
 
     #[test]
@@ -402,14 +431,43 @@ mod tests {
 
     #[test]
     fn default_is_derived_from_the_shared_calibration_no_magic_literal() {
-        // QE-431 AC3: the selection-path friction model authors no slippage/impact literal — it is
-        // exactly the one derived from `SlippageCalibration::default()` (the single source of truth).
+        // QE-431/QE-440 AC: the selection-path friction model authors no slippage/impact literal — it is
+        // exactly the one derived from `SlippageCalibration::default()` (the single source of truth), and
+        // it keeps the calibration's participation-keyed coefficient verbatim (no per-contract conversion).
+        let cal = SlippageCalibration::default();
         assert_eq!(
             SlippageModel::default(),
-            SlippageModel::from_calibration(&SlippageCalibration::default())
+            SlippageModel::from_calibration(&cal)
         );
-        // And the derived per-contract impact is byte-identical to the pre-QE-431 default (1e-4).
-        assert_eq!(SlippageModel::default().impact, d("0.0001"));
-        assert_eq!(SlippageModel::default().half_spread, d("0.0001"));
+        assert_eq!(SlippageModel::default().half_spread, cal.half_spread);
+        assert_eq!(SlippageModel::default().impact_coeff, cal.impact_coeff);
+        assert_eq!(
+            SlippageModel::default().impact_exponent,
+            cal.impact_exponent
+        );
+    }
+
+    #[test]
+    fn cost_is_concave_in_participation_and_reduces_without_adv() {
+        // QE-440: at fixed ADV, doubling qty multiplies the *impact* term by 2^β < 2 (concave), unlike the
+        // old linear-in-qty term that doubled it. Compare against the spread-only baseline to isolate impact.
+        let m = SlippageModel::default();
+        let adv = d("1000");
+        let spread_only = |notional: Decimal| notional * m.half_spread;
+        let q = d("10");
+        let n1 = q * d("100");
+        let n2 = (q * d("2")) * d("100");
+        let impact1 = m.cost(n1, q, adv) - spread_only(n1);
+        // Normalise out the notional (which itself doubles) to compare the impact *fraction*.
+        let frac1 = impact1 / n1;
+        let frac2 = (m.cost(n2, q * d("2"), adv) - spread_only(n2)) / n2;
+        assert!(frac2 > frac1, "impact fraction must rise with size");
+        let ratio = (frac2 / frac1).round_dp(6);
+        assert!(
+            ratio < d("2"),
+            "concave: doubling qty raises impact fraction by < 2×, got {ratio}"
+        );
+        // No ADV ⇒ spread-cross only (participation undefined).
+        assert_eq!(m.cost(n1, q, Decimal::ZERO), spread_only(n1));
     }
 }

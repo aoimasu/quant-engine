@@ -17,26 +17,28 @@
 //! pinned input snapshot reproduces **byte-identical** coefficients and a byte-stable content hash.
 
 use rust_decimal::prelude::ToPrimitive;
-use rust_decimal::Decimal;
+use rust_decimal::{Decimal, MathematicalOps};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use qe_domain::Side;
 
 /// Decimal places calibrated coefficients are quantized to before hashing/serializing. Wide enough for a
-/// per-$ impact coefficient (`~2e-9`); quantizing+normalizing keeps the value serialize-idempotent so the
-/// content hash is byte-reproducible (the hazard [`quantize_calibration`](crate::quantize_calibration)
-/// guards for breaker thresholds, QE-416).
+/// dimensionless participation coefficient and a fractional exponent; quantizing+normalizing keeps the
+/// value serialize-idempotent so the content hash is byte-reproducible (the hazard
+/// [`quantize_calibration`](crate::quantize_calibration) guards for breaker thresholds, QE-416).
 pub const SLIPPAGE_SCALE: u32 = 18;
 
 /// The canonical default half-spread (fraction of price) — a 1bp spread-cross, mirroring QE-109/QE-128.
 pub const DEFAULT_HALF_SPREAD: Decimal = Decimal::from_parts(1, 0, 0, false, 4); // 0.0001
-/// The canonical default size-impact per $ of traded notional (QE-128's `2e-9`).
-pub const DEFAULT_IMPACT_PER_NOTIONAL: Decimal = Decimal::from_parts(2, 0, 0, false, 9); // 0.000000002
-/// The canonical default reference mark ($/contract) that pins friction's per-contract coefficient. At
-/// this mark `impact_per_notional · reference_mark = 2e-9 · 50000 = 1e-4`, exactly QE-109's per-contract
-/// `impact` default — the two legacy literals were only mutually consistent at this mark.
-pub const DEFAULT_REFERENCE_MARK: Decimal = Decimal::from_parts(50_000, 0, 0, false, 0);
+/// The canonical default **participation** impact coefficient (QE-440): the impact fraction of notional
+/// when trading `u = 1` (100 % of a rolling ADV). Dimensionless and asset-portable (no per-contract vs
+/// per-$ split), shared verbatim by friction and capacity. Default `0.01` is an economically-grounded
+/// √-law seed (~1 % impact at 100 % of one hour's ADV, maxdama §7.7); live power-law fitting is follow-up.
+pub const DEFAULT_IMPACT_COEFF: Decimal = Decimal::from_parts(1, 0, 0, false, 2); // 0.01
+/// The canonical default impact **exponent** β (QE-440): the concavity of impact in participation,
+/// `β ∈ [0.2, 0.5]`. Default `0.5` is the square-root law (maxdama §7.7); `β < 1` makes impact concave.
+pub const DEFAULT_IMPACT_EXPONENT: Decimal = Decimal::from_parts(5, 0, 0, false, 1); // 0.5
 
 /// Quantize a coefficient to [`SLIPPAGE_SCALE`] and normalize to its minimal scale, so it round-trips
 /// byte-identically through serde (excess-precision division results would otherwise change the content
@@ -46,30 +48,33 @@ fn quantize(d: Decimal) -> Decimal {
     d.round_dp(SLIPPAGE_SCALE).normalize()
 }
 
-/// The one content-addressed slippage/impact calibration (QE-431) shared by friction & capacity.
+/// The one content-addressed slippage/impact calibration (QE-431 + QE-440) shared by friction & capacity.
 ///
-/// `impact_per_notional` is the **canonical** size-impact unit — per $ of traded notional (capacity's
-/// unit, asset-portable). `reference_mark` is the mark price that converts it to friction's per-contract
-/// coefficient. `half_spread` (a fraction of price) is identical on both sides.
+/// The size-impact is **concave in participation** (maxdama §7.7): the impact fraction of notional is
+/// `impact_coeff · u^β`, where `u = traded / ADV` is the dimensionless participation (order size as a
+/// fraction of a rolling ADV). `impact_coeff` (the fraction at `u = 1`) and `impact_exponent` (β) are the
+/// **same, asset-portable, participation-keyed** coefficients on both sides of the search⟂portfolio
+/// firewall — no per-contract vs per-$ conversion (QE-440 resolves the QE-431 reviewer's unit flag).
+/// `half_spread` (a fraction of price) is identical on both sides.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SlippageCalibration {
     /// Half the bid/ask spread, as a fraction of price (the spread-cross term).
     pub half_spread: Decimal,
-    /// Size-impact coefficient per $ of traded notional (the canonical, asset-portable unit).
-    pub impact_per_notional: Decimal,
-    /// Reference mark ($/contract) pinning friction's per-contract coefficient
-    /// (`impact_per_notional · reference_mark`).
-    pub reference_mark: Decimal,
+    /// Participation impact coefficient — the impact fraction of notional at `u = 1` (100 % of ADV).
+    /// Dimensionless, asset-portable, shared verbatim by friction & capacity.
+    pub impact_coeff: Decimal,
+    /// Impact exponent β — the concavity of impact in participation (`u^β`, `β ∈ [0.2, 0.5]`, `< 1`).
+    pub impact_exponent: Decimal,
 }
 
 impl Default for SlippageCalibration {
     fn default() -> Self {
-        // The canonical pre-wiring seed: reproduces QE-109's friction `impact = 1e-4`/contract and
-        // QE-128's capacity `impact_coeff = 2e-9`/$ from one source. Live-fitted wiring is follow-up.
+        // The pre-fit seed: a √-in-participation impact (β = 0.5) with a ~1 % coefficient at full-ADV
+        // participation, shared by friction & capacity from one source. Live-fitted wiring is follow-up.
         SlippageCalibration {
             half_spread: DEFAULT_HALF_SPREAD,
-            impact_per_notional: DEFAULT_IMPACT_PER_NOTIONAL,
-            reference_mark: DEFAULT_REFERENCE_MARK,
+            impact_coeff: DEFAULT_IMPACT_COEFF,
+            impact_exponent: DEFAULT_IMPACT_EXPONENT,
         }
     }
 }
@@ -77,29 +82,46 @@ impl Default for SlippageCalibration {
 impl SlippageCalibration {
     /// Construct from raw coefficients, quantizing each so the value is serialize-idempotent.
     #[must_use]
-    pub fn new(
-        half_spread: Decimal,
-        impact_per_notional: Decimal,
-        reference_mark: Decimal,
-    ) -> Self {
+    pub fn new(half_spread: Decimal, impact_coeff: Decimal, impact_exponent: Decimal) -> Self {
         SlippageCalibration {
             half_spread: quantize(half_spread),
-            impact_per_notional: quantize(impact_per_notional),
-            reference_mark: quantize(reference_mark),
+            impact_coeff: quantize(impact_coeff),
+            impact_exponent: quantize(impact_exponent),
         }
     }
 
-    /// Friction's **per-contract** size-impact coefficient: `impact_per_notional · reference_mark`.
+    /// The impact fraction of notional at participation `u` (QE-440): `impact_coeff · u^β`, concave in
+    /// `u` (`β < 1`). A non-positive `u` (no size, or missing ADV) yields `0` (spread-cross only).
+    ///
+    /// Deterministic across platforms: `u^β` is `rust_decimal`'s [`MathematicalOps::powd`], evaluated in
+    /// pure Decimal arithmetic (no hardware `f64`), so it is byte-identical on arm64 (dev) and x86_64
+    /// (CI) — safe for the sealed/hashed money ledger.
     #[must_use]
-    pub fn friction_impact_per_contract(&self) -> Decimal {
-        self.impact_per_notional * self.reference_mark
+    pub fn participation_impact(&self, participation: Decimal) -> Decimal {
+        if participation <= Decimal::ZERO {
+            return Decimal::ZERO;
+        }
+        self.impact_coeff * participation.powd(self.impact_exponent)
     }
 
-    /// The canonical per-fill slippage cost for a trade of `notional` ($), in the per-notional form both
-    /// sides reduce to: `notional · (half_spread + impact_per_notional · notional)`.
+    /// The full cost fraction of notional at participation `u`: `half_spread + impact_coeff · u^β`.
     #[must_use]
-    pub fn notional_cost(&self, notional: Decimal) -> Decimal {
-        notional * (self.half_spread + self.impact_per_notional * notional)
+    pub fn cost_fraction(&self, participation: Decimal) -> Decimal {
+        self.half_spread + self.participation_impact(participation)
+    }
+
+    /// The canonical per-fill slippage cost for a trade of `notional` ($) against `adv_notional` ($ of
+    /// rolling ADV), in the participation form both sides reduce to:
+    /// `notional · (half_spread + impact_coeff · (notional/adv_notional)^β)`. A non-positive
+    /// `adv_notional` charges the spread-cross only (participation is undefined without an ADV).
+    #[must_use]
+    pub fn notional_cost(&self, notional: Decimal, adv_notional: Decimal) -> Decimal {
+        let participation = if adv_notional > Decimal::ZERO {
+            notional / adv_notional
+        } else {
+            Decimal::ZERO
+        };
+        notional * self.cost_fraction(participation)
     }
 
     /// `half_spread` as `f64` (capacity is an f64 model). Panics only on a non-representable `Decimal`,
@@ -111,12 +133,20 @@ impl SlippageCalibration {
             .expect("quantized half_spread is representable as f64")
     }
 
-    /// `impact_per_notional` as `f64` (capacity's `impact_coeff`).
+    /// `impact_coeff` as `f64` (capacity's participation coefficient).
     #[must_use]
-    pub fn impact_per_notional_f64(&self) -> f64 {
-        self.impact_per_notional
+    pub fn impact_coeff_f64(&self) -> f64 {
+        self.impact_coeff
             .to_f64()
-            .expect("quantized impact_per_notional is representable as f64")
+            .expect("quantized impact_coeff is representable as f64")
+    }
+
+    /// `impact_exponent` (β) as `f64` (capacity's participation exponent).
+    #[must_use]
+    pub fn impact_exponent_f64(&self) -> f64 {
+        self.impact_exponent
+            .to_f64()
+            .expect("quantized impact_exponent is representable as f64")
     }
 
     /// Lowercase-hex SHA-256 over the record's canonical JSON — the **content hash** (same pattern as
@@ -175,26 +205,31 @@ fn median(sorted: &[Decimal]) -> Option<Decimal> {
     Some(sorted[idx])
 }
 
-/// Fit a [`SlippageCalibration`] from the venue's own trade + quote history (maxdama §7.7).
+/// Fit a [`SlippageCalibration`] from the venue's own trade + quote history (maxdama §7.7 + QE-440).
 ///
 /// - `half_spread` = median of `(ask − bid) / (2·mid)` over `quotes` (`mid = (ask+bid)/2`, `mid > 0`).
-/// - `impact_per_notional` = **binned zero-intercept least-squares** slope of *signed* fractional impact
-///   vs notional: `signed_impact = dir·(price − pre_mid)/pre_mid`, `notional = qty·price`, `dir = +1`
-///   (Buy) / `−1` (Sell) — the aggressor sign taken directly (no Lee-Ready). Trades are sorted by
-///   notional, split into `bins` equal-count buckets, and the slope through the per-bucket means is
-///   `Σ(x̄·ȳ) / Σ(x̄²)`.
-/// - `reference_mark` = median trade price.
+/// - `impact_coeff` = **binned zero-intercept least-squares** slope of *signed* fractional impact vs the
+///   **participation regressor** `u^β`: `signed_impact = dir·(price − pre_mid)/pre_mid`,
+///   `u = (qty·price) / adv_notional`, `β = ` [`DEFAULT_IMPACT_EXPONENT`], `dir = +1` (Buy) / `−1` (Sell)
+///   — the aggressor sign taken directly (no Lee-Ready). Trades are sorted by size, split into `bins`
+///   equal-count buckets, and the slope through the per-bucket means is `Σ(x̄·ȳ) / Σ(x̄²)`.
+/// - `impact_exponent` = [`DEFAULT_IMPACT_EXPONENT`] (β is held at the √-law prior — robustly fitting an
+///   exponent needs far more data than binning here provides; the panel's prior is `β ∈ [0.2, 0.5]`).
 ///
-/// Degenerate inputs (no usable quotes/trades, a zero slope denominator) fall back to the corresponding
-/// [`SlippageCalibration::default`] coefficient. All arithmetic is exact `Decimal`, so the fit is
-/// byte-reproducible on a pinned input snapshot.
+/// `adv_notional` ($ of rolling ADV) makes participation dimensionless. Degenerate inputs (no usable
+/// quotes/trades, non-positive `adv_notional`, a zero slope denominator) fall back to the corresponding
+/// [`SlippageCalibration::default`] coefficient. All arithmetic is exact `Decimal` (`u^β` via
+/// deterministic pure-Decimal [`MathematicalOps::powd`]), so the fit is byte-reproducible on a pinned
+/// input snapshot.
 #[must_use]
 pub fn fit_slippage_calibration(
     trades: &[SizedTrade],
     quotes: &[QuoteSample],
+    adv_notional: Decimal,
     bins: usize,
 ) -> SlippageCalibration {
     let default = SlippageCalibration::default();
+    let beta = default.impact_exponent;
 
     // --- half_spread from the observed spread distribution ---
     let two = Decimal::from(2);
@@ -212,40 +247,37 @@ pub fn fit_slippage_calibration(
     half_spreads.sort();
     let half_spread = median(&half_spreads).unwrap_or(default.half_spread);
 
-    // --- reference_mark = median trade price ---
-    let mut prices: Vec<Decimal> = trades
-        .iter()
-        .filter(|t| t.price > Decimal::ZERO)
-        .map(|t| t.price)
-        .collect();
-    prices.sort();
-    let reference_mark = median(&prices).unwrap_or(default.reference_mark);
+    // --- impact_coeff = binned zero-intercept LS slope of signed impact vs the participation regressor ---
+    // (u^β, signed_impact) pairs, sorted by participation so equal-count bins are size-ordered.
+    let impact_coeff = if adv_notional > Decimal::ZERO {
+        let mut points: Vec<(Decimal, Decimal)> = trades
+            .iter()
+            .filter(|t| {
+                t.qty > Decimal::ZERO && t.pre_mid > Decimal::ZERO && t.price > Decimal::ZERO
+            })
+            .map(|t| {
+                let participation = (t.qty * t.price) / adv_notional;
+                let regressor = participation.powd(beta); // deterministic pure-Decimal power
+                let dir = match t.side {
+                    Side::Buy => Decimal::ONE,
+                    Side::Sell => Decimal::NEGATIVE_ONE,
+                };
+                let signed_impact = dir * (t.price - t.pre_mid) / t.pre_mid;
+                (regressor, signed_impact)
+            })
+            .collect();
+        points.sort_by_key(|p| p.0);
+        binned_slope(&points, bins).unwrap_or(default.impact_coeff)
+    } else {
+        default.impact_coeff
+    };
 
-    // --- impact_per_notional = binned zero-intercept LS slope of signed impact vs notional ---
-    // (notional, signed_impact) pairs, sorted by notional so equal-count bins are size-ordered.
-    let mut points: Vec<(Decimal, Decimal)> = trades
-        .iter()
-        .filter(|t| t.qty > Decimal::ZERO && t.pre_mid > Decimal::ZERO && t.price > Decimal::ZERO)
-        .map(|t| {
-            let notional = t.qty * t.price;
-            let dir = match t.side {
-                Side::Buy => Decimal::ONE,
-                Side::Sell => Decimal::NEGATIVE_ONE,
-            };
-            let signed_impact = dir * (t.price - t.pre_mid) / t.pre_mid;
-            (notional, signed_impact)
-        })
-        .collect();
-    points.sort_by_key(|p| p.0);
-
-    let impact_per_notional = binned_slope(&points, bins).unwrap_or(default.impact_per_notional);
-
-    SlippageCalibration::new(half_spread, impact_per_notional, reference_mark)
+    SlippageCalibration::new(half_spread, impact_coeff, beta)
 }
 
 /// Zero-intercept least-squares slope through the means of `bins` equal-count buckets of size-sorted
-/// `points` (`(x = notional, y = signed_impact)`): `Σ(x̄·ȳ) / Σ(x̄²)`. `None` if there are no points or the
-/// denominator is zero.
+/// `points` (`(x = participation^β, y = signed_impact)`): `Σ(x̄·ȳ) / Σ(x̄²)`. `None` if there are no
+/// points or the denominator is zero.
 fn binned_slope(points: &[(Decimal, Decimal)], bins: usize) -> Option<Decimal> {
     let n = points.len();
     if n == 0 {
@@ -285,13 +317,45 @@ mod tests {
     }
 
     #[test]
-    fn default_reconstructs_the_two_legacy_literals() {
+    fn default_is_the_sqrt_law_seed() {
         let cal = SlippageCalibration::default();
-        // capacity's per-$ default …
-        assert_eq!(cal.impact_per_notional, d("0.000000002")); // 2e-9
-        assert_eq!(cal.half_spread, d("0.0001")); // 1bp
-                                                  // … and friction's per-contract default is the derived product (2e-9 · 50000 = 1e-4).
-        assert_eq!(cal.friction_impact_per_contract(), d("0.0001"));
+        assert_eq!(cal.half_spread, d("0.0001")); // 1bp spread-cross
+        assert_eq!(cal.impact_coeff, d("0.01")); // 1% impact fraction at 100% participation
+        assert_eq!(cal.impact_exponent, d("0.5")); // √-in-participation law
+    }
+
+    #[test]
+    fn impact_is_concave_in_participation() {
+        // QE-440: doubling participation at fixed coefficient multiplies the impact fraction by 2^β < 2
+        // (sub-linear), unlike the old linear-in-qty term. At β = 0.5 the ratio is exactly √2.
+        let cal = SlippageCalibration::default();
+        let u = d("0.01");
+        let a = cal.participation_impact(u);
+        let b = cal.participation_impact(u * d("2"));
+        assert!(a > Decimal::ZERO && b > a);
+        let ratio = (b / a).round_dp(6);
+        assert_eq!(ratio, d("2").sqrt().unwrap().round_dp(6)); // √2 ≈ 1.414214, strictly < 2
+        assert!(ratio < d("2"));
+    }
+
+    #[test]
+    fn participation_impact_reduces_sensibly_and_is_deterministic() {
+        let cal = SlippageCalibration::default();
+        // No participation (or missing ADV) ⇒ no impact term (spread-cross only).
+        assert_eq!(cal.participation_impact(Decimal::ZERO), Decimal::ZERO);
+        assert_eq!(cal.participation_impact(d("-1")), Decimal::ZERO);
+        assert_eq!(
+            cal.notional_cost(d("1000"), Decimal::ZERO),
+            d("1000") * cal.half_spread
+        );
+        // u = 1 (100% of ADV) ⇒ impact fraction == impact_coeff exactly.
+        assert_eq!(cal.participation_impact(Decimal::ONE), cal.impact_coeff);
+        // Determinism: the pure-Decimal power pins an exact expected literal (0.01·√0.01 = 0.001).
+        assert_eq!(cal.participation_impact(d("0.01")), d("0.001"));
+        assert_eq!(
+            cal.participation_impact(d("0.01")),
+            SlippageCalibration::default().participation_impact(d("0.01"))
+        );
     }
 
     #[test]
@@ -315,25 +379,17 @@ mod tests {
         let base = SlippageCalibration::default().content_hash();
         assert_ne!(
             base,
-            SlippageCalibration::new(
-                d("0.0002"),
-                DEFAULT_IMPACT_PER_NOTIONAL,
-                DEFAULT_REFERENCE_MARK
-            )
-            .content_hash()
+            SlippageCalibration::new(d("0.0002"), DEFAULT_IMPACT_COEFF, DEFAULT_IMPACT_EXPONENT)
+                .content_hash()
         );
         assert_ne!(
             base,
-            SlippageCalibration::new(
-                DEFAULT_HALF_SPREAD,
-                d("0.000000003"),
-                DEFAULT_REFERENCE_MARK
-            )
-            .content_hash()
+            SlippageCalibration::new(DEFAULT_HALF_SPREAD, d("0.02"), DEFAULT_IMPACT_EXPONENT)
+                .content_hash()
         );
         assert_ne!(
             base,
-            SlippageCalibration::new(DEFAULT_HALF_SPREAD, DEFAULT_IMPACT_PER_NOTIONAL, d("40000"))
+            SlippageCalibration::new(DEFAULT_HALF_SPREAD, DEFAULT_IMPACT_COEFF, d("0.3"))
                 .content_hash()
         );
     }
@@ -372,24 +428,37 @@ mod tests {
             trade(Side::Sell, "10", "99.95", "100"),
         ];
 
-        let a = fit_slippage_calibration(&trades, &quotes, DEFAULT_IMPACT_BINS);
-        let b = fit_slippage_calibration(&trades, &quotes, DEFAULT_IMPACT_BINS);
+        let adv = d("10000"); // $ of rolling ADV, making participation dimensionless
+        let a = fit_slippage_calibration(&trades, &quotes, adv, DEFAULT_IMPACT_BINS);
+        let b = fit_slippage_calibration(&trades, &quotes, adv, DEFAULT_IMPACT_BINS);
         // Byte-reproducible on the same pinned input.
         assert_eq!(a, b);
         assert_eq!(a.content_hash(), b.content_hash());
 
         // half_spread read off the observed distribution (median 1bp).
         assert_eq!(a.half_spread, d("0.0001"));
-        // reference_mark = median trade price (sorted prices → median element 100.001).
-        assert!(a.reference_mark > d("99") && a.reference_mark < d("201"));
-        // A positive, non-degenerate impact slope was fit from the size/impact relationship.
-        assert!(a.impact_per_notional > Decimal::ZERO);
+        // β is held at the √-law prior.
+        assert_eq!(a.impact_exponent, DEFAULT_IMPACT_EXPONENT);
+        // A positive, non-degenerate participation coefficient was fit from the size/impact relationship.
+        assert!(a.impact_coeff > Decimal::ZERO);
     }
 
     #[test]
     fn fit_falls_back_to_defaults_on_empty_input() {
-        let cal = fit_slippage_calibration(&[], &[], DEFAULT_IMPACT_BINS);
+        let cal = fit_slippage_calibration(&[], &[], d("10000"), DEFAULT_IMPACT_BINS);
         assert_eq!(cal, SlippageCalibration::default());
+    }
+
+    #[test]
+    fn fit_falls_back_to_default_coeff_without_adv() {
+        // No ADV ⇒ participation is undefined ⇒ the coefficient falls back to the seed (β/half_spread
+        // still fit from the venue where present).
+        let trades = vec![trade(Side::Buy, "10", "100.05", "100")];
+        let cal = fit_slippage_calibration(&trades, &[], Decimal::ZERO, DEFAULT_IMPACT_BINS);
+        assert_eq!(
+            cal.impact_coeff,
+            SlippageCalibration::default().impact_coeff
+        );
     }
 
     #[test]
@@ -398,9 +467,9 @@ mod tests {
         // POSITIVE (adverse) impact — proving the sign is taken from `side`, not inferred by Lee-Ready.
         let buy = trade(Side::Buy, "5", "100.02", "100");
         let sell = trade(Side::Sell, "5", "99.98", "100");
-        let up = fit_slippage_calibration(&[buy], &[], 1);
-        let down = fit_slippage_calibration(&[sell], &[], 1);
-        assert!(up.impact_per_notional > Decimal::ZERO);
-        assert!(down.impact_per_notional > Decimal::ZERO);
+        let up = fit_slippage_calibration(&[buy], &[], d("10000"), 1);
+        let down = fit_slippage_calibration(&[sell], &[], d("10000"), 1);
+        assert!(up.impact_coeff > Decimal::ZERO);
+        assert!(down.impact_coeff > Decimal::ZERO);
     }
 }

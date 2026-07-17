@@ -19,11 +19,11 @@ use qe_signal::{
     reconstruct_batch, CatalogueConfig, Clause, Decision, ExitParams, FeatureSchema, FeatureVector,
     Genome, PositionState, QState, RiskParams, RuleSet, CLAUSES_PER_SET, REP_VERSION,
 };
-use qe_wfo::backtest::{backtest, BacktestConfig, Bar as BtBar};
+use qe_wfo::backtest::{backtest, BacktestConfig, Bar as BtBar, DEFAULT_ADV_WINDOW};
 use qe_wfo::friction::{FeeSchedule, FrictionConfig, SlippageModel};
 use rand_core::RngCore;
 use rust_decimal::prelude::ToPrimitive;
-use rust_decimal::Decimal;
+use rust_decimal::{Decimal, MathematicalOps};
 
 /// Seeded randomised cases per property (documented in the design note). Two equivalence properties ⇒
 /// ≥ 512 randomised equivalence cases per run, plus the two mutation-guard corpora.
@@ -277,8 +277,7 @@ fn reference_backtest(
     let size_frac = Decimal::from(genome.risk.size_bps) / Decimal::from(BPS_DENOMINATOR);
     let m = cfg.friction.cost_multiplier;
     let taker = cfg.friction.fees.taker;
-    let half_spread = cfg.friction.slippage.half_spread;
-    let impact = cfg.friction.slippage.impact;
+    let slippage = cfg.friction.slippage;
 
     let mut cash = Decimal::ONE;
     let mut pos = Decimal::ZERO;
@@ -289,8 +288,22 @@ fn reference_backtest(
     let mut trades = 0usize;
     let mut funding = Decimal::ZERO;
 
+    // Independent rolling-ADV window (QE-440), mirroring the optimised path's trailing mean bar volume.
+    let mut adv_vols: std::collections::VecDeque<Decimal> = std::collections::VecDeque::new();
+    let mut adv_sum = Decimal::ZERO;
+
     for (i, bar) in bars.iter().enumerate() {
         let price = bar.price;
+
+        // Roll the ADV window forward with this bar's volume before pricing any fill.
+        if adv_vols.len() == DEFAULT_ADV_WINDOW {
+            if let Some(oldest) = adv_vols.pop_front() {
+                adv_sum -= oldest;
+            }
+        }
+        adv_vols.push_back(bar.volume);
+        adv_sum += bar.volume;
+        let adv = adv_sum / Decimal::from(adv_vols.len());
 
         // (1) Fill the order scheduled at the previous bar, at this bar's price.
         if let Some(order) = pending.take() {
@@ -305,15 +318,7 @@ fn reference_backtest(
                                 Direction::Short => -qty,
                             };
                             apply(
-                                &mut cash,
-                                &mut pos,
-                                signed,
-                                price,
-                                taker,
-                                half_spread,
-                                impact,
-                                m,
-                                bug,
+                                &mut cash, &mut pos, signed, price, taker, &slippage, adv, m, bug,
                             );
                             entry_bar = Some(i);
                             trades += 1;
@@ -324,15 +329,7 @@ fn reference_backtest(
                         if qty > Decimal::ZERO {
                             let signed = if pos > Decimal::ZERO { -qty } else { qty };
                             apply(
-                                &mut cash,
-                                &mut pos,
-                                signed,
-                                price,
-                                taker,
-                                half_spread,
-                                impact,
-                                m,
-                                bug,
+                                &mut cash, &mut pos, signed, price, taker, &slippage, adv, m, bug,
                             );
                             entry_bar = None;
                         }
@@ -403,15 +400,27 @@ fn apply(
     signed: Decimal,
     price: Decimal,
     taker: Decimal,
-    half_spread: Decimal,
-    impact: Decimal,
+    slippage: &SlippageModel,
+    adv: Decimal,
     mult: Decimal,
     bug: CostBug,
 ) {
     let qty_abs = signed.abs();
     let notional_abs = (qty_abs * price).abs();
     let fee = notional_abs * taker * mult;
-    let slip_base = notional_abs * (half_spread + impact * qty_abs);
+    // Independent re-derivation of the QE-440 concave participation impact: `notional·(half_spread +
+    // impact_coeff·(qty/adv)^β)`. Recomputed from scratch (not via `SlippageModel::cost`).
+    let participation = if adv > Decimal::ZERO {
+        qty_abs / adv
+    } else {
+        Decimal::ZERO
+    };
+    let impact = if participation > Decimal::ZERO {
+        slippage.impact_coeff * participation.powd(slippage.impact_exponent)
+    } else {
+        Decimal::ZERO
+    };
+    let slip_base = notional_abs * (slippage.half_spread + impact);
     let slip = match bug {
         CostBug::None => slip_base * mult,
         CostBug::DropSlipMultiplier => slip_base, // injected bug: forgets the cost multiplier
@@ -520,12 +529,14 @@ fn random_bars(rng: &mut DetRng, s: &FeatureSchema) -> Vec<BtBar> {
             } else {
                 None
             };
+            let volume = dec(rng, 1, 100_000, 3); // ~0.001..100 contracts, always > 0
             BtBar {
                 features: FeatureVector {
                     time_ms: i as i64 * 60_000,
                     states,
                 },
                 price,
+                volume,
                 funding_rate,
             }
         })
@@ -542,7 +553,8 @@ fn random_friction(rng: &mut DetRng, mult_lo: i64, mult_hi: i64) -> FrictionConf
         },
         slippage: SlippageModel {
             half_spread: dec(rng, 0, 5, 4),
-            impact: dec(rng, 0, 5, 6),
+            impact_coeff: dec(rng, 0, 5, 2), // 0..0.05 participation coefficient
+            impact_exponent: dec(rng, 2, 6, 1), // β ∈ [0.2, 0.6)
         },
         cost_multiplier: Decimal::from(
             mult_lo + below(rng, (mult_hi - mult_lo).max(1) as u64) as i64,

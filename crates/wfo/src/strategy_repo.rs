@@ -206,6 +206,7 @@ mod tests {
                         states,
                     },
                     price: Decimal::from(100 + i as i64),
+                    volume: Decimal::from(1000),
                     funding_rate: None,
                 }
             })

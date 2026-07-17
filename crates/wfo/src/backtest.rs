@@ -23,6 +23,11 @@ pub const DEFAULT_MIN_TRADES: usize = 10;
 /// Default number of contiguous sub-windows the net return series is split into for the noise estimate.
 pub const DEFAULT_WINDOWS: usize = 4;
 
+/// Rolling-ADV lookback in bars (QE-440): ≈ one day of hourly bars. The participation impact keys off
+/// `qty / ADV`, where `ADV` is the trailing mean bar volume over this window (inclusive of the fill bar,
+/// so there is no look-ahead).
+pub const DEFAULT_ADV_WINDOW: usize = 24;
+
 /// Basis-points denominator for `size_bps` (QE-110: `size_bps` is bps of allowed capital).
 const BPS_DENOMINATOR: i64 = 10_000;
 
@@ -34,6 +39,8 @@ pub struct Bar {
     pub features: FeatureVector,
     /// Reference price for fills and marking (`> 0`).
     pub price: Decimal,
+    /// Bar volume in contracts (QE-440), feeding the rolling ADV that keys the participation impact.
+    pub volume: Decimal,
     /// Historical funding rate accrued at this bar, if a funding stamp lands here (signed fraction).
     pub funding_rate: Option<Decimal>,
 }
@@ -171,8 +178,25 @@ pub fn backtest_with_trades(
     let mut open: Option<(usize, Direction, Decimal)> = None;
     let mut fills: Vec<TradeFill> = Vec::new();
 
+    // Rolling ADV window (QE-440): trailing sum + count of bar volumes, inclusive of the current bar
+    // (no look-ahead). `adv = sum / count` is exact `Decimal`, so the participation impact is
+    // byte-reproducible.
+    let mut adv_window: std::collections::VecDeque<Decimal> =
+        std::collections::VecDeque::with_capacity(DEFAULT_ADV_WINDOW);
+    let mut adv_sum = Decimal::ZERO;
+
     for (i, bar) in bars.iter().enumerate() {
         let price = bar.price;
+
+        // Roll the ADV window forward with this bar's volume before pricing any fill at this bar.
+        if adv_window.len() == DEFAULT_ADV_WINDOW {
+            if let Some(oldest) = adv_window.pop_front() {
+                adv_sum -= oldest;
+            }
+        }
+        adv_window.push_back(bar.volume);
+        adv_sum += bar.volume;
+        let adv = adv_sum / Decimal::from(adv_window.len());
 
         // (1) Execute the order pending from the previous bar's decision, at this bar's price.
         if let Some(order) = pending.take() {
@@ -186,7 +210,7 @@ pub fn backtest_with_trades(
                                 Direction::Long => Side::Buy,
                                 Direction::Short => Side::Sell,
                             };
-                            apply_fill(&mut cash, &mut pos_qty, side, qty, price, cfg);
+                            apply_fill(&mut cash, &mut pos_qty, side, qty, price, adv, cfg);
                             entry_bar = Some(i);
                             trades += 1;
                             open = Some((i, dir, price));
@@ -200,7 +224,7 @@ pub fn backtest_with_trades(
                             } else {
                                 Side::Buy
                             };
-                            apply_fill(&mut cash, &mut pos_qty, side, qty, price, cfg);
+                            apply_fill(&mut cash, &mut pos_qty, side, qty, price, adv, cfg);
                             entry_bar = None;
                             if let Some((entry_idx, dir, entry_px)) = open.take() {
                                 let return_frac = match dir {
@@ -294,11 +318,13 @@ fn apply_fill(
     side: Side,
     qty: Decimal,
     price: Decimal,
+    adv: Decimal,
     cfg: &BacktestConfig,
 ) {
     let notional_abs = (qty * price).abs();
     let fee = cfg.friction.fees.fee(notional_abs, Liquidity::Taker) * cfg.friction.cost_multiplier;
-    let slip = cfg.friction.slippage.cost(notional_abs, qty.abs()) * cfg.friction.cost_multiplier;
+    let slip =
+        cfg.friction.slippage.cost(notional_abs, qty.abs(), adv) * cfg.friction.cost_multiplier;
     let signed_qty = match side {
         Side::Buy => qty,
         Side::Sell => -qty,
@@ -364,6 +390,7 @@ mod tests {
         Bar {
             features: FeatureVector { time_ms, states },
             price,
+            volume: Decimal::from(1000), // constant fixture volume ⇒ rolling ADV = 1000 contracts
             funding_rate: None,
         }
     }
@@ -431,19 +458,19 @@ mod tests {
         let no_impact = BacktestConfig {
             friction: FrictionConfig {
                 slippage: SlippageModel {
-                    impact: Decimal::ZERO,
+                    impact_coeff: Decimal::ZERO,
                     ..SlippageModel::default()
                 },
                 ..FrictionConfig::default()
             },
             ..BacktestConfig::default()
         };
-        // A deliberately visible impact so the drag is unambiguous (any impact > 0 drops fitness; a large
-        // coefficient just makes the strict inequality robust to floating-point noise).
+        // A deliberately visible participation coefficient so the drag is unambiguous (any coeff > 0 drops
+        // fitness; a large one just makes the strict inequality robust to floating-point noise).
         let with_impact = BacktestConfig {
             friction: FrictionConfig {
                 slippage: SlippageModel {
-                    impact: Decimal::new(5, 3), // 0.005 per unit qty
+                    impact_coeff: Decimal::new(5, 1), // 0.5 impact fraction at 100% participation
                     ..SlippageModel::default()
                 },
                 ..FrictionConfig::default()

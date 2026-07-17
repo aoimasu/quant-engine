@@ -148,31 +148,33 @@ fn fill_geometry_is_identical_across_train_and_live() {
 }
 
 /// AC (Scope, single-source cost): the wfo friction slippage cost for a fill reduces **exactly** to the
-/// shared QE-431 `SlippageCalibration` at its `reference_mark` (the established common ground QE-431's own
-/// `slippage_parity` uses). There is no *second, divergent* live cost number — the one calibration is the
-/// single source both priced sides read.
+/// shared QE-431/QE-440 `SlippageCalibration` participation cost (the common ground `slippage_parity`
+/// uses). There is no *second, divergent* live cost number — the one calibration is the single source both
+/// priced sides read.
 #[test]
 fn wfo_friction_cost_reduces_to_the_shared_calibration() {
     let cals = [
         SlippageCalibration::default(),
         SlippageCalibration::new(
-            d("0.0003"),      // 3bp half-spread
-            d("0.000000005"), // 5e-9 impact per notional
-            d("2000"),        // ETH-scale reference mark
+            d("0.0003"), // 3bp half-spread
+            d("0.02"),   // participation coefficient
+            d("0.3"),    // β
         ),
     ];
 
+    let mark = d("2000"); // ETH-scale mark
+    let adv_qty = d("1000"); // rolling ADV in contracts
     for cal in &cals {
         let friction = SlippageModel::from_calibration(cal);
-        let mark = cal.reference_mark;
         for qty in [d("1"), d("7"), d("2.5")] {
             let notional = qty * mark;
-            // Exact Decimal identity: friction's per-contract derivation IS the canonical per-notional cost
-            // at the reference mark.
+            let adv_notional = adv_qty * mark;
+            // Exact Decimal identity: friction (keyed on qty/adv_qty) IS the canonical per-notional cost
+            // (keyed on notional/adv_notional) — the same participation.
             assert_eq!(
-                friction.cost(notional, qty),
-                cal.notional_cost(notional),
-                "friction must reduce to the shared calibration cost at reference_mark (qty={qty})"
+                friction.cost(notional, qty, adv_qty),
+                cal.notional_cost(notional, adv_notional),
+                "friction must reduce to the shared calibration participation cost (qty={qty})"
             );
         }
     }
@@ -187,7 +189,9 @@ fn venue_simulator_models_zero_cost_and_the_gap_equals_the_shared_calibration() 
     let cal = SlippageCalibration::default();
     let friction = SlippageModel::from_calibration(&cal);
     let fees = FeeSchedule::default();
-    let mark = cal.reference_mark;
+    let mark = d("50000");
+    let adv_qty = d("1000");
+    let adv_notional = adv_qty * mark;
 
     for qty in [d("1"), d("4"), d("0.5")] {
         let notional = qty * mark;
@@ -201,14 +205,14 @@ fn venue_simulator_models_zero_cost_and_the_gap_equals_the_shared_calibration() 
         assert_eq!(mv.intent_qty, qty, "sanity: the sim traded exactly qty");
 
         // wfo: the same fill costs taker fee + shared-calibration slippage — strictly positive.
-        let wfo_cost = fees.fee(notional, Liquidity::Taker) + friction.cost(notional, qty);
+        let wfo_cost = fees.fee(notional, Liquidity::Taker) + friction.cost(notional, qty, adv_qty);
         assert!(
             wfo_cost > Decimal::ZERO,
             "the wfo money model charges a real cost"
         );
         assert_eq!(
             wfo_cost,
-            fees.fee(notional, Liquidity::Taker) + cal.notional_cost(notional),
+            fees.fee(notional, Liquidity::Taker) + cal.notional_cost(notional, adv_notional),
             "the cost the sim omits equals taker fee + the shared calibration slippage"
         );
     }
@@ -222,16 +226,19 @@ fn cost_identity_is_non_vacuous_mismatched_calibration_disagrees() {
     let a = SlippageCalibration::default();
     let b = SlippageCalibration::new(
         a.half_spread,
-        a.impact_per_notional * Decimal::from(3), // 3× size-impact
-        a.reference_mark,
+        a.impact_coeff * Decimal::from(3), // 3× participation coefficient
+        a.impact_exponent,
     );
     let friction_a = SlippageModel::from_calibration(&a);
 
     let qty = d("10");
-    let notional = qty * a.reference_mark;
+    let mark = d("50000");
+    let adv_qty = d("1000");
+    let notional = qty * mark;
+    let adv_notional = adv_qty * mark;
     assert_ne!(
-        friction_a.cost(notional, qty),
-        b.notional_cost(notional),
+        friction_a.cost(notional, qty, adv_qty),
+        b.notional_cost(notional, adv_notional),
         "a mismatched calibration must disagree — the parity is a genuine constraint"
     );
 }
