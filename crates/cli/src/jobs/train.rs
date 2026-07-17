@@ -375,11 +375,17 @@ pub fn run_train_job(
     if pool_genomes.is_empty() {
         return Err(RunError::NoElites);
     }
-    // Per-elite net-of-cost return series over the train window (the ensemble trials + DSR/SPA columns).
-    let pool: Vec<Vec<f64>> = pool_genomes
+    // Per-elite net-of-cost backtest over the train window: `.returns` are the ensemble trials +
+    // DSR/SPA columns, and (QE-438) the `.trades` feed each elite's modelled capacity.
+    let pool_bt: Vec<qe_wfo::backtest::BacktestResult> = pool_genomes
         .iter()
-        .map(|g| backtest(g, train_bars, &train_cfg).returns)
+        .map(|g| backtest(g, train_bars, &train_cfg))
         .collect();
+    let pool: Vec<Vec<f64>> = pool_bt.iter().map(|b| b.returns.clone()).collect();
+    // QE-438: per-elite modelled capacity — the deployed-weight scoring input. Same capacity formula the
+    // sealed deployed weights use (`strategy_capacities`), so the DE scores membership on the exact
+    // capacity-capped object the vintage deploys at `TARGET_AUM_USD`, not on equal-weight.
+    let pool_capacities = strategy_capacities(&pool_genomes, &pool_bt);
 
     // ---- ensemble --------------------------------------------------------------------------------
     let ens_cfg = qe_ensemble::SearchConfig {
@@ -388,7 +394,15 @@ pub fn run_train_job(
         folds: ENSEMBLE_FOLDS,
         ..qe_ensemble::SearchConfig::default()
     };
-    let ens = qe_ensemble::search_portfolio(&pool, &ens_cfg, params.seed);
+    let ens = qe_ensemble::search_portfolio_weighted(
+        &pool,
+        &ens_cfg,
+        qe_ensemble::Weighting::CapacityCapped {
+            capacities: &pool_capacities,
+            target_aum: TARGET_AUM_USD,
+        },
+        params.seed,
+    );
     let selected = ens.best.members();
     if selected.is_empty() {
         return Err(RunError::EmptyEnsemble);
@@ -685,10 +699,23 @@ fn capacity_capped_weights(
     chromosomes: &[Genome],
     selected_bt: &[qe_wfo::backtest::BacktestResult],
 ) -> Vec<f64> {
+    cap_or_equal(
+        chromosomes.len(),
+        &strategy_capacities(chromosomes, selected_bt),
+    )
+}
+
+/// Per-strategy modelled capacity (dollars) from each genome's train-window economics (QE-128/QE-416):
+/// `gross_edge` ≈ the mean per-period **net** return (a conservative gross proxy — net understates
+/// capacity, never overstates it), `turnover` ≈ round-trip notional per period
+/// (`trades · 2 · size_frac / n`). Shared by the sealed deployed weights ([`capacity_capped_weights`])
+/// **and** the QE-438 deployed-weight ensemble scoring (`search_portfolio_weighted`), so the object the
+/// DE selects on and the object the vintage deploys rest on the same capacity model.
+fn strategy_capacities(genomes: &[Genome], bts: &[qe_wfo::backtest::BacktestResult]) -> Vec<f64> {
     let model = CapacityModel::with_defaults();
-    let capacities: Vec<f64> = chromosomes
+    genomes
         .iter()
-        .zip(selected_bt)
+        .zip(bts)
         .map(|(g, bt)| {
             let n = bt.returns.len().max(1) as f64;
             let gross_edge = bt.returns.iter().sum::<f64>() / n;
@@ -702,8 +729,7 @@ fn capacity_capped_weights(
                 &model,
             )
         })
-        .collect();
-    cap_or_equal(chromosomes.len(), &capacities)
+        .collect()
 }
 
 /// Cap the equal-weight budget by `capacities` at [`TARGET_AUM_USD`], falling back to equal weights when

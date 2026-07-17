@@ -5,6 +5,15 @@
 //! **return correlation** between members — because behavioural diversity (QE-111 descriptors) is *not*
 //! return-decorrelation. All math is self-contained `f64`: `qe-ensemble` does **not** depend on `qe-wfo`
 //! (search ⟂ portfolio firewall, QE-001/QE-132).
+//!
+//! QE-438: membership is scored on the **deployed** weight vector, not equal-weight. The combined return
+//! the objective sees is built with the capacity-capped weights the vintage actually deploys (reusing
+//! [`weighted_combined`](crate::stress::weighted_combined) and the QE-128 [`cap_weights`](crate::capacity::cap_weights)
+//! water-fill), so the DE optimises the same weighted object it deploys — reducing to equal-weight
+//! exactly when no capacity cap binds.
+
+use crate::capacity::cap_weights;
+use crate::stress::weighted_combined;
 
 /// Default left-tail fraction for CVaR/CDaR (worst 5%).
 pub const DEFAULT_ALPHA: f64 = 0.05;
@@ -36,7 +45,7 @@ pub struct TailRisk {
 pub struct CorrPenalty {
     /// The deflated positive-mean pairwise correlation (`≥ 0`).
     pub value: f64,
-    /// The smallest sample size any admitted pair rested on (`0` when there are `< 2` series).
+    /// The smallest sample size any pair rested on (`0` when there are `< 2` series).
     pub effective_n: usize,
 }
 
@@ -233,25 +242,83 @@ pub fn stress_overlay(returns: &[f64], shocks: &[f64]) -> Vec<f64> {
     out
 }
 
-/// The equal-weight combined per-period return of an ensemble's `members` (indices into `pool`),
-/// truncated to the shortest member series. Empty membership ⇒ empty.
+/// How the combined per-period return is weighted from an ensemble's members **during scoring** (QE-438).
+/// Membership must be optimised on the same weighted object it is deployed under; the deployed book runs
+/// the QE-128 capacity-capped weights, so scoring on plain equal-weight makes the selected set no longer
+/// provably optimal for the portfolio that runs (the "optimise-X-deploy-Y" gap). This descriptor is a
+/// lightweight `Copy` value (a borrowed capacity slice + the target AUM) threaded into the objective; it
+/// is **not** stored in the `Copy` [`ObjectiveConfig`] because the per-strategy capacities are a
+/// per-pool `Vec`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Weighting<'a> {
+    /// The historical `1/N` equal weighting — the reproducible pre-QE-438 scoring object.
+    EqualWeight,
+    /// The **deployed** capacity-capped weighting (QE-438): the equal-weight budget water-filled by each
+    /// member's modelled `capacities` (indexed by **pool** position) at `target_aum`, exactly as the
+    /// vintage deploys (`crates/cli/src/jobs/train.rs` `capacity_capped_weights`). Reduces to
+    /// [`Weighting::EqualWeight`] when no cap binds (`cap_weights` returns the equal weights).
+    CapacityCapped {
+        /// Modelled per-strategy capacity in dollars, indexed by **pool** position (`capacities[m]` is
+        /// the capacity of pool member `m`). A member index past the slice is treated as uncapped.
+        capacities: &'a [f64],
+        /// Target book AUM the caps bind against; `≤ 0` disables capping (equal weight).
+        target_aum: f64,
+    },
+}
+
+impl Weighting<'_> {
+    /// The deployed per-member weight vector for `members` (indices into the pool): equal `1/k`, then —
+    /// for [`Weighting::CapacityCapped`] — the QE-128 [`cap_weights`] water-fill over **those members'**
+    /// capacities at `target_aum` (recomputed per member subset, so a leave-one-out drop re-water-fills).
+    /// Empty membership ⇒ empty. When no cap binds the result is exactly `[1/k; k]`.
+    #[must_use]
+    pub fn member_weights(&self, members: &[usize]) -> Vec<f64> {
+        let k = members.len();
+        if k == 0 {
+            return Vec::new();
+        }
+        let equal = vec![1.0 / k as f64; k];
+        match *self {
+            Weighting::EqualWeight => equal,
+            Weighting::CapacityCapped {
+                capacities,
+                target_aum,
+            } => {
+                let caps: Vec<f64> = members
+                    .iter()
+                    .map(|&m| capacities.get(m).copied().unwrap_or(f64::INFINITY))
+                    .collect();
+                cap_weights(&equal, &caps, target_aum)
+            }
+        }
+    }
+}
+
+/// The combined per-period return of an ensemble's `members` (indices into `pool`) under the deployed
+/// `weighting` (QE-438), truncated to the shortest member series. Reuses
+/// [`weighted_combined`](crate::stress::weighted_combined) on the members' series and their deployed
+/// [`member_weights`](Weighting::member_weights). Empty membership ⇒ empty. Under
+/// [`Weighting::EqualWeight`] this is byte-identical to the `Σ r_i / k` equal-weight combination.
 #[must_use]
-pub fn combined_returns(pool: &[Vec<f64>], members: &[usize]) -> Vec<f64> {
+pub fn combined_returns_weighted(
+    pool: &[Vec<f64>],
+    members: &[usize],
+    weighting: Weighting,
+) -> Vec<f64> {
     if members.is_empty() {
         return Vec::new();
     }
-    let len = members.iter().map(|&m| pool[m].len()).min().unwrap_or(0);
-    let mut out = vec![0.0; len];
-    for &m in members {
-        for (slot, v) in out.iter_mut().zip(pool[m].iter()) {
-            *slot += v;
-        }
-    }
-    let k = members.len() as f64;
-    for slot in &mut out {
-        *slot /= k;
-    }
-    out
+    let member_series: Vec<Vec<f64>> = members.iter().map(|&m| pool[m].clone()).collect();
+    let weights = weighting.member_weights(members);
+    weighted_combined(&member_series, &weights)
+}
+
+/// The equal-weight combined per-period return of an ensemble's `members` (indices into `pool`),
+/// truncated to the shortest member series. Empty membership ⇒ empty. Equivalent to
+/// [`combined_returns_weighted`] under [`Weighting::EqualWeight`].
+#[must_use]
+pub fn combined_returns(pool: &[Vec<f64>], members: &[usize]) -> Vec<f64> {
+    combined_returns_weighted(pool, members, Weighting::EqualWeight)
 }
 
 /// Configuration for the ensemble [`objective`].
@@ -288,15 +355,23 @@ impl Default for ObjectiveConfig {
     }
 }
 
-/// The ensemble objective (QE-115/D3+D5): `mean(combined) + tail_weight·CVaR(combined) −
-/// corr_weight·positive_mean_pairwise_corr(members)`, on the **net-of-cost** member return series. An
+/// The ensemble objective under the deployed `weighting` (QE-115/D3+D5, QE-438): `mean(combined) +
+/// tail_weight·CVaR(combined) − corr_weight·positive_mean_pairwise_corr(members)`, where `combined` is
+/// the members' **net-of-cost** returns combined under `weighting` (the capacity-capped weights the
+/// vintage deploys). The correlation penalty is a weight-independent property of the member series
+/// (scale-invariant), so it stays on the raw member series — QE-430's deflated penalty is untouched. An
 /// empty ensemble scores `−∞`.
 #[must_use]
-pub fn objective(pool: &[Vec<f64>], members: &[usize], cfg: &ObjectiveConfig) -> f64 {
+pub fn objective_weighted(
+    pool: &[Vec<f64>],
+    members: &[usize],
+    cfg: &ObjectiveConfig,
+    weighting: Weighting,
+) -> f64 {
     if members.is_empty() {
         return f64::NEG_INFINITY;
     }
-    let combined = combined_returns(pool, members);
+    let combined = combined_returns_weighted(pool, members, weighting);
     let mean = if combined.is_empty() {
         0.0
     } else {
@@ -310,13 +385,26 @@ pub fn objective(pool: &[Vec<f64>], members: &[usize], cfg: &ObjectiveConfig) ->
     mean + cfg.tail_weight * tail - cfg.corr_weight * corr
 }
 
-/// The worst single-member-removed objective (QE-115/D6 wide-basin floor): an ensemble that depends on
-/// one lucky strategy scores a low leave-one-out minimum. Single-member ensembles return their own
-/// objective.
+/// The ensemble objective on the **equal-weight** combined series — [`objective_weighted`] under
+/// [`Weighting::EqualWeight`] (byte-identical to the pre-QE-438 behaviour).
 #[must_use]
-pub fn leave_one_out_min(pool: &[Vec<f64>], members: &[usize], cfg: &ObjectiveConfig) -> f64 {
+pub fn objective(pool: &[Vec<f64>], members: &[usize], cfg: &ObjectiveConfig) -> f64 {
+    objective_weighted(pool, members, cfg, Weighting::EqualWeight)
+}
+
+/// The worst single-member-removed objective under the deployed `weighting` (QE-115/D6 wide-basin floor,
+/// QE-438): an ensemble that depends on one lucky strategy scores a low leave-one-out minimum. Each
+/// leave-one-out subset re-derives its own deployed weights (the water-fill re-runs over the reduced
+/// membership). Single-member ensembles return their own objective.
+#[must_use]
+pub fn leave_one_out_min_weighted(
+    pool: &[Vec<f64>],
+    members: &[usize],
+    cfg: &ObjectiveConfig,
+    weighting: Weighting,
+) -> f64 {
     if members.len() <= 1 {
-        return objective(pool, members, cfg);
+        return objective_weighted(pool, members, cfg, weighting);
     }
     let mut worst = f64::INFINITY;
     for drop in 0..members.len() {
@@ -326,9 +414,16 @@ pub fn leave_one_out_min(pool: &[Vec<f64>], members: &[usize], cfg: &ObjectiveCo
             .filter(|(i, _)| *i != drop)
             .map(|(_, &m)| m)
             .collect();
-        worst = worst.min(objective(pool, &reduced, cfg));
+        worst = worst.min(objective_weighted(pool, &reduced, cfg, weighting));
     }
     worst
+}
+
+/// The wide-basin floor on the **equal-weight** objective — [`leave_one_out_min_weighted`] under
+/// [`Weighting::EqualWeight`] (byte-identical to the pre-QE-438 behaviour).
+#[must_use]
+pub fn leave_one_out_min(pool: &[Vec<f64>], members: &[usize], cfg: &ObjectiveConfig) -> f64 {
+    leave_one_out_min_weighted(pool, members, cfg, Weighting::EqualWeight)
 }
 
 #[cfg(test)]
@@ -585,5 +680,172 @@ mod tests {
             leave_one_out_min(&pool, &[0], &cfg),
             objective(&pool, &[0], &cfg),
         );
+    }
+
+    // ---- QE-438: deployed (capacity-capped) weight scoring ------------------------------------
+
+    #[test]
+    fn member_weights_reduce_to_equal_when_caps_dont_bind() {
+        // Non-binding caps (each capacity ≥ its 1/k dollar share at the AUM) ⇒ the deployed weights are
+        // exactly the equal-weight budget — the reduction the AC requires.
+        let members = [0usize, 2, 5];
+        let huge = vec![1e18; 8];
+        let w = Weighting::CapacityCapped {
+            capacities: &huge,
+            target_aum: 1_000_000.0,
+        }
+        .member_weights(&members);
+        for &wi in &w {
+            approx(wi, 1.0 / 3.0);
+        }
+        // A non-positive AUM disables capping ⇒ passthrough equal weights too.
+        let w0 = Weighting::CapacityCapped {
+            capacities: &[10.0, 10.0, 10.0],
+            target_aum: 0.0,
+        }
+        .member_weights(&[0, 1, 2]);
+        for &wi in &w0 {
+            approx(wi, 1.0 / 3.0);
+        }
+        // The EqualWeight variant is 1/k by construction.
+        assert_eq!(
+            Weighting::EqualWeight.member_weights(&members),
+            vec![1.0 / 3.0; 3]
+        );
+        assert!(Weighting::EqualWeight.member_weights(&[]).is_empty());
+    }
+
+    #[test]
+    fn deployed_combined_reuses_weighted_combined() {
+        // AC: the deployed combined series is exactly `weighted_combined(member_series, member_weights)`
+        // — the reuse of stress.rs the ticket mandates.
+        use crate::stress::weighted_combined;
+        let pool = vec![
+            vec![0.02, -0.01, 0.03, -0.02],
+            vec![0.00, 0.01, -0.01, 0.02],
+            vec![0.01, 0.02, 0.00, -0.03],
+        ];
+        let members = [0usize, 1, 2];
+        // Bind member 0 hard (tiny capacity), leave 1 & 2 uncapped.
+        let caps = vec![50_000.0, 1e18, 1e18];
+        let weighting = Weighting::CapacityCapped {
+            capacities: &caps,
+            target_aum: 1_000_000.0,
+        };
+        let weights = weighting.member_weights(&members);
+        let member_series: Vec<Vec<f64>> = members.iter().map(|&m| pool[m].clone()).collect();
+        let expected = weighted_combined(&member_series, &weights);
+        let got = combined_returns_weighted(&pool, &members, weighting);
+        assert_eq!(got, expected);
+        // And the capped weights are not the equal 1/3 (a cap really bound).
+        assert!(
+            (weights[0] - 1.0 / 3.0).abs() > 1e-6,
+            "member 0 must be capped"
+        );
+
+        // Under EqualWeight it matches the plain equal-weight combination.
+        assert_eq!(
+            combined_returns_weighted(&pool, &members, Weighting::EqualWeight),
+            combined_returns(&pool, &members)
+        );
+    }
+
+    #[test]
+    fn objective_reduces_to_equal_weight_when_caps_dont_bind() {
+        // AC: with caps that never bind the deployed-weight objective equals the equal-weight objective.
+        let pool = vec![
+            vec![0.02, -0.01, 0.03, -0.02, 0.01, -0.03],
+            vec![-0.01, 0.02, -0.02, 0.03, -0.03, 0.01],
+        ];
+        let cfg = ObjectiveConfig::with_defaults();
+        let huge = vec![1e18; 2];
+        let capped = objective_weighted(
+            &pool,
+            &[0, 1],
+            &cfg,
+            Weighting::CapacityCapped {
+                capacities: &huge,
+                target_aum: 1_000_000.0,
+            },
+        );
+        approx(capped, objective(&pool, &[0, 1], &cfg));
+    }
+
+    #[test]
+    fn objective_scores_on_deployed_weights_when_caps_bind() {
+        // When a cap binds, the scored combined is the deployed (capped, cash-diluted) series, so the
+        // objective differs from the equal-weight one — the DE now optimises the object it deploys.
+        let pool = vec![vec![0.02; 6], vec![0.01; 6]];
+        let cfg = ObjectiveConfig::with_defaults();
+        // Both members tiny-capacity at $1M ⇒ both capped to 0.05, 90% cash ⇒ combined scaled ×0.1.
+        let caps = vec![50_000.0, 50_000.0];
+        let weighting = Weighting::CapacityCapped {
+            capacities: &caps,
+            target_aum: 1_000_000.0,
+        };
+        let deployed = objective_weighted(&pool, &[0, 1], &cfg, weighting);
+        let equal = objective(&pool, &[0, 1], &cfg);
+        assert!(
+            deployed < equal,
+            "cash-diluted deployed objective must be below equal-weight: deployed={deployed} equal={equal}"
+        );
+        // Concretely: equal combined = 0.015 constant ⇒ obj = 2·0.015 = 0.03 (constant ⇒ cvar = mean,
+        // corr = 0); deployed combined = 0.1·0.015 = 0.0015 ⇒ obj = 0.003.
+        approx(equal, 0.03);
+        approx(deployed, 0.003);
+    }
+
+    #[test]
+    fn deployed_weighting_can_flip_the_membership_ranking() {
+        // The closed inconsistency: equal-weight scoring prefers {high, mid} but the DEPLOYED
+        // capacity-capped weighting prefers {mid, mid2}, because the high-return member is hard-capped
+        // and its edge is diluted away in the book that actually runs.
+        let pool = vec![
+            vec![0.02; 8],  // index 0 — high return, but capacity-constrained
+            vec![0.01; 8],  // index 1 — mid
+            vec![0.012; 8], // index 2 — mid, slightly better than 1
+        ];
+        let cfg = ObjectiveConfig::with_defaults();
+
+        // Equal weight: {0,1} beats {1,2} (0.015 > 0.011 combined mean; constant ⇒ obj = 2·mean).
+        let eq_01 = objective(&pool, &[0, 1], &cfg);
+        let eq_12 = objective(&pool, &[1, 2], &cfg);
+        assert!(
+            eq_01 > eq_12,
+            "equal-weight must prefer {{0,1}}: {eq_01} vs {eq_12}"
+        );
+
+        // Deployed weighting: member 0 caps at $50k (→ weight 0.05, member 1 water-filled to 0.95);
+        // members 1 & 2 are uncapped (→ equal 0.5/0.5). Now {1,2} beats {0,1}.
+        let caps = vec![50_000.0, 1e18, 1e18];
+        let w = Weighting::CapacityCapped {
+            capacities: &caps,
+            target_aum: 1_000_000.0,
+        };
+        let dep_01 = objective_weighted(&pool, &[0, 1], &cfg, w);
+        let dep_12 = objective_weighted(&pool, &[1, 2], &cfg, w);
+        assert!(
+            dep_12 > dep_01,
+            "deployed weighting must flip the preference to {{1,2}}: {dep_12} vs {dep_01}"
+        );
+    }
+
+    #[test]
+    fn leave_one_out_min_rewaterfills_each_dropped_subset() {
+        // The LOO floor under a binding weighting is finite and matches the deployed objective of the
+        // binding (worst) 2-member drop — proving each subset re-derives its own deployed weights.
+        let pool = vec![vec![0.02; 6], vec![0.01; 6], vec![0.012; 6]];
+        let cfg = ObjectiveConfig::with_defaults();
+        let caps = vec![50_000.0, 1e18, 1e18];
+        let w = Weighting::CapacityCapped {
+            capacities: &caps,
+            target_aum: 1_000_000.0,
+        };
+        let loo = leave_one_out_min_weighted(&pool, &[0, 1, 2], &cfg, w);
+        let worst_drop = objective_weighted(&pool, &[0, 1], &cfg, w)
+            .min(objective_weighted(&pool, &[0, 2], &cfg, w))
+            .min(objective_weighted(&pool, &[1, 2], &cfg, w));
+        approx(loo, worst_drop);
+        assert!(loo.is_finite());
     }
 }
