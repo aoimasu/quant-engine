@@ -182,7 +182,7 @@ fn write_sample_store(dir: &Path) {
 
 fn write_sample_vintage(dir: &Path) {
     use qe_determinism::Lineage;
-    use qe_risk::{CalibrationProfile, Fraction, PortfolioSizer, SlippageCalibration};
+    use qe_risk::{CalibrationProfile, Fraction, PortfolioSizer, ShockConfig, SlippageCalibration};
     use qe_vintage::{Vintage, VintageContent, VintageRepository, VINTAGE_FORMAT_VERSION};
 
     let content = VintageContent {
@@ -193,6 +193,7 @@ fn write_sample_vintage(dir: &Path) {
         calibration: CalibrationProfile::new(Fraction::new(Decimal::new(1, 1)).unwrap()),
         slippage: SlippageCalibration::default(),
         sizer: PortfolioSizer::default(),
+        shocks: ShockConfig::default(),
         worst_case_loss: Some(0.1),
         // The fixture genome addresses feature 0 of the default catalogue, so the current identity is
         // its true identity (QE-402).

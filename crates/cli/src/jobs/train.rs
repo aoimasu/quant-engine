@@ -319,6 +319,20 @@ pub fn run_train_job(
         ..BacktestConfig::default()
     };
 
+    // QE-441: the frozen, content-addressed bar-level scenario-shock set. The single-strategy SIZING
+    // fitness (which sets `size_bps`) runs the backtester with these bounded synthetic gap / funding-spike
+    // / ADL shocks injected at the price/bar level (`search_cfg`), so a larger size produces a larger
+    // drawdown and the selection self-selects a lower, tail-aware leverage (Dama §6.1/§6.4). The shocks
+    // touch ONLY the selection fitness — the elite-pool / ensemble / DSR / G1-holdout / Kelly-sizer
+    // backtests keep the honest historical `train_cfg` (`shocks: None`). The set is FROZEN (a fixed
+    // pre-registered seed, not the run seed) and sealed into the vintage below (content-addressed), so it
+    // is reproducible and not a per-run knob (panel mitigation: SSE seeded + Math#2 pre-registered).
+    let shock_set = qe_risk::ShockConfig::default();
+    let search_cfg = BacktestConfig {
+        shocks: Some(shock_set.clone()),
+        ..train_cfg.clone()
+    };
+
     // ---- search ----------------------------------------------------------------------------------
     let generations = params.generations.max(1);
     let population = params.population.max(1);
@@ -345,7 +359,7 @@ pub fn run_train_job(
         DEFAULT_LABEL_HORIZON,
     );
     let cv_ranges = fold_test_ranges(&cv, train_bars.len());
-    let eval = |g: &Genome| fold_isolation_fitness(g, train_bars, &cv_ranges, &train_cfg).mean;
+    let eval = |g: &Genome| fold_isolation_fitness(g, train_bars, &cv_ranges, &search_cfg).mean;
     let mut best_fitness = f64::NEG_INFINITY;
 
     for generation in 1..=generations {
@@ -532,6 +546,9 @@ pub fn run_train_job(
         // (Wiring a live-fitted calibration through here is the QE-431 follow-up.)
         slippage: qe_risk::SlippageCalibration::default(),
         sizer,
+        // QE-441: seal the FROZEN, content-addressed shock set that shaped the tail-aware `size_bps` in
+        // the selection fitness — pinning the exact shocks that priced sizing into the vintage lineage.
+        shocks: shock_set,
         worst_case_loss: Some(hash_stable(stress.worst_case_loss)),
         // Pin the identity of the catalogue these chromosomes were evolved against (QE-402) — the
         // exact-match key the backtest/live load boundary asserts. `schema` is the same

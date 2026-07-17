@@ -23,6 +23,7 @@ pub mod calibration;
 pub mod gate;
 pub mod kill;
 pub mod limit;
+pub mod shocks;
 pub mod sizer;
 pub mod slippage;
 
@@ -38,6 +39,10 @@ pub use calibration::{
 pub use gate::{assert_honours_kill_switch, Admission, OrderGate, OrderIntent};
 pub use kill::{KillHandle, KillSwitch};
 pub use limit::{Fraction, Leverage, LimitBreach, LimitKind, LimitOutcome, RiskLimits};
+pub use shocks::{
+    ShockConfig, DEFAULT_ADL_HAIRCUT, DEFAULT_FUNDING_PERIODS, DEFAULT_FUNDING_PER_PERIOD,
+    DEFAULT_GAP_RETURN, DEFAULT_SHOCK_FREQ_PER_MILLION, DEFAULT_SHOCK_SEED, SHOCK_SCALE,
+};
 pub use sizer::{PortfolioSizer, SIZER_SCALE};
 pub use slippage::{
     fit_slippage_calibration, QuoteSample, SizedTrade, SlippageCalibration, DEFAULT_HALF_SPREAD,
