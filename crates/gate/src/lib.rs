@@ -5,7 +5,7 @@
 //!
 //! - [`split_with_embargo`] carves the dataset into disjoint `train | embargo | holdout` time blocks, so
 //!   the holdout is the final OOS slice and an embargo gap purges look-ahead leakage at the boundary.
-//! - [`evaluate_g1`] applies the four pre-registered acceptance criteria on the holdout and records a
+//! - [`evaluate_g1`] applies the five pre-registered acceptance criteria on the holdout and records a
 //!   [`G1Decision`] with per-criterion evidence: a vintage failing **any** criterion is not promoted.
 //!
 //! G1 judges evidence; the *untouched* guarantee comes from the split discipline plus the information
@@ -24,6 +24,11 @@ pub const DEFAULT_DSR_THRESHOLD: f64 = 0.95;
 pub const DEFAULT_SPA_ALPHA: f64 = 0.05;
 /// Default pre-registered OOS tolerance: the holdout Sharpe may fall at most this fraction below in-sample.
 pub const DEFAULT_OOS_TOLERANCE: f64 = 0.5;
+/// Default pre-registered PBO ceiling (QE-437): the already-computed Probability of Backtest Overfitting
+/// (CSCV, `RobustnessReport::pbo`) must be **strictly below** this. `0.5` is the neutral overfit line — an
+/// in-sample winner that ranks below the OOS median more often than not is more likely overfit than not.
+/// Frozen (not tuned to any fixture); it is the most direct probability the §5.4 overfitting concern maps to.
+pub const DEFAULT_MAX_PBO: f64 = 0.5;
 /// Default pre-registered minimum holdout length — below this the holdout is too small for the Sharpe /
 /// over-fit checks to mean anything, so the gate refuses to promote (rather than passing vacuously).
 pub const DEFAULT_MIN_HOLDOUT_SAMPLES: usize = 30;
@@ -67,6 +72,9 @@ pub struct G1Criteria {
     pub spa_alpha: f64,
     /// The fraction by which the holdout Sharpe may fall below in-sample before it is over-fit.
     pub oos_tolerance: f64,
+    /// The pre-registered ceiling the already-computed PBO (CSCV overfit probability) must stay strictly
+    /// below (QE-437). A non-finite PBO fails this criterion (refused rather than passed vacuously).
+    pub max_pbo: f64,
     /// The minimum number of holdout samples for the holdout checks to be meaningful (a smaller holdout is
     /// refused rather than passed vacuously).
     pub min_holdout_samples: usize,
@@ -81,6 +89,7 @@ impl G1Criteria {
             dsr_threshold: DEFAULT_DSR_THRESHOLD,
             spa_alpha: DEFAULT_SPA_ALPHA,
             oos_tolerance: DEFAULT_OOS_TOLERANCE,
+            max_pbo: DEFAULT_MAX_PBO,
             min_holdout_samples: DEFAULT_MIN_HOLDOUT_SAMPLES,
         }
     }
@@ -127,9 +136,10 @@ impl G1Decision {
 /// net-of-cost returns on the untouched holdout; `robustness` carries the DSR + SPA p-value (QE-131).
 ///
 /// The vintage is promoted iff **all** of: the holdout has enough samples to be meaningful, the holdout
-/// edge persists, the DSR exceeds the threshold, the SPA p-value beats the null at the stated level, and
-/// the holdout Sharpe is within tolerance of in-sample. A failure of any one criterion blocks promotion,
-/// and every criterion's value-vs-threshold evidence is recorded.
+/// edge persists, the DSR exceeds the threshold, the SPA p-value beats the null at the stated level, the
+/// holdout Sharpe is within tolerance of in-sample, and the already-computed PBO (CSCV overfit probability,
+/// `robustness.pbo`) is below the pre-registered ceiling. A failure of any one criterion blocks promotion,
+/// and every criterion's value-vs-threshold evidence is recorded. A non-finite PBO fails closed (blocks).
 #[must_use]
 pub fn evaluate_g1(
     in_sample_sharpe: f64,
@@ -164,6 +174,14 @@ pub fn evaluate_g1(
             passed: robustness.spa_pvalue < criteria.spa_alpha,
             value: robustness.spa_pvalue,
             threshold: criteria.spa_alpha,
+        },
+        // QE-437: gate on the already-computed CSCV overfit probability. `is_finite()` first so a
+        // non-finite (absent/degenerate) PBO fails closed — refused, never passed vacuously.
+        CriterionResult {
+            name: "pbo_below_overfit_threshold".to_string(),
+            passed: robustness.pbo.is_finite() && robustness.pbo < criteria.max_pbo,
+            value: robustness.pbo,
+            threshold: criteria.max_pbo,
         },
         CriterionResult {
             name: "oos_within_tolerance_of_in_sample".to_string(),
@@ -254,6 +272,53 @@ mod tests {
             d.failed_criteria(),
             vec!["oos_within_tolerance_of_in_sample"]
         );
+
+        // 5. PBO at/above the overfit ceiling (QE-437): a vintage whose already-computed CSCV overfit
+        // probability is ≥ 0.5 is rejected on that criterion alone.
+        let mut r = good_robustness();
+        r.pbo = 0.60; // ≥ 0.5
+        let d = evaluate_g1(is_sharpe, &holdout, &r, &crit);
+        assert!(!d.promoted);
+        assert_eq!(d.failed_criteria(), vec!["pbo_below_overfit_threshold"]);
+    }
+
+    #[test]
+    fn a_high_pbo_blocks_and_records_evidence() {
+        // QE-437: an overfit vintage (PBO ≥ 0.5) is blocked, and the per-criterion evidence records the
+        // observed PBO against the pre-registered 0.5 ceiling.
+        let holdout = strong_holdout();
+        let mut r = good_robustness();
+        r.pbo = 0.75;
+        let decision = evaluate_g1(
+            sharpe_ratio(&holdout),
+            &holdout,
+            &r,
+            &G1Criteria::with_defaults(),
+        );
+        assert!(!decision.promoted);
+        let pbo_crit = decision
+            .criteria
+            .iter()
+            .find(|c| c.name == "pbo_below_overfit_threshold")
+            .expect("the PBO criterion must be recorded");
+        assert!(!pbo_crit.passed);
+        assert_eq!(pbo_crit.value, 0.75);
+        assert_eq!(pbo_crit.threshold, DEFAULT_MAX_PBO);
+    }
+
+    #[test]
+    fn a_non_finite_pbo_fails_closed() {
+        // QE-437: an absent/degenerate (non-finite) PBO must block, never pass vacuously — mirroring the
+        // undersized-holdout discipline. NaN and +∞ both fail the criterion.
+        let holdout = strong_holdout();
+        let is_sharpe = sharpe_ratio(&holdout);
+        for bad in [f64::NAN, f64::INFINITY] {
+            let mut r = good_robustness();
+            r.pbo = bad;
+            let d = evaluate_g1(is_sharpe, &holdout, &r, &G1Criteria::with_defaults());
+            assert!(!d.promoted, "non-finite pbo {bad} must block promotion");
+            assert!(d.failed_criteria().contains(&"pbo_below_overfit_threshold"));
+        }
     }
 
     #[test]
@@ -266,7 +331,7 @@ mod tests {
             &G1Criteria::with_defaults(),
         );
         // Every criterion carries its value + threshold, and the record round-trips through serde.
-        assert_eq!(decision.criteria.len(), 5);
+        assert_eq!(decision.criteria.len(), 6);
         let json = serde_json::to_string(&decision).unwrap();
         let back: G1Decision = serde_json::from_str(&json).unwrap();
         assert_eq!(back, decision);

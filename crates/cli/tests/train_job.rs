@@ -159,8 +159,8 @@ fn train_over_fixture_store_seals_verifiable_vintage() {
     // The gate ran and recorded a verdict (a 120-bar fixture is not expected to *pass* strict G1).
     let _ = gate;
 
-    // The result sidecar records the full G1 decision (5 criteria) for QE-261.
-    assert_eq!(outcome.result.g1.criteria.len(), 5);
+    // The result sidecar records the full G1 decision (6 criteria, incl. the QE-437 PBO gate) for QE-261.
+    assert_eq!(outcome.result.g1.criteria.len(), 6);
     assert_eq!(outcome.result.vintage_id, outcome.vintage_id);
 
     // QE-414: on the real fixture archive the DSR trial variance is estimated from the FULL cell
