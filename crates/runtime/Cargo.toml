@@ -22,6 +22,11 @@ qe-risk.workspace = true
 [dev-dependencies]
 # The retained integration tests (breaker_seed, restart_parity, order_port_conformance, classify_taxonomy)
 # drive the split crates through the facade and construct their inputs directly from these crates.
+# QE-435: the money-model parity test links the training money model (`qe-wfo` friction) against the live
+# fill model (`qe-edge` plan_delta/VenueSimulator). This is a **dev-dependency**, so the search⟂portfolio⟂live
+# firewall parser (which excludes every dev-dependency form) does not see a `qe-runtime → qe-wfo` edge, and
+# `runtime → wfo` is the allowed downstream direction (live reading a training output) regardless.
+qe-wfo.workspace = true
 qe-domain.workspace = true
 qe-error.workspace = true
 qe-signal.workspace = true
