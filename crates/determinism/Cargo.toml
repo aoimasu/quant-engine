@@ -23,3 +23,10 @@ thiserror.workspace = true
 [dev-dependencies]
 # Used only to prove the determinism contract at 1 vs N threads; the library has no parallel runtime.
 rayon.workspace = true
+# QE-445 (test-only): the permuted-parallelism determinism test drives a REAL stochastic parallel stage
+# — a MAP-Elites generation from `qe-wfo` — under 1 vs N rayon threads and asserts byte-identical
+# artefacts. These are dev-deps only; the firewall ignores dev-dependencies, and the cycle
+# `qe-determinism --dev--> qe-wfo --> qe-determinism` is permitted because it passes through a dev edge.
+qe-wfo.workspace = true
+qe-signal.workspace = true
+qe-domain.workspace = true

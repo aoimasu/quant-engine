@@ -1681,6 +1681,9 @@ name = "qe-determinism"
 version = "0.1.0"
 dependencies = [
  "qe-config",
+ "qe-domain",
+ "qe-signal",
+ "qe-wfo",
  "rand_chacha 0.9.0",
  "rand_core 0.9.5",
  "rayon",
