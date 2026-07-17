@@ -100,6 +100,11 @@ impl NoiseRobustFitness {
 ///
 /// Ruin (`−∞`) never displaces a finite incumbent. With both `n = 1` the combined SE is `0` and the
 /// rule degenerates to strict-greater (callers must pass `n ≥ 2` windows for the noise guard to bite).
+///
+/// This decision is **purely return-driven** and is deliberately kept free of any parsimony / MDL term
+/// (QE-436): it is the value that feeds the deflation stage, so a complexity penalty here would distort
+/// the DSR-facing fitness. The parsimony tie-break lives in [`should_replace_parsimonious`], which only
+/// engages *inside* this rule's noise band.
 #[must_use]
 pub fn should_replace(
     incumbent: &NoiseRobustFitness,
@@ -114,6 +119,51 @@ pub fn should_replace(
     }
     let combined_se = (incumbent.std_error.powi(2) + challenger.std_error.powi(2)).sqrt();
     challenger.mean - incumbent.mean > k_sigma * combined_se
+}
+
+/// Whether two finite fitnesses are **statistically indistinguishable** — neither clearly beats the other
+/// within `k_sigma` combined standard errors (QE-436): `|a.mean − b.mean| ≤ k_sigma·combined_se`. This is
+/// the "equal robust fitness" region in which a parsimony tie-break is legitimate. A non-finite (ruined)
+/// fitness is never in-band (there is a clear loser), so this returns `false`.
+#[must_use]
+pub fn within_noise_band(a: &NoiseRobustFitness, b: &NoiseRobustFitness, k_sigma: f64) -> bool {
+    if !a.mean.is_finite() || !b.mean.is_finite() {
+        return false;
+    }
+    let combined_se = (a.std_error.powi(2) + b.std_error.powi(2)).sqrt();
+    (a.mean - b.mean).abs() <= k_sigma * combined_se
+}
+
+/// Like [`should_replace`], but with a **lexicographic parsimony (MDL) tie-break** inside the noise band
+/// (QE-436). The decision is fitness-first, complexity-second:
+///
+/// 1. if `challenger` clearly beats `incumbent` on robust fitness ⇒ replace (regardless of complexity);
+/// 2. otherwise if there is a clear loser (incumbent clearly better, or a ruined challenger) ⇒ keep;
+/// 3. otherwise the two are within the noise band — an *equal robust fitness* tie — and we break toward
+///    parsimony: replace iff the challenger is **strictly simpler** (`chal_complexity < inc_complexity`).
+///
+/// Complexity is a genotype count (e.g. [`Genome::mdl_complexity`](crate::genome::Genome::mdl_complexity));
+/// it is consulted **only** in branch 3, so it can never override a material fitness difference and never
+/// enters a fitness value — the MDL term stays out of the DSR-facing fitness. Deterministic (integer
+/// comparison), so byte-reproducibility is preserved.
+#[must_use]
+pub fn should_replace_parsimonious(
+    incumbent: &NoiseRobustFitness,
+    challenger: &NoiseRobustFitness,
+    inc_complexity: u32,
+    chal_complexity: u32,
+    k_sigma: f64,
+) -> bool {
+    // Branch 1: a clear fitness win always replaces, no matter the complexity.
+    if should_replace(incumbent, challenger, k_sigma) {
+        return true;
+    }
+    // Branch 3: inside the noise band (equal robust fitness) break toward parsimony.
+    if within_noise_band(incumbent, challenger, k_sigma) {
+        return chal_complexity < inc_complexity;
+    }
+    // Branch 2: a clear loser (incumbent clearly better, or ruined challenger) never replaces.
+    false
 }
 
 #[cfg(test)]
@@ -222,5 +272,137 @@ mod tests {
         // No noise estimate (n=1) ⇒ any positive improvement replaces.
         assert!(should_replace(&a, &b, DEFAULT_K_SIGMA));
         assert!(!should_replace(&b, &a, DEFAULT_K_SIGMA));
+    }
+
+    // --- QE-436 parsimony (MDL) tie-break ----------------------------------------------------
+
+    #[test]
+    fn parsimony_breaks_ties_at_equal_robust_fitness() {
+        // Two genomes with essentially equal robust fitness (well inside the 1σ band): a 4-clause
+        // incumbent (complexity 6) vs a 1-clause challenger (complexity 2). The simpler one wins.
+        let incumbent = NoiseRobustFitness {
+            mean: 0.10,
+            std_error: 0.02,
+            n: 5,
+        };
+        let challenger = NoiseRobustFitness {
+            mean: 0.1005, // inside the noise band → a statistical tie
+            std_error: 0.02,
+            n: 5,
+        };
+        assert!(within_noise_band(&incumbent, &challenger, DEFAULT_K_SIGMA));
+        // The 1-clause challenger (complexity 2) displaces the 4-clause incumbent (complexity 6).
+        assert!(should_replace_parsimonious(
+            &incumbent,
+            &challenger,
+            6,
+            2,
+            DEFAULT_K_SIGMA
+        ));
+        // Symmetric: a *more* complex challenger at the same tie does NOT displace the simpler incumbent.
+        assert!(!should_replace_parsimonious(
+            &incumbent,
+            &challenger,
+            2,
+            6,
+            DEFAULT_K_SIGMA
+        ));
+        // Equal complexity at a tie ⇒ no churn (falls through to keep the incumbent).
+        assert!(!should_replace_parsimonious(
+            &incumbent,
+            &challenger,
+            4,
+            4,
+            DEFAULT_K_SIGMA
+        ));
+    }
+
+    #[test]
+    fn parsimony_never_overrides_a_material_fitness_difference() {
+        let incumbent = NoiseRobustFitness {
+            mean: 0.10,
+            std_error: 0.02,
+            n: 5,
+        };
+        // A materially BETTER but more-complex challenger still replaces (fitness wins over parsimony).
+        let much_better = NoiseRobustFitness {
+            mean: 0.20,
+            std_error: 0.02,
+            n: 5,
+        };
+        assert!(!within_noise_band(
+            &incumbent,
+            &much_better,
+            DEFAULT_K_SIGMA
+        ));
+        assert!(should_replace_parsimonious(
+            &incumbent,
+            &much_better,
+            2,  // incumbent simple
+            10, // challenger far more complex
+            DEFAULT_K_SIGMA
+        ));
+        // A materially WORSE but simpler challenger never replaces (parsimony cannot buy back edge).
+        let much_worse = NoiseRobustFitness {
+            mean: 0.02,
+            std_error: 0.02,
+            n: 5,
+        };
+        assert!(!within_noise_band(&incumbent, &much_worse, DEFAULT_K_SIGMA));
+        assert!(!should_replace_parsimonious(
+            &incumbent,
+            &much_worse,
+            10, // incumbent complex
+            1,  // challenger simplest possible
+            DEFAULT_K_SIGMA
+        ));
+        // And the plain, DSR-facing `should_replace` is untouched by complexity — it never sees it.
+        assert!(should_replace(&incumbent, &much_better, DEFAULT_K_SIGMA));
+        assert!(!should_replace(&incumbent, &much_worse, DEFAULT_K_SIGMA));
+    }
+
+    #[test]
+    fn parsimony_tiebreak_respects_ruin_and_is_deterministic() {
+        let finite = NoiseRobustFitness {
+            mean: 0.10,
+            std_error: 0.02,
+            n: 5,
+        };
+        let ruined = NoiseRobustFitness {
+            mean: f64::NEG_INFINITY,
+            std_error: 0.0,
+            n: 5,
+        };
+        // A ruined challenger never replaces, however simple (not in-band: there is a clear loser).
+        assert!(!within_noise_band(&finite, &ruined, DEFAULT_K_SIGMA));
+        assert!(!should_replace_parsimonious(
+            &finite,
+            &ruined,
+            10,
+            0,
+            DEFAULT_K_SIGMA
+        ));
+        // Any finite challenger beats a ruined incumbent (branch 1: a clear fitness win).
+        assert!(should_replace_parsimonious(
+            &ruined,
+            &finite,
+            0,
+            10,
+            DEFAULT_K_SIGMA
+        ));
+        // Deterministic: repeated evaluation is identical.
+        let tie = NoiseRobustFitness {
+            mean: 0.1004,
+            std_error: 0.02,
+            n: 5,
+        };
+        let once = should_replace_parsimonious(&finite, &tie, 6, 2, DEFAULT_K_SIGMA);
+        for _ in 0..8 {
+            assert_eq!(
+                should_replace_parsimonious(&finite, &tie, 6, 2, DEFAULT_K_SIGMA),
+                once
+            );
+        }
+        assert!(once);
     }
 }

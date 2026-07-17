@@ -303,6 +303,18 @@ impl Genome {
         }
         out
     }
+
+    /// A minimum-description-length (MDL) **complexity** proxy for the genome (QE-436): the total number
+    /// of enabled clauses across both entry banks plus the number of **distinct** referenced features.
+    /// Lower ⇒ more parsimonious (maxdama §5.4 "fewer parameters"). It is a pure, deterministic count off
+    /// the genotype — deliberately **not** a fitness term: QE-436 uses it only as a lexicographic
+    /// tie-break between genomes of *equal robust fitness*, so it never enters the DSR-facing fitness.
+    #[must_use]
+    pub fn mdl_complexity(&self) -> u32 {
+        let enabled_clauses = self.long_entry.active_count() + self.short_entry.active_count();
+        let distinct_features = self.referenced_features().len();
+        (enabled_clauses + distinct_features) as u32
+    }
 }
 
 #[cfg(test)]
@@ -586,5 +598,54 @@ mod tests {
         let g = fixture_genome();
         // Enabled clauses reference features 0 and 1 in both banks.
         assert_eq!(g.referenced_features(), BTreeSet::from([0, 1]));
+    }
+
+    #[test]
+    fn mdl_complexity_rewards_fewer_clauses_and_features() {
+        // A 1-clause long-only genome: 1 enabled clause + 1 distinct feature = 2.
+        let one_clause = Genome {
+            version: REP_VERSION,
+            long_entry: RuleSet {
+                clauses: [clause(true, 0, 1, 2), disabled(), disabled(), disabled()],
+                min_satisfied: 1,
+            },
+            short_entry: RuleSet {
+                clauses: [disabled(), disabled(), disabled(), disabled()],
+                min_satisfied: 1,
+            },
+            exit: ExitParams {
+                max_holding_bars: 3,
+                exit_on_opposite: false,
+            },
+            risk: RiskParams { size_bps: 5_000 },
+        };
+        assert_eq!(one_clause.mdl_complexity(), 2);
+
+        // The fixture: 4 enabled clauses (2 long + 2 short) over 2 distinct features (0, 1) = 6.
+        let fixture = fixture_genome();
+        assert_eq!(fixture.mdl_complexity(), 4 + 2);
+
+        // Strictly ordered: the simpler genome has strictly lower complexity.
+        assert!(one_clause.mdl_complexity() < fixture.mdl_complexity());
+
+        // Distinct features, not raw clause count: two enabled clauses on the SAME feature count the
+        // feature once (2 clauses + 1 distinct feature = 3).
+        let two_clauses_one_feature = Genome {
+            long_entry: RuleSet {
+                clauses: [
+                    clause(true, 0, 0, 1),
+                    clause(true, 0, 2, 3),
+                    disabled(),
+                    disabled(),
+                ],
+                min_satisfied: 1,
+            },
+            short_entry: RuleSet {
+                clauses: [disabled(), disabled(), disabled(), disabled()],
+                min_satisfied: 1,
+            },
+            ..fixture_genome()
+        };
+        assert_eq!(two_clauses_one_feature.mdl_complexity(), 2 + 1);
     }
 }
