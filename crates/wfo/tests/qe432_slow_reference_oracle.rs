@@ -420,7 +420,10 @@ fn apply(
     } else {
         Decimal::ZERO
     };
-    let slip_base = notional_abs * (slippage.half_spread + impact);
+    // QE-444: independent re-derivation of the DIRECTIONAL decision-to-fill alpha-loss — an adverse
+    // `notional·alpha_loss` charged on top of the symmetric spread + impact (magnitude side-blind).
+    let alpha_loss = notional_abs * slippage.alpha_loss;
+    let slip_base = notional_abs * (slippage.half_spread + impact) + alpha_loss;
     let slip = match bug {
         CostBug::None => slip_base * mult,
         CostBug::DropSlipMultiplier => slip_base, // injected bug: forgets the cost multiplier
@@ -555,6 +558,9 @@ fn random_friction(rng: &mut DetRng, mult_lo: i64, mult_hi: i64) -> FrictionConf
             half_spread: dec(rng, 0, 5, 4),
             impact_coeff: dec(rng, 0, 5, 2), // 0..0.05 participation coefficient
             impact_exponent: dec(rng, 2, 6, 1), // β ∈ [0.2, 0.6)
+            // QE-444: exercise a non-zero directional alpha-loss so the oracle proves parity of the
+            // decision-to-fill implementation-shortfall term (0..0.005 fraction of notional).
+            alpha_loss: dec(rng, 0, 5, 3),
         },
         cost_multiplier: Decimal::from(
             mult_lo + below(rng, (mult_hi - mult_lo).max(1) as u64) as i64,

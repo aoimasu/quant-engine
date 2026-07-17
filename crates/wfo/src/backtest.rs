@@ -378,8 +378,12 @@ fn apply_fill(
 ) {
     let notional_abs = (qty * price).abs();
     let fee = cfg.friction.fees.fee(notional_abs, Liquidity::Taker) * cfg.friction.cost_multiplier;
-    let slip =
-        cfg.friction.slippage.cost(notional_abs, qty.abs(), adv) * cfg.friction.cost_multiplier;
+    // Symmetric spread + participation impact (QE-431/QE-440), plus the QE-444 DIRECTIONAL decision-to-fill
+    // alpha-loss charged in the trade direction — the fill lands at the next-bar open, so the close→open
+    // drift is adverse (inert at the default coefficient 0, so the ledger is byte-identical to pre-QE-444).
+    let slip = (cfg.friction.slippage.cost(notional_abs, qty.abs(), adv)
+        + cfg.friction.slippage.alpha_loss_cost(notional_abs))
+        * cfg.friction.cost_multiplier;
     let signed_qty = match side {
         Side::Buy => qty,
         Side::Sell => -qty,
@@ -1134,5 +1138,97 @@ mod tests {
             },
         );
         assert_eq!(res.trades, 0);
+    }
+
+    // --- QE-444 decision-to-fill alpha-loss (implementation shortfall) ------------------------------
+
+    /// A backtest config with the QE-444 directional alpha-loss coefficient set (everything else default).
+    fn alpha_loss_cfg(alpha_loss: Decimal, min_trades: usize) -> BacktestConfig {
+        use crate::friction::SlippageModel;
+        BacktestConfig {
+            friction: FrictionConfig {
+                slippage: SlippageModel {
+                    alpha_loss,
+                    ..SlippageModel::default()
+                },
+                ..FrictionConfig::default()
+            },
+            min_trades,
+            windows: 2,
+            ..BacktestConfig::default()
+        }
+    }
+
+    #[test]
+    fn alpha_loss_reduces_net_return_for_a_long_entry_and_is_inert_at_zero() {
+        // A directional long entry on an uptrend: a non-zero alpha-loss strictly reduces net P&L (the
+        // decision-to-fill drift the backtest previously ignored), with an identical trade sequence
+        // (decisions are cost-blind). At 0 the whole result is byte-identical to the default path.
+        let s = schema();
+        let bars = uptrend_bars(&s, 160);
+        let g = long_genome(2, 5_000);
+
+        let base = backtest(
+            &g,
+            &bars,
+            &alpha_loss_cfg(Decimal::ZERO, DEFAULT_MIN_TRADES),
+        );
+        let taxed = backtest(
+            &g,
+            &bars,
+            &alpha_loss_cfg(Decimal::new(2, 3), DEFAULT_MIN_TRADES), // 0.002
+        );
+        assert!(base.accepted && taxed.accepted);
+        assert_eq!(
+            base.trades, taxed.trades,
+            "alpha-loss must not change the trade sequence"
+        );
+        assert!(
+            taxed.net_pnl < base.net_pnl,
+            "a non-zero alpha-loss must reduce net P&L for a directional entry: {} !< {}",
+            taxed.net_pnl,
+            base.net_pnl
+        );
+        assert!(
+            taxed.fitness.mean < base.fitness.mean,
+            "and strictly lower fitness"
+        );
+
+        // Inert at 0 ⇒ byte-identical to the default (pre-QE-444) backtest.
+        assert_eq!(
+            backtest(
+                &g,
+                &bars,
+                &alpha_loss_cfg(Decimal::ZERO, DEFAULT_MIN_TRADES)
+            ),
+            backtest(
+                &g,
+                &bars,
+                &BacktestConfig {
+                    windows: 2,
+                    ..BacktestConfig::default()
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn alpha_loss_reduces_net_return_for_a_short_entry_too() {
+        // The mirror: a directional SHORT entry on a downtrend also loses strictly more with alpha-loss,
+        // proving the term charges adversely in the trade's own direction on both sides.
+        let s = schema();
+        let bars = single_entry_downtrend(&s, 40);
+        let g = short_genome(2, 5_000);
+
+        let base = backtest(&g, &bars, &alpha_loss_cfg(Decimal::ZERO, 1));
+        let taxed = backtest(&g, &bars, &alpha_loss_cfg(Decimal::new(5, 3), 1)); // 0.005
+        assert!(base.accepted && taxed.accepted);
+        assert_eq!(base.trades, taxed.trades);
+        assert!(
+            taxed.net_pnl < base.net_pnl,
+            "a non-zero alpha-loss must reduce net P&L for a short entry: {} !< {}",
+            taxed.net_pnl,
+            base.net_pnl
+        );
     }
 }

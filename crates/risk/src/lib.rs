@@ -45,8 +45,9 @@ pub use shocks::{
 };
 pub use sizer::{PortfolioSizer, SIZER_SCALE};
 pub use slippage::{
-    fit_slippage_calibration, QuoteSample, SizedTrade, SlippageCalibration, DEFAULT_HALF_SPREAD,
-    DEFAULT_IMPACT_BINS, DEFAULT_IMPACT_COEFF, DEFAULT_IMPACT_EXPONENT, SLIPPAGE_SCALE,
+    fit_slippage_calibration, realized_alpha_loss, AlphaLossAccumulator, QuoteSample, SizedTrade,
+    SlippageCalibration, DEFAULT_ALPHA_LOSS, DEFAULT_HALF_SPREAD, DEFAULT_IMPACT_BINS,
+    DEFAULT_IMPACT_COEFF, DEFAULT_IMPACT_EXPONENT, SLIPPAGE_SCALE,
 };
 
 use thiserror::Error;

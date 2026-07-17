@@ -300,7 +300,6 @@ _All R1.c tickets delivered — see [`reviewed/`](mds/reviewed/)._
 
 | Ticket | Title | Depends on | Status |
 |--------|-------|------------|:------:|
-| [QE-444](./reviews/2026-07-16-maxdama-panel-review.md#qe-444) | Add a decision-to-fill alpha-loss (implementation-shortfall) term to friction  *(panel #15, majority)* | QE-109 | — |
 | [QE-445](./reviews/2026-07-16-maxdama-panel-review.md#qe-445) | Extend re-run-twice into a permuted-parallelism determinism test  *(panel #16, unanimous)* | QE-006 | — |
 | [QE-446](./reviews/2026-07-16-maxdama-panel-review.md#qe-446) | Report strategy-level max/avg drawdown at the lifecycle graduation gate  *(panel #17, unanimous)* | QE-134, QE-114 | — |
 | [QE-447](./reviews/2026-07-16-maxdama-panel-review.md#qe-447) | Add a pre-trade %ADV participation guard  *(panel #18, unanimous)* | QE-215, QE-219 | — |

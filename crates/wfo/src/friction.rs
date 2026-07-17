@@ -68,6 +68,12 @@ pub struct SlippageModel {
     pub impact_coeff: Decimal,
     /// Impact exponent β — the concavity of impact in participation (`u^β`, `β < 1`).
     pub impact_exponent: Decimal,
+    /// Decision-to-fill **alpha-loss** (implementation-shortfall) coefficient (QE-444, maxdama §7.3): the
+    /// adverse close→open directional drift charged **in the trade direction** as a fraction of notional,
+    /// on top of the symmetric `half_spread`. Derived verbatim from the shared [`SlippageCalibration`].
+    /// Default **`0`** (measurement-deferred, QE-435) ⇒ the term is inert and the ledger is byte-identical
+    /// to pre-QE-444. See [`SlippageModel::alpha_loss_cost`] / [`SlippageModel::directional_drift`].
+    pub alpha_loss: Decimal,
 }
 
 impl Default for SlippageModel {
@@ -92,7 +98,30 @@ impl SlippageModel {
             half_spread: cal.half_spread,
             impact_coeff: cal.impact_coeff,
             impact_exponent: cal.impact_exponent,
+            alpha_loss: cal.alpha_loss,
         }
+    }
+
+    /// The **signed** per-notional decision-to-fill drift for a fill of `side` (QE-444): `+alpha_loss` for a
+    /// **buy** (fill drifted up from the decision price), `−alpha_loss` for a **sell** (drifted down) — an
+    /// **odd** function of side, the directional signature that sets alpha-loss apart from the side-blind
+    /// (even) `half_spread`.
+    #[must_use]
+    pub fn directional_drift(&self, side: Side) -> Decimal {
+        match side {
+            Side::Buy => self.alpha_loss,
+            Side::Sell => -self.alpha_loss,
+        }
+    }
+
+    /// The **adverse** decision-to-fill alpha-loss cost on a fill of `notional_abs` (QE-444): the drift is
+    /// signal-aligned (adverse to whichever way the trade points), so the magnitude is
+    /// `notional_abs · alpha_loss` in the trade's own direction and always **reduces** net return. Kept
+    /// **separate** from [`SlippageModel::cost`] (the symmetric spread + impact) so the directional term is
+    /// explicit and never confused with the half-spread. Exact `Decimal`.
+    #[must_use]
+    pub fn alpha_loss_cost(&self, notional_abs: Decimal) -> Decimal {
+        notional_abs * self.alpha_loss
     }
 
     /// Slippage cost for a fill of `qty_abs` (notional `notional_abs`) against rolling ADV `adv` (in the
@@ -275,8 +304,11 @@ pub fn simulate(events: &[Event], cfg: &FrictionConfig) -> PnlBreakdown {
             Event::Fill(f) => {
                 let notional_abs = (f.qty * f.price).abs();
                 pnl.fees += cfg.fees.fee(notional_abs, f.liquidity) * cfg.cost_multiplier;
-                pnl.slippage +=
-                    cfg.slippage.cost(notional_abs, f.qty.abs(), f.adv) * cfg.cost_multiplier;
+                // Symmetric spread + participation impact, plus the QE-444 DIRECTIONAL decision-to-fill
+                // alpha-loss (adverse in the trade's direction; inert at the default coefficient 0).
+                pnl.slippage += (cfg.slippage.cost(notional_abs, f.qty.abs(), f.adv)
+                    + cfg.slippage.alpha_loss_cost(notional_abs))
+                    * cfg.cost_multiplier;
                 pnl.gross += pos.apply(f.side, f.qty, f.price);
             }
             Event::Funding(s) => {
@@ -469,5 +501,78 @@ mod tests {
         );
         // No ADV ⇒ spread-cross only (participation undefined).
         assert_eq!(m.cost(n1, q, Decimal::ZERO), spread_only(n1));
+    }
+
+    // --- QE-444 decision-to-fill alpha-loss (implementation shortfall) ------------------------------
+
+    #[test]
+    fn from_calibration_derives_alpha_loss_and_default_is_inert() {
+        // The friction model reads the directional coefficient verbatim from the shared calibration; the
+        // default is 0 (measurement-deferred), so the term contributes nothing.
+        let cal = SlippageCalibration::default();
+        assert_eq!(
+            SlippageModel::from_calibration(&cal).alpha_loss,
+            cal.alpha_loss
+        );
+        assert_eq!(SlippageModel::default().alpha_loss, Decimal::ZERO);
+        assert_eq!(
+            SlippageModel::default().alpha_loss_cost(d("1000")),
+            Decimal::ZERO
+        );
+
+        let fitted = cal.with_alpha_loss(d("0.002"));
+        assert_eq!(
+            SlippageModel::from_calibration(&fitted).alpha_loss,
+            d("0.002")
+        );
+    }
+
+    #[test]
+    fn alpha_loss_is_directional_odd_in_side_unlike_half_spread() {
+        // QE-444: directional drift is +γ for a buy, −γ for a sell (odd in side) — the asymmetry that
+        // distinguishes it from the side-blind (even) half_spread. The adverse cost magnitude is symmetric.
+        let m = SlippageModel::from_calibration(
+            &SlippageCalibration::default().with_alpha_loss(d("0.001")),
+        );
+        assert_eq!(m.directional_drift(Side::Buy), d("0.001"));
+        assert_eq!(m.directional_drift(Side::Sell), d("-0.001"));
+        assert_eq!(
+            m.directional_drift(Side::Buy),
+            -m.directional_drift(Side::Sell)
+        );
+        assert_eq!(m.alpha_loss_cost(d("1000")), d("1")); // 1000 · 0.001, always adverse
+    }
+
+    #[test]
+    fn simulate_charges_the_directional_alpha_loss_and_is_inert_at_zero() {
+        // Buy 1 @100, sell 1 @100 (two fills). With a non-zero alpha-loss the slippage grows by exactly
+        // alpha_loss·notional per fill; at 0 the breakdown is byte-identical to the pre-QE-444 path.
+        let events = vec![buy("1", "100"), sell("1", "100")];
+        let base = FrictionConfig::default();
+        let baseline = simulate(&events, &base);
+
+        let taxed_cfg = FrictionConfig {
+            slippage: SlippageModel {
+                alpha_loss: d("0.01"),
+                ..SlippageModel::default()
+            },
+            ..FrictionConfig::default()
+        };
+        let taxed = simulate(&events, &taxed_cfg);
+        // Two fills of notional 100 ⇒ extra slippage 2 · (100 · 0.01) = 2.0; gross/fees/funding unchanged.
+        assert_eq!(taxed.slippage - baseline.slippage, d("2.0"));
+        assert_eq!(taxed.gross, baseline.gross);
+        assert_eq!(taxed.fees, baseline.fees);
+        assert!(taxed.net() < baseline.net(), "alpha-loss must reduce net");
+
+        // Inert at 0: byte-identical breakdown.
+        let zero_cfg = FrictionConfig {
+            slippage: SlippageModel {
+                alpha_loss: Decimal::ZERO,
+                ..SlippageModel::default()
+            },
+            ..FrictionConfig::default()
+        };
+        assert_eq!(simulate(&events, &zero_cfg), baseline);
     }
 }
