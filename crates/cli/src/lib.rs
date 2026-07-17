@@ -131,6 +131,14 @@ pub fn run_train(
         embargo: opts.embargo,
         funding_coverage_min: cfg.selection.funding_coverage_min,
         cv_folds: cfg.selection.cv_folds,
+        // QE-443: opt-in inverse-vol (EWMA) seed for the deployed weight budget; default OFF ⇒ 1/N.
+        seed_weighting: if cfg.selection.inverse_vol_seed {
+            qe_ensemble::SeedWeighting::InverseVol {
+                decay: cfg.selection.ewma_decay,
+            }
+        } else {
+            qe_ensemble::SeedWeighting::Equal
+        },
         lineage,
         profile: cfg.profile.as_str().to_owned(),
     };

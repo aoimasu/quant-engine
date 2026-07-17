@@ -20,6 +20,14 @@ use qe_risk::SlippageCalibration;
 /// Default fraction of gross edge that must remain at capacity (`0` = capacity is where edge hits zero).
 pub const DEFAULT_EDGE_RETENTION: f64 = 0.0;
 
+/// Default EWMA variance decay constant `λ` for [`inverse_vol_seed`] (QE-443): the RiskMetrics-standard
+/// `0.94`. This is the **single** free parameter of the inverse-vol seed — the estimation knob the Max
+/// Dama panel flagged (variance is the one moment a short EWMA predicts well, but seeding by it
+/// reintroduces an estimated variance that pure `1/N` avoids). Kept low-parameter and deterministic; the
+/// seed is **opt-in** and defaults off (see [`SeedWeighting`]), so this value never moves a golden unless a
+/// caller deliberately enables inverse-vol seeding.
+pub const DEFAULT_EWMA_DECAY: f64 = 0.94;
+
 /// A strategy's per-period economics, the inputs to its [`capacity`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct StrategyProfile {
@@ -202,6 +210,117 @@ pub fn cap_weights(weights: &[f64], capacities: &[f64], target_aum: f64) -> Vec<
     alloc
 }
 
+/// The single-`λ` EWMA (exponentially-weighted moving average) **variance** of a per-period return series
+/// (QE-443, Dama §6.2 method 10 — variance is predictable via a short EWMA). A one-pass, fixed-order walk
+/// oldest→newest: the mean and variance are each recursively blended by `decay` (`λ`), so recent
+/// observations weigh more. Deterministic and schedule-independent (no parallel reduction). Returns `0.0`
+/// for a series of `< 2` points (no estimable dispersion). `decay` is clamped to `[0, 1)`.
+///
+/// ```text
+/// mean_t = λ·mean_{t-1} + (1−λ)·r_t
+/// var_t  = λ·var_{t-1}  + (1−λ)·(r_t − mean_{t-1})^2
+/// ```
+///
+/// (the deviation uses the *prior* mean, the standard EWMA-variance recursion, so a single observation
+/// contributes no variance).
+#[must_use]
+pub fn ewma_variance(returns: &[f64], decay: f64) -> f64 {
+    if returns.len() < 2 {
+        return 0.0;
+    }
+    let lambda = decay.clamp(0.0, 1.0);
+    let mut mean = returns[0];
+    let mut var = 0.0;
+    for &r in &returns[1..] {
+        let dev = r - mean;
+        var = lambda * var + (1.0 - lambda) * dev * dev;
+        mean = lambda * mean + (1.0 - lambda) * r;
+    }
+    var
+}
+
+/// Inverse-volatility (EWMA) risk-parity **seed** weights for a set of members' per-period return series
+/// (QE-443). Each member's volatility is `vol_i = sqrt(`[`ewma_variance`]`(series_i, decay))`; the seed is
+/// `w_i = (1/vol_i) / Σ_j (1/vol_j)`, so the vector sums to 1 and a **higher-vol** member gets a **lower**
+/// seed weight (Dama §6.2: when volatilities differ, unequal weights cancel risk better than `1/N`).
+///
+/// This is a **seed only** — the caller layers the existing QE-128 [`cap_weights`] water-fill on top
+/// (`cap_weights(inverse_vol_seed(series, decay), capacities, target_aum)`). It is deliberately **not** a
+/// default: the panel judged inverse-vol a genuine trade-off, not a strict win over the OOS-robust `1/N`
+/// (it reintroduces an estimated variance), so it is opt-in via [`SeedWeighting`].
+///
+/// **Reductions to `1/N`.** Equal-volatility members seed to exactly `1/N`. As a **degenerate guard**, if
+/// any member's vol is non-finite or `≤ 0` (a flat or too-short series has no estimable variance), or the
+/// inverse-vol sum is non-finite/non-positive, the whole vector falls back to equal weight `1/N` — an
+/// unmodellable member vol defeats risk parity, so the OOS-robust `1/N` is preserved deterministically
+/// rather than papered over with an epsilon. Empty input ⇒ empty.
+///
+/// Determinism note: the `1/vol` normalisation is `f64`; where the seed feeds the sealed vintage the caller
+/// rounds the final (post-water-fill) weights to `hash_stable` (12 dp), the same treatment the capacity
+/// weights already receive, so sub-ULP `sqrt`/division drift cannot change the sealed bytes.
+#[must_use]
+pub fn inverse_vol_seed(series: &[Vec<f64>], decay: f64) -> Vec<f64> {
+    let k = series.len();
+    if k == 0 {
+        return Vec::new();
+    }
+    let equal = || vec![1.0 / k as f64; k];
+    let inv_vols: Vec<f64> = series
+        .iter()
+        .map(|s| {
+            let vol = ewma_variance(s, decay).sqrt();
+            if vol.is_finite() && vol > 0.0 {
+                1.0 / vol
+            } else {
+                f64::NAN // marks a member with no estimable, positive vol
+            }
+        })
+        .collect();
+    if inv_vols.iter().any(|v| !v.is_finite()) {
+        return equal(); // any unmodellable member vol ⇒ preserve OOS-robust 1/N
+    }
+    let sum: f64 = inv_vols.iter().sum();
+    if !sum.is_finite() || sum <= 0.0 {
+        return equal();
+    }
+    inv_vols.into_iter().map(|v| v / sum).collect()
+}
+
+/// How the member weight **budget is seeded** before the QE-128 [`cap_weights`] water-fill (QE-443).
+/// Defaults to [`SeedWeighting::Equal`] — the OOS-robust `1/N` the engine has always used — so the sealed
+/// weights, the vintage id, and every golden are unchanged unless a caller deliberately opts in to
+/// [`SeedWeighting::InverseVol`]. The panel resolution was a **split**: inverse-vol is a genuine
+/// risk-cancellation vs variance-estimation trade-off, not a strict improvement, so it is offered, not
+/// forced.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum SeedWeighting {
+    /// Equal weight `1/N` — the default, byte-identical to the historical seed.
+    #[default]
+    Equal,
+    /// Inverse-volatility (EWMA) risk-parity seed with a single decay constant `λ` (see
+    /// [`inverse_vol_seed`]). Opt-in.
+    InverseVol {
+        /// The EWMA variance decay constant `λ` (see [`DEFAULT_EWMA_DECAY`]).
+        decay: f64,
+    },
+}
+
+impl SeedWeighting {
+    /// The seed weight budget for `k` members with per-period return `series` (aligned, `series.len() == k`
+    /// for the inverse-vol path). [`SeedWeighting::Equal`] returns exactly `vec![1/k; k]` (byte-identical to
+    /// the historical literal); [`SeedWeighting::InverseVol`] returns [`inverse_vol_seed`]. `k == 0` ⇒ empty.
+    #[must_use]
+    pub fn seed(&self, series: &[Vec<f64>], k: usize) -> Vec<f64> {
+        if k == 0 {
+            return Vec::new();
+        }
+        match *self {
+            SeedWeighting::Equal => vec![1.0 / k as f64; k],
+            SeedWeighting::InverseVol { decay } => inverse_vol_seed(series, decay),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -332,6 +451,112 @@ mod tests {
         let capped = cap_weights(&weights, &[cap, cap], target_aum);
         approx(capped[0], 0.5);
         approx(capped[1], 0.5);
+    }
+
+    // --- QE-443: inverse-vol (EWMA) seed weighting ---------------------------------------------------
+
+    /// A deterministic alternating series with per-step amplitude `amp` (mean ≈ 0, vol ∝ amp).
+    fn wobble(amp: f64, n: usize) -> Vec<f64> {
+        (0..n)
+            .map(|i| if i % 2 == 0 { amp } else { -amp })
+            .collect()
+    }
+
+    #[test]
+    fn ewma_variance_grows_with_amplitude_and_is_zero_for_flat() {
+        approx(ewma_variance(&[0.01; 8], DEFAULT_EWMA_DECAY), 0.0); // flat ⇒ no dispersion
+        approx(ewma_variance(&[], DEFAULT_EWMA_DECAY), 0.0);
+        approx(ewma_variance(&[0.5], DEFAULT_EWMA_DECAY), 0.0); // single point ⇒ 0
+        let lo = ewma_variance(&wobble(0.01, 32), DEFAULT_EWMA_DECAY);
+        let hi = ewma_variance(&wobble(0.04, 32), DEFAULT_EWMA_DECAY);
+        assert!(
+            hi > lo && lo > 0.0,
+            "higher amplitude ⇒ higher EWMA variance"
+        );
+    }
+
+    #[test]
+    fn inverse_vol_seed_gives_higher_vol_member_lower_weight() {
+        // AC: a higher-vol member gets a strictly lower seed weight.
+        let series = vec![wobble(0.01, 64), wobble(0.05, 64)];
+        let w = inverse_vol_seed(&series, DEFAULT_EWMA_DECAY);
+        approx(w.iter().sum::<f64>(), 1.0);
+        assert!(
+            w[0] > w[1],
+            "low-vol member 0 must outweigh high-vol member 1: {w:?}"
+        );
+        // And by roughly the vol ratio (≈5×), a sanity check the weighting is inverse-vol not arbitrary.
+        assert!(w[0] > 4.0 * w[1], "seed should be ~inverse to vol: {w:?}");
+    }
+
+    #[test]
+    fn inverse_vol_seed_reduces_to_equal_for_equal_vol_members() {
+        // AC: equal-vol members reduce to exactly 1/N.
+        let series = vec![wobble(0.02, 48), wobble(0.02, 48), wobble(0.02, 48)];
+        let w = inverse_vol_seed(&series, DEFAULT_EWMA_DECAY);
+        for wi in &w {
+            approx(*wi, 1.0 / 3.0);
+        }
+    }
+
+    #[test]
+    fn inverse_vol_seed_degenerate_members_fall_back_to_equal() {
+        // A flat (zero-vol) member has no estimable variance ⇒ deterministic 1/N fallback (not NaN/inf).
+        let series = vec![wobble(0.02, 32), vec![0.0; 32]];
+        let w = inverse_vol_seed(&series, DEFAULT_EWMA_DECAY);
+        approx(w[0], 0.5);
+        approx(w[1], 0.5);
+        // Too-short members (no dispersion) also fall back.
+        let short = vec![vec![0.01], vec![0.02]];
+        let w2 = inverse_vol_seed(&short, DEFAULT_EWMA_DECAY);
+        approx(w2[0], 0.5);
+        approx(w2[1], 0.5);
+        assert!(inverse_vol_seed(&[], DEFAULT_EWMA_DECAY).is_empty());
+    }
+
+    #[test]
+    fn inverse_vol_seed_is_deterministic() {
+        let series = vec![wobble(0.013, 40), wobble(0.041, 40), wobble(0.007, 40)];
+        let a = inverse_vol_seed(&series, DEFAULT_EWMA_DECAY);
+        let b = inverse_vol_seed(&series, DEFAULT_EWMA_DECAY);
+        assert_eq!(a, b, "same inputs must give byte-identical seed weights");
+    }
+
+    #[test]
+    fn seed_weighting_equal_is_byte_identical_to_the_literal() {
+        // AC: option OFF (the default) is byte-identical to the historical 1/k literal, regardless of series.
+        assert_eq!(SeedWeighting::default(), SeedWeighting::Equal);
+        let series = vec![wobble(0.01, 20), wobble(0.09, 20), wobble(0.03, 20)];
+        let seeded = SeedWeighting::Equal.seed(&series, 3);
+        assert_eq!(seeded, vec![1.0 / 3.0; 3]);
+        assert!(SeedWeighting::Equal.seed(&series, 0).is_empty());
+    }
+
+    #[test]
+    fn capacity_water_fill_layers_on_top_of_inverse_vol_seed() {
+        // AC: the existing cap_weights water-fill still layers on top of an inverse-vol seed — a member
+        // whose seeded share exceeds its capacity/AUM is capped there and the freed budget redistributed.
+        let model = CapacityModel::with_defaults();
+        let scalper = profile(0.001, 2.0); // capacity $100k (see `ADV`)
+        let slow = profile(0.001, 0.1); // huge capacity
+        let cap_scalper = capacity(&scalper, &model);
+        let cap_slow = capacity(&slow, &model);
+        let target_aum = 1_000_000.0;
+
+        // Make the (capacity-bound) scalper the LOW-vol member so inverse-vol seeds it *above* its cap —
+        // proving the water-fill still binds on top of the inverse-vol seed.
+        let series = vec![wobble(0.005, 64), wobble(0.05, 64)];
+        let seed = inverse_vol_seed(&series, DEFAULT_EWMA_DECAY);
+        assert!(seed[0] > seed[1], "scalper seeded above 0.5 by inverse-vol");
+        let capped = cap_weights(&seed, &[cap_scalper, cap_slow], target_aum);
+
+        // Scalper still capped at capacity/AUM = 0.1, strictly below its (>0.5) inverse-vol seed …
+        approx(capped[0], cap_scalper / target_aum);
+        assert!(capped[0] < seed[0]);
+        // … its dollar allocation equals its modelled capacity, and freed budget flows to the slow member.
+        approx(capped[0] * target_aum, cap_scalper);
+        assert!(capped[1] > seed[1]);
+        approx(capped[0] + capped[1], 1.0);
     }
 
     #[test]

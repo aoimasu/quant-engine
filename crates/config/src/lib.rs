@@ -174,6 +174,15 @@ impl Config {
             ));
         }
 
+        // QE-443: the inverse-vol seed's EWMA decay constant λ must be a strict fraction in (0, 1).
+        let d = self.selection.ewma_decay;
+        if !(d.is_finite() && 0.0 < d && d < 1.0) {
+            return Err(invalid(
+                "selection.ewma_decay",
+                "must be a decay constant in the open interval (0.0, 1.0)",
+            ));
+        }
+
         Ok(())
     }
 
@@ -317,6 +326,30 @@ seed = 42
         assert!(
             matches!(err, ConfigError::Invalid { field, .. } if field == "selection.funding_coverage_min")
         );
+    }
+
+    #[test]
+    fn inverse_vol_seed_defaults_off_and_decay_validates() {
+        // QE-443: the inverse-vol seed is OPT-IN — default OFF, so vintages/goldens are unchanged.
+        let cfg = Config::from_toml_str(VALID).unwrap();
+        assert!(!cfg.selection.inverse_vol_seed, "seed must default OFF");
+        assert!((cfg.selection.ewma_decay - 0.94).abs() < 1e-12);
+
+        // Explicit opt-in + in-range decay is accepted.
+        let ok = format!("{VALID}\n[selection]\ninverse_vol_seed = true\newma_decay = 0.97\n");
+        let c = Config::from_toml_str(&ok).unwrap();
+        assert!(c.selection.inverse_vol_seed);
+        assert!((c.selection.ewma_decay - 0.97).abs() < 1e-12);
+
+        // A decay outside (0, 1) is rejected with a dotted field path.
+        for bad_decay in ["0.0", "1.0", "1.5"] {
+            let bad = format!("{VALID}\n[selection]\newma_decay = {bad_decay}\n");
+            let err = Config::from_toml_str(&bad).unwrap_err();
+            assert!(
+                matches!(err, ConfigError::Invalid { field, .. } if field == "selection.ewma_decay"),
+                "decay {bad_decay} must be rejected"
+            );
+        }
     }
 
     #[test]
