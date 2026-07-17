@@ -15,7 +15,7 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 
 use qe_determinism::Lineage;
-use qe_risk::{CalibrationProfile, SlippageCalibration};
+use qe_risk::{CalibrationProfile, PortfolioSizer, SlippageCalibration};
 use qe_signal::{CatalogueIdentity, Genome};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -30,7 +30,9 @@ pub mod schema;
 ///   exactly at the load boundary — see [`schema`].
 /// - `4` (QE-431): added [`VintageContent::slippage`] (the content-addressed slippage/impact
 ///   calibration shared by friction & capacity), riding the lineage alongside `calibration`.
-pub const VINTAGE_FORMAT_VERSION: u16 = 4;
+/// - `5` (QE-433): added [`VintageContent::sizer`] (the content-addressed advisory portfolio-Kelly
+///   leverage multiplier), riding the lineage alongside `slippage`.
+pub const VINTAGE_FORMAT_VERSION: u16 = 5;
 
 /// The hashed content of a vintage — everything the content hash covers.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -50,6 +52,13 @@ pub struct VintageContent {
     /// hashed content (alongside `calibration`) ties the exact cost coefficients that priced selection into
     /// the vintage's reproducible lineage. Part of the hashed content, so it changes the vintage id.
     pub slippage: SlippageCalibration,
+    /// The per-vintage advisory portfolio-Kelly sizer (QE-433) — the fractional (≤½) empirical-Kelly
+    /// leverage multiplier solved on the realised **combined net-of-cost** series after the mask +
+    /// capacity weights are fixed. The live netter scales the netted book by it and clamps the result
+    /// **below** the pretrade leverage cap (the hard cap stays the backstop). Riding it here in the hashed
+    /// content ties the chosen size into the vintage's reproducible lineage, like `slippage`. Part of the
+    /// hashed content, so it changes the vintage id.
+    pub sizer: PortfolioSizer,
     /// Worst-case capital loss (a positive fraction) under the QE-130 stress set — the figure the
     /// vintage carries to gate G3 (QE-308). `None` until the stress engine
     /// (`qe_ensemble::stress::worst_case_loss`) has been run and its bare figure attached. Stored as a
@@ -412,6 +421,7 @@ mod tests {
             weights: vec![0.6, 0.4],
             calibration: calibration(),
             slippage: SlippageCalibration::default(),
+            sizer: PortfolioSizer::default(),
             worst_case_loss: Some(0.28), // QE-130 stress figure
             catalogue: CatalogueIdentity::current(), // QE-402 pinned identity
             lineage: lineage(),
@@ -479,6 +489,23 @@ mod tests {
             Vintage::seal(negative),
             Err(VintageError::InvalidWorstCaseLoss { .. })
         ));
+    }
+
+    #[test]
+    fn sizer_is_part_of_the_hash() {
+        // QE-433: the advisory portfolio-Kelly sizer rides the hashed content, so a different multiplier
+        // yields a different vintage id.
+        let base = Vintage::seal(content()).unwrap();
+        let mut other = content();
+        other.sizer = PortfolioSizer::new(rust_decimal::Decimal::new(35, 2)); // 0.35 vs default 1.0
+        let sized = Vintage::seal(other).unwrap();
+        assert_ne!(sized.content_hash, base.content_hash);
+
+        // And it round-trips through disk verify.
+        let mut buf: Vec<u8> = Vec::new();
+        sized.write(&mut buf).unwrap();
+        let loaded = Vintage::load(buf.as_slice()).unwrap();
+        assert_eq!(loaded.content.sizer, sized.content.sizer);
     }
 
     #[test]

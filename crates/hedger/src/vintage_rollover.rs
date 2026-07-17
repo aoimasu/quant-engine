@@ -193,6 +193,7 @@ mod tests {
                 Fraction::new(Decimal::new(calib_tenths, 1)).unwrap(),
             ),
             slippage: qe_risk::SlippageCalibration::default(),
+            sizer: qe_risk::PortfolioSizer::default(),
             worst_case_loss: Some(0.28),
             catalogue: qe_signal::CatalogueIdentity::current(),
             lineage: Lineage::new(

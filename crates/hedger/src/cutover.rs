@@ -387,6 +387,7 @@ mod tests {
             weights,
             calibration: CalibrationProfile::new(Fraction::new(Decimal::new(5, 1)).unwrap()),
             slippage: qe_risk::SlippageCalibration::default(),
+            sizer: qe_risk::PortfolioSizer::default(),
             worst_case_loss: None,
             catalogue: qe_signal::CatalogueIdentity::current(),
             lineage: Lineage::new("cfg", "snap", "commit", vec![]),

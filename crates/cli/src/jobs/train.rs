@@ -27,7 +27,7 @@ use qe_ensemble::{
 use qe_gate::{evaluate_g1, split_with_embargo, G1Criteria, G1Decision};
 use qe_risk::{
     calibrate_threshold, calibrate_thresholds, default_calibration_margin, quantize_calibration,
-    CalibrationProfile, DEFAULT_FAST_QUANTILE, DEFAULT_FAST_WINDOW,
+    CalibrationProfile, PortfolioSizer, DEFAULT_FAST_QUANTILE, DEFAULT_FAST_WINDOW,
 };
 use qe_validation::{
     assess, buy_and_hold_returns, effective_trials, sharpe_ratio, RobustnessReport, SpaConfig,
@@ -39,7 +39,10 @@ use qe_wfo::cv_fitness::{
     fold_isolation_fitness, fold_test_ranges, selection_kfold, DEFAULT_LABEL_HORIZON,
 };
 use qe_wfo::regularise::coverage;
-use qe_wfo::{Genome, MapElitesArchive, OperatorSelector, VariationDriver};
+use qe_wfo::{
+    fractional_kelly, Genome, MapElitesArchive, OperatorSelector, VariationDriver,
+    DEFAULT_KELLY_FRACTION,
+};
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use serde::Serialize;
@@ -482,6 +485,14 @@ pub fn run_train_job(
     // is found (no unintended pre-gating), instead of an empty map that pre-gates the whole vintage.
     let calibration = calibrate_profile(&selected_returns, &weights);
 
+    // QE-433: the advisory portfolio-Kelly sizer. Solve the growth-optimal leverage `f*` on the realised
+    // combined **net-of-cost** series (`in_sample_returns` is already net of the QE-431 calibrated cost
+    // model, since the train backtest prices cost via `BacktestConfig::default().friction`), apply the
+    // fractional (≤½) multiplier `κ`, and seal it. The live netter scales the netted book by it and clamps
+    // **below** the pretrade cap — it can cut as readily as raise, and the hard cap stays the backstop.
+    let sizer =
+        PortfolioSizer::from_kelly(fractional_kelly(&in_sample_returns, DEFAULT_KELLY_FRACTION));
+
     let content = VintageContent {
         format_version: VINTAGE_FORMAT_VERSION,
         vintage_id: vintage_id.clone(),
@@ -493,6 +504,7 @@ pub fn run_train_job(
         // `SlippageCalibration::default()`, so sealing it ties the cost coefficients into the lineage.
         // (Wiring a live-fitted calibration through here is the QE-431 follow-up.)
         slippage: qe_risk::SlippageCalibration::default(),
+        sizer,
         worst_case_loss: Some(hash_stable(stress.worst_case_loss)),
         // Pin the identity of the catalogue these chromosomes were evolved against (QE-402) — the
         // exact-match key the backtest/live load boundary asserts. `schema` is the same

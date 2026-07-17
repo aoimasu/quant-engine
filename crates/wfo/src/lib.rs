@@ -42,6 +42,7 @@ pub mod cv;
 pub mod cv_fitness;
 pub mod fitness;
 pub mod friction;
+pub mod kelly;
 // The strategy genome moved to `qe-signal` (shared train/live signal logic, QE-001 decoupling). It is
 // re-exported here as `qe_wfo::genome` so the search side's `crate::genome::*` and public API are
 // unchanged.
@@ -74,6 +75,7 @@ pub use friction::{
     cost_sweep, simulate, Event, FeeSchedule, Fill, FrictionConfig, FundingStamp, Liquidity,
     PnlBreakdown, Position, SlippageModel,
 };
+pub use kelly::{empirical_kelly, fractional_kelly, DEFAULT_KELLY_FRACTION, MIN_KELLY_FRACTION};
 pub use lifecycle::{
     Phase, QualityGate, QualityThreshold, ThresholdPolicy, DEFAULT_MIN_EXPLOITATION_WINDOWS,
     DEFAULT_QUANTILE,

@@ -23,6 +23,7 @@ pub mod calibration;
 pub mod gate;
 pub mod kill;
 pub mod limit;
+pub mod sizer;
 pub mod slippage;
 
 pub use breaker::{
@@ -37,6 +38,7 @@ pub use calibration::{
 pub use gate::{assert_honours_kill_switch, Admission, OrderGate, OrderIntent};
 pub use kill::{KillHandle, KillSwitch};
 pub use limit::{Fraction, Leverage, LimitBreach, LimitKind, LimitOutcome, RiskLimits};
+pub use sizer::{PortfolioSizer, SIZER_SCALE};
 pub use slippage::{
     fit_slippage_calibration, QuoteSample, SizedTrade, SlippageCalibration, DEFAULT_HALF_SPREAD,
     DEFAULT_IMPACT_BINS, DEFAULT_IMPACT_PER_NOTIONAL, DEFAULT_REFERENCE_MARK, SLIPPAGE_SCALE,
