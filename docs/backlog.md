@@ -285,9 +285,13 @@ _All R1.c tickets delivered — see [`reviewed/`](mds/reviewed/)._
 > record** for the four ticketed items is
 > [`docs/reviews/2026-07-16-maxdama-panel-review.md`](./reviews/2026-07-16-maxdama-panel-review.md).
 >
-> **Band.** Cross-cutting quant-correctness items in the **QE-43x** slice of the review/hardening band. Not
-> new spec features; they do not change the P0–P2 gates. **Only the four high-priority (panel rank #1–#4)**
-> recommendations are ticketed here; the remaining medium/low items stay in the report for later triage.
+> **Band.** Cross-cutting quant-correctness items in the **QE-43x / QE-44x** slice of the review/hardening
+> band. Not new spec features; they do not change the P0–P2 gates. **All 20 panel recommendations are now
+> ticketed** — the four high-priority items in **R2.a**, the remaining medium/low items in **R2.b**. Priority
+> tags map the panel priority (high→P1, medium→P2, low→P3); the panel rank and consensus are carried in each
+> row.
+
+### R2.a — High priority (panel #1–#4)
 
 | Ticket | Title | Depends on | Status |
 |--------|-------|------------|:------:|
@@ -295,6 +299,27 @@ _All R1.c tickets delivered — see [`reviewed/`](mds/reviewed/)._
 | [QE-431](./reviews/2026-07-16-maxdama-panel-review.md#qe-431) | Calibrate slippage `half_spread`+`impact` from venue data as one content-addressed input shared by friction & capacity  *(P1 — net-of-cost truth; panel #2, unanimous)* | QE-109, QE-128, QE-116, QE-129, QE-006 | — |
 | [QE-432](./reviews/2026-07-16-maxdama-panel-review.md#qe-432) | Independent slow-reference oracle for the reconstruct roll-up & net-of-cost fitness paths  *(P1 — precondition for statistical validity; panel #3, unanimous)* | QE-106, QE-120, QE-109, QE-006 | — |
 | [QE-433](./reviews/2026-07-16-maxdama-panel-review.md#qe-433) | Portfolio-level fractional (≤½) empirical-Kelly sizing pass on combined net PnL  *(P2 — before scaling capital; panel #4, majority)* | QE-113, QE-126, QE-215, QE-219, QE-431 | — |
+
+### R2.b — Medium / low priority (panel #5–#20, deferred triage)
+
+| Ticket | Title | Depends on | Status |
+|--------|-------|------------|:------:|
+| [QE-434](./reviews/2026-07-16-maxdama-panel-review.md#qe-434) | Add per-indicator IC / information-horizon screening as a catalogue-admission pre-filter  *(panel #5, split)* | QE-131, QE-107 | — |
+| [QE-435](./reviews/2026-07-16-maxdama-panel-review.md#qe-435) | Close the train-backtest <-> live execution/money-model parity gap  *(panel #6, unanimous)* | QE-120, QE-219 | — |
+| [QE-436](./reviews/2026-07-16-maxdama-panel-review.md#qe-436) | Add an in-search parsimony (MDL) penalty and decouple size discovery from rule discovery  *(panel #7, majority)* | QE-113, QE-114, QE-110, QE-107 | — |
+| [QE-437](./reviews/2026-07-16-maxdama-panel-review.md#qe-437) | Gate G1 on the already-computed PBO  *(panel #8, unanimous)* | QE-134 | — |
+| [QE-438](./reviews/2026-07-16-maxdama-panel-review.md#qe-438) | Score the DE membership objective on the actual deployed (capacity-capped) weight vector, not equal-weight  *(panel #9, majority)* | QE-115, QE-130 | — |
+| [QE-439](./reviews/2026-07-16-maxdama-panel-review.md#qe-439) | Make the DSR deflation basis coherent on the gens/windows axis  *(panel #10, majority)* | QE-131, QE-134 | — |
+| [QE-440](./reviews/2026-07-16-maxdama-panel-review.md#qe-440) | Move the impact model to concave square-root-in-participation and add a rolling ADV input  *(panel #11, majority)* | QE-128, QE-109 | — |
+| [QE-441](./reviews/2026-07-16-maxdama-panel-review.md#qe-441) | Inject bar-level scenario shocks into the single-strategy sizing fitness (tail-aware Kelly), with seeded/content-addressed shocks  *(panel #12, majority)* | QE-130, QE-120, QE-006 | — |
+| [QE-442](./reviews/2026-07-16-maxdama-panel-review.md#qe-442) | Make signal combination graded (probability surface) rather than hard-boolean k-of-n  *(panel #13, majority)* | QE-110, QE-107 | — |
+| [QE-443](./reviews/2026-07-16-maxdama-panel-review.md#qe-443) | Seed member weights with inverse-vol (EWMA) risk parity, then apply the existing capacity water-fill  *(panel #14, split)* | QE-219 | — |
+| [QE-444](./reviews/2026-07-16-maxdama-panel-review.md#qe-444) | Add a decision-to-fill alpha-loss (implementation-shortfall) term to friction  *(panel #15, majority)* | QE-109 | — |
+| [QE-445](./reviews/2026-07-16-maxdama-panel-review.md#qe-445) | Extend re-run-twice into a permuted-parallelism determinism test  *(panel #16, unanimous)* | QE-006 | — |
+| [QE-446](./reviews/2026-07-16-maxdama-panel-review.md#qe-446) | Report strategy-level max/avg drawdown at the lifecycle graduation gate  *(panel #17, unanimous)* | QE-134, QE-114 | — |
+| [QE-447](./reviews/2026-07-16-maxdama-panel-review.md#qe-447) | Add a pre-trade %ADV participation guard  *(panel #18, unanimous)* | QE-215, QE-219 | — |
+| [QE-448](./reviews/2026-07-16-maxdama-panel-review.md#qe-448) | Correct the SPA label and document the biases deflation cannot see  *(panel #19, unanimous)* | QE-131 | — |
+| [QE-449](./reviews/2026-07-16-maxdama-panel-review.md#qe-449) | Guard the unused maker rate against future adverse-selection blindness  *(panel #20, unanimous)* | QE-109 | — |
 
 ---
 
