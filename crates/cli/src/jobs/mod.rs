@@ -4,6 +4,7 @@
 
 pub mod backtest;
 pub mod datetime;
+pub mod evolve;
 pub mod features;
 pub mod ingest;
 pub mod metrics;
@@ -18,7 +19,9 @@ use thiserror::Error;
 /// admin server parses **exactly** what this binary emits. Re-exported here so the existing
 /// `qe_cli::jobs::{ProgressLine, emit_progress, emit_done, emit_train_done, emit_error}` import paths
 /// are unchanged. See that crate for the single source of truth (progress lines + `PROTOCOL_VERSION`).
-pub use qe_run_protocol::{emit_done, emit_error, emit_progress, emit_train_done, ProgressLine};
+pub use qe_run_protocol::{
+    emit_done, emit_error, emit_evolve_done, emit_progress, emit_train_done, ProgressLine,
+};
 
 /// A backtest/ingest job failure. Distinct from [`crate::CliError`] (arg parsing / config): these are
 /// runtime failures surfaced as the terminal `{"t":"error"}` line and a non-zero exit code.
@@ -129,6 +132,14 @@ pub enum RunError {
     /// A lineage-hashing failure while deriving the sealed vintage id.
     #[error(transparent)]
     Lineage(#[from] qe_determinism::LineageError),
+
+    /// The freeze of the illuminated survivors into a `K ≤ 16` pool failed (QE-452 evolve job).
+    #[error("formula-pool freeze failed: {0}")]
+    Freeze(String),
+
+    /// Sealing / writing the formula-pool artefact failed (QE-452 evolve job).
+    #[error("formula-pool seal failed: {0}")]
+    Pool(String),
 
     /// A filesystem failure.
     #[error("io error at {path}: {source}")]

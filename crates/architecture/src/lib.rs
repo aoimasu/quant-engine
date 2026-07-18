@@ -267,6 +267,20 @@ pub fn firewall_rules() -> Vec<FirewallRule> {
             upstream: "qe-runtime-core",
             forbidden: &["qe-edge", "qe-hedger", "qe-venue", "qe-risk", "qe-signal"],
         },
+        // QE-452 Phase A: the frozen formula-pool artefact crate must stay clear of the **live** side —
+        // runtime never loads a pool (§13.2/§13.3), so the pool artefact must not reach `qe-runtime`/
+        // `qe-venue` (nor the split live crates). It is a pure serde leaf today (no `qe-*` dep), so the
+        // rule holds; this guards a future dep that would breach the pool ⟂ live separation.
+        FirewallRule {
+            upstream: "qe-formula-pool",
+            forbidden: &[
+                "qe-runtime",
+                "qe-venue",
+                "qe-runtime-core",
+                "qe-hedger",
+                "qe-edge",
+            ],
+        },
     ]
 }
 

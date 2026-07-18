@@ -108,6 +108,20 @@ fn create_train_body() -> Value {
     })
 }
 
+/// A create-run request body for a minimal valid **evolve** campaign (QE-452). `seed` is required.
+fn create_evolve_body() -> Value {
+    json!({
+        "type": "evolve",
+        "params": {
+            "start": "2021-01-01",
+            "end": "2021-02-01",
+            "resolution": "1h",
+            "seed": 7,
+            "mode": "sandbox"
+        }
+    })
+}
+
 async fn read_json(resp: axum::response::Response) -> (StatusCode, Value) {
     let status = resp.status();
     let bytes = to_bytes(resp.into_body(), usize::MAX).await.expect("body");
@@ -243,6 +257,75 @@ exit 0
     assert_eq!(arr[0]["id"], json!(id));
     assert_eq!(arr[0]["status"], json!("succeeded"));
     assert_eq!(list["next_cursor"], Value::Null, "single page: {list}");
+}
+
+/// QE-452 §13.3: an `evolve` run's terminal `done` folds a **pool** id into `meta.train.pool` and
+/// **never** a `vintage` — the two lifecycles stay separated at the manager. Drive a fake evolve job that
+/// emits `{"t":"done",...,"pool":"..."}` (the `emit_evolve_done` wire) and assert the run reaches
+/// `succeeded` with `pool` set, `vintage` absent, and the vintage repo directory never created.
+#[tokio::test]
+async fn evolve_run_records_pool_never_vintage() {
+    let tmp = TempDir::new().unwrap();
+    let script = tmp.path().join("job_evolve.sh");
+    write_script(
+        &script,
+        r#"#!/bin/sh
+run_dir=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --run-dir) run_dir="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+printf '{"t":"progress","pct":30,"stage":"search","msg":"illuminating"}\n'
+printf '{"ok":true}' > "$run_dir/result.json"
+printf '{"t":"done","result":"result.json","protocol_version":2,"pool":"pool-xyz"}\n'
+exit 0
+"#,
+    );
+    let app = app_with_script(tmp.path(), &script, 2);
+
+    let (status, body) = post_run(&app, &create_evolve_body()).await;
+    assert_eq!(status, StatusCode::CREATED, "create returned {body}");
+    let id = body["id"].as_str().expect("id in response").to_owned();
+
+    let meta = poll_status(&app, &id, "succeeded", TIMEOUT).await;
+    assert_eq!(meta["type"], json!("evolve"));
+    // The terminal `done` folded the pool id, and NO vintage.
+    assert_eq!(meta["train"]["pool"], json!("pool-xyz"), "meta: {meta}");
+    assert!(
+        meta["train"].get("vintage").is_none() || meta["train"]["vintage"].is_null(),
+        "an evolve run must never record a vintage: {meta}"
+    );
+    // The server never created a vintage repository directory for an evolve run.
+    assert!(
+        !tmp.path().join("artifacts/vintages").exists(),
+        "an evolve run must not write the vintage repo"
+    );
+}
+
+/// A crafted `type:"evolve"` request that violates a cap (`k > 16`) or omits `seed` is rejected with a
+/// clear `400` at create time — `validate_evolve` / the required `seed` guard the launch path.
+#[tokio::test]
+async fn evolve_create_rejects_bad_caps_and_missing_seed() {
+    let tmp = TempDir::new().unwrap();
+    let script = tmp.path().join("noop.sh");
+    write_script(&script, "#!/bin/sh\nexit 0\n");
+    let app = app_with_script(tmp.path(), &script, 2);
+
+    // K over the cap ⇒ 400.
+    let mut bad = create_evolve_body();
+    bad["params"]["k"] = json!(17);
+    let (status, _) = post_run(&app, &bad).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "k > 16 must 400");
+
+    // Missing seed ⇒ 400 (seed is required).
+    let no_seed = json!({
+        "type": "evolve",
+        "params": { "start": "2021-01-01", "end": "2021-02-01", "resolution": "1h" }
+    });
+    let (status, _) = post_run(&app, &no_seed).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "missing seed must 400");
 }
 
 /// Failure path: a non-zero exit ⇒ `failed`, with the captured stderr tail as the error; the result

@@ -8,9 +8,12 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use qe_cli::jobs::backtest::{run_backtest, BacktestParams};
-use qe_cli::jobs::{emit_done, emit_error, emit_progress, emit_train_done, ProgressLine};
-use qe_cli::{parse_args, run_train, Command, TrainOptions};
+use qe_cli::jobs::{
+    emit_done, emit_error, emit_evolve_done, emit_progress, emit_train_done, ProgressLine,
+};
+use qe_cli::{parse_args, run_evolve, run_train, Command, EvolveOptions, TrainOptions};
 use qe_config::{Config, Profile};
+use qe_run_protocol::EvolveMode;
 use qe_telemetry::{init as init_telemetry, OutputStream, TelemetryConfig, TelemetryGuard};
 
 /// Code provenance folded into the vintage id (QE-420). Resolution precedence:
@@ -103,6 +106,37 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 population,
                 holdout,
                 embargo,
+            },
+        }),
+        Command::Evolve {
+            config,
+            profile,
+            run_dir,
+            json,
+            mode,
+            start,
+            end,
+            resolution,
+            seed,
+            generations,
+            offspring,
+            states,
+            k,
+        } => run_evolve_command(EvolveCli {
+            config,
+            profile,
+            run_dir,
+            json,
+            opts: EvolveOptions {
+                mode,
+                start,
+                end,
+                resolution,
+                seed,
+                generations,
+                offspring,
+                states,
+                k,
             },
         }),
         Command::Backtest {
@@ -289,6 +323,73 @@ fn run_train_command(cmd: TrainCli) -> Result<ExitCode, Box<dyn std::error::Erro
     }
 }
 
+/// The parsed `evolve` command, one-to-one with [`Command::Evolve`].
+struct EvolveCli {
+    config: PathBuf,
+    profile: Profile,
+    run_dir: PathBuf,
+    json: bool,
+    opts: EvolveOptions,
+}
+
+/// Dispatch `Command::Evolve` (QE-452): load config, run the illuminate → deflation → freeze → **seal a
+/// formula pool** pipeline, stream JSON-line progress to stdout, write `result.json` into `--run-dir`, and
+/// set the exit code. The terminal `{"t":"done",...}` names the sealed **pool** id — **never** a vintage.
+fn run_evolve_command(cmd: EvolveCli) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    let mode_label: &str = match cmd.opts.mode {
+        EvolveMode::Sandbox => "sandbox",
+        EvolveMode::Production => "production",
+    };
+    let _span =
+        tracing::info_span!("cli.evolve", profile = ?cmd.profile, mode = mode_label).entered();
+    tracing::info!(run_dir = %cmd.run_dir.display(), "evolve command started");
+
+    let cfg = Config::load(cmd.profile, &cmd.config)?;
+
+    let json = cmd.json;
+    let mut emit = |line: ProgressLine| {
+        if json {
+            if let Ok(s) = serde_json::to_string(&line) {
+                println!("{s}");
+            }
+        } else {
+            eprintln!("{}", describe(&line));
+        }
+    };
+
+    match run_evolve(&cfg, &cmd.opts, &code_commit(), &mut emit) {
+        Ok(outcome) => {
+            std::fs::create_dir_all(&cmd.run_dir)?;
+            let out_path = cmd.run_dir.join("result.json");
+            let bytes = serde_json::to_vec_pretty(&outcome.result)?;
+            std::fs::write(&out_path, &bytes)?;
+            if json {
+                let mut out = io::stdout().lock();
+                emit_evolve_done(&mut out, "result.json", &outcome.pool_id)?;
+                out.flush()?;
+            } else {
+                println!(
+                    "sealed formula pool {} → {}",
+                    outcome.pool_id,
+                    outcome.pool_path.display()
+                );
+                println!("wrote {}", out_path.display());
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        Err(e) => {
+            if json {
+                let mut out = io::stdout().lock();
+                let _ = emit_error(&mut out, &e.to_string());
+                let _ = out.flush();
+            } else {
+                eprintln!("error: {e}");
+            }
+            Ok(ExitCode::FAILURE)
+        }
+    }
+}
+
 /// Format an `Option<f64>` protocol field for the terse human line: `6`-dp when finite, `n/a` when the
 /// value was non-finite on the wire (`null` → `None`).
 fn fmt_opt_f64(v: Option<f64>) -> String {
@@ -336,10 +437,14 @@ fn describe(line: &ProgressLine) -> String {
             }
         ),
         ProgressLine::Done {
-            result, vintage, ..
-        } => match vintage {
-            Some(v) => format!("done: {result} (vintage {v})"),
-            None => format!("done: {result}"),
+            result,
+            vintage,
+            pool,
+            ..
+        } => match (vintage, pool) {
+            (Some(v), _) => format!("done: {result} (vintage {v})"),
+            (None, Some(p)) => format!("done: {result} (pool {p})"),
+            (None, None) => format!("done: {result}"),
         },
         ProgressLine::Error { msg } => format!("error: {msg}"),
     }

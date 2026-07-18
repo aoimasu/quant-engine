@@ -1,0 +1,32 @@
+[package]
+name = "qe-formula-pool"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# QE-452 Phase A: the frozen **formula-pool** artefact format — the offline GP `evolve` job's output
+# (§13.2/§13.3). A **pure serde leaf** (no `qe-*` dep), deliberately distinct from `qe-vintage`: a pool has
+# a different content shape (the `K` canonical S-expression strings + a deflation-summary block + review
+# lineage) and a different, human-paced, revocable governance lifecycle, and **runtime never loads a pool**.
+# Reusing `qe-vintage` would couple the two lifecycles; being a pure leaf makes the firewall guarantee
+# (no `qe-runtime`/`qe-venue` edge) structural. It reuses `Vintage`'s seal/verify/load SHA-256 discipline.
+[dependencies]
+# Canonical JSON content + the pool artefact serialisation.
+serde.workspace = true
+serde_json.workspace = true
+# SHA-256 content hash over the canonical JSON (same discipline as the vintage).
+sha2.workspace = true
+# Typed errors.
+thiserror.workspace = true
+# Exact decimal for every **hashed** numeric field (the deflation-summary stats) — never `f64` money/stat
+# in a hashed struct (QE-109), so seal → load is byte-stable without the vintage's `hash_stable` rounding.
+rust_decimal.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

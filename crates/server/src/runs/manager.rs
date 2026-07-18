@@ -12,14 +12,17 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use qe_run_protocol::{ProgressLine, PROTOCOL_VERSION};
+use qe_run_protocol::{
+    ProgressLine, EVOLVE_MAX_DEPTH, EVOLVE_MAX_LOOKBACK, EVOLVE_MAX_NODES, EVOLVE_MAX_POOL,
+    EVOLVE_WINDOW_LATTICE, PROTOCOL_VERSION,
+};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{Mutex, Semaphore};
 use tokio::task::JoinHandle;
 
 use super::model::{
-    BacktestParams, CreateRunRequest, EnsembleSnapshot, GateSnapshot, GenSnapshot, IndexEntry,
-    Progress, RunMeta, RunSpec, RunStatus, TrainParams, TrainProgress,
+    BacktestParams, CreateRunRequest, EnsembleSnapshot, EvolveParams, GateSnapshot, GenSnapshot,
+    IndexEntry, Progress, RunMeta, RunSpec, RunStatus, TrainParams, TrainProgress,
 };
 use super::spawn::JobSpawner;
 use super::store::RunStore;
@@ -262,8 +265,17 @@ fn build_spec(req: &CreateRunRequest) -> Result<RunSpec, CreateError> {
             validate_train(&p)?;
             Ok(RunSpec::Train(p))
         }
+        "evolve" => {
+            // `seed` is REQUIRED (no serde default), so a body missing it fails here with a clear
+            // message — an evolve approval must stay byte-reproducible off the recorded seed. A bad
+            // `mode` string likewise fails serde here (uniform `400`, never a `422`).
+            let p: EvolveParams = serde_json::from_value(params)
+                .map_err(|e| CreateError::Validation(format!("invalid evolve params: {e}")))?;
+            validate_evolve(&p)?;
+            Ok(RunSpec::Evolve(p))
+        }
         other => Err(CreateError::Validation(format!(
-            "unsupported run type `{other}` (expected `backtest` or `train`)"
+            "unsupported run type `{other}` (expected `backtest`, `train`, or `evolve`)"
         ))),
     }
 }
@@ -296,6 +308,44 @@ fn validate_train(p: &TrainParams) -> Result<(), CreateError> {
     require("start", &p.start)?;
     require("end", &p.end)?;
     require("resolution", &p.resolution)?;
+    Ok(())
+}
+
+/// Validate evolve params (QE-452 §13.2/§13.4): the window is required (needed to scan bars), and every
+/// declared cap must lie within the compiled guardrails — `depth ≤ 4`, `nodes ≤ 16`, `lookback ≤ 200`,
+/// windows on the `{5,10,20,50,100}` lattice, and the frozen-pool size `K ≤ 16`. `seed`-present and a
+/// valid `mode` are already enforced by serde in `build_spec` (a missing seed / unknown mode is a
+/// `400`). An out-of-cap request is rejected with a clear message so a crafted client cannot launch a
+/// leakage-inviting campaign.
+fn validate_evolve(p: &EvolveParams) -> Result<(), CreateError> {
+    require("start", &p.start)?;
+    require("end", &p.end)?;
+    require("resolution", &p.resolution)?;
+    cap("depth", p.depth, EVOLVE_MAX_DEPTH)?;
+    cap("nodes", p.nodes, EVOLVE_MAX_NODES)?;
+    cap("lookback", p.lookback, EVOLVE_MAX_LOOKBACK)?;
+    cap("k", p.k, EVOLVE_MAX_POOL)?;
+    if let Some(windows) = &p.windows {
+        for &w in windows {
+            if !EVOLVE_WINDOW_LATTICE.contains(&w) {
+                return Err(CreateError::Validation(format!(
+                    "`windows` entry `{w}` is off the lattice (allowed: {EVOLVE_WINDOW_LATTICE:?})"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Reject an optional numeric cap that exceeds `max` (an omitted cap defers to the engine default).
+fn cap(name: &str, value: Option<usize>, max: usize) -> Result<(), CreateError> {
+    if let Some(v) = value {
+        if v > max {
+            return Err(CreateError::Validation(format!(
+                "`{name}` must be ≤ {max} (got {v})"
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -345,7 +395,7 @@ async fn supervise(
 
     // Drain stdout (progress → meta + stdout.log) and stderr (tail) concurrently to avoid a pipe
     // deadlock if the child writes a lot to both.
-    let stdout_fut = drain_stdout(stdout, &store, &mut meta);
+    let stdout_fut = drain_stdout(stdout, &store, &mut meta, &spec);
     let stderr_fut = drain_stderr_tail(stderr);
     let (done_seen, err_tail) = tokio::join!(stdout_fut, stderr_fut);
 
@@ -357,14 +407,24 @@ async fn supervise(
         meta.status = RunStatus::Succeeded;
         meta.error = None;
         meta.artifacts = vec!["result.json".to_owned()];
-        // A succeeded train run should read 100% — its last coarse stage was the gate line (85%). The
-        // backtest job reports its own terminal `report` pct, so leave backtest progress unchanged.
-        if matches!(spec, RunSpec::Train(_)) {
-            meta.progress = Progress {
-                pct: 100,
-                stage: "done".to_owned(),
-                msg: "training complete".to_owned(),
-            };
+        // A succeeded train/evolve run should read 100% — its last coarse stage was the gate/seal line.
+        // The backtest job reports its own terminal `report` pct, so leave backtest progress unchanged.
+        match spec {
+            RunSpec::Train(_) => {
+                meta.progress = Progress {
+                    pct: 100,
+                    stage: "done".to_owned(),
+                    msg: "training complete".to_owned(),
+                };
+            }
+            RunSpec::Evolve(_) => {
+                meta.progress = Progress {
+                    pct: 100,
+                    stage: "done".to_owned(),
+                    msg: "evolution complete".to_owned(),
+                };
+            }
+            RunSpec::Backtest(_) => {}
         }
         let _ = store.write_meta(&meta);
     } else if done_seen && exit == Some(0) {
@@ -392,6 +452,7 @@ async fn drain_stdout(
     stdout: Option<tokio::process::ChildStdout>,
     store: &RunStore,
     meta: &mut RunMeta,
+    spec: &RunSpec,
 ) -> bool {
     let Some(stdout) = stdout else { return false };
     let log_path = store.stdout_path(&meta.id);
@@ -487,6 +548,7 @@ async fn drain_stdout(
             Ok(ProgressLine::Done {
                 protocol_version,
                 vintage,
+                pool,
                 ..
             }) => {
                 done_seen = true;
@@ -503,7 +565,26 @@ async fn drain_stdout(
                          continuing (progress may be interpreted on a best-effort basis)"
                     );
                 }
-                if let Some(vintage) = vintage {
+                if matches!(spec, RunSpec::Evolve(_)) {
+                    // QE-452 §13.3 load-bearing invariant: an evolve run produces a **pool**, NEVER a
+                    // vintage. Assert the two lifecycles stay separated at the terminal line — a stray
+                    // vintage from an evolve subprocess is a protocol breach; refuse to record it.
+                    debug_assert!(
+                        vintage.is_none(),
+                        "evolve run's terminal `done` carried a vintage — lifecycle-separation breach"
+                    );
+                    if vintage.is_some() {
+                        tracing::warn!(
+                            run_id = %meta.id,
+                            "evolve run's terminal `done` carried a vintage; ignoring — an evolve run \
+                             never writes a vintage (QE-452 §13.3)"
+                        );
+                    }
+                    if let Some(pool) = pool {
+                        train_mut(meta).pool = Some(pool);
+                        let _ = store.write_meta(meta);
+                    }
+                } else if let Some(vintage) = vintage {
                     train_mut(meta).vintage = Some(vintage);
                     let _ = store.write_meta(meta);
                 }
@@ -540,4 +621,117 @@ fn finish_failed(store: &RunStore, meta: &mut RunMeta, exit: Option<i32>, error:
     }
     meta.error = Some(error);
     let _ = store.write_meta(meta);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// A create-run request for an `evolve` campaign with the given `params` object.
+    fn evolve_req(params: serde_json::Value) -> CreateRunRequest {
+        CreateRunRequest {
+            run_type: "evolve".to_owned(),
+            params,
+        }
+    }
+
+    /// A valid baseline evolve params object (seed + window present, no cap violations).
+    fn valid_evolve_params() -> serde_json::Value {
+        json!({ "seed": 7, "start": "2021-01-01", "end": "2021-01-10", "resolution": "1h" })
+    }
+
+    #[test]
+    fn build_spec_accepts_a_valid_evolve_request() {
+        let spec = build_spec(&evolve_req(valid_evolve_params())).expect("valid evolve spec");
+        match spec {
+            RunSpec::Evolve(p) => {
+                assert_eq!(p.seed, 7);
+                assert_eq!(p.mode, qe_run_protocol::EvolveMode::Sandbox);
+            }
+            other => panic!("expected Evolve, got {other:?}"),
+        }
+    }
+
+    /// Drive `build_spec` with a params object built from the valid baseline plus an override, asserting
+    /// it is rejected as a `Validation` error whose message names `needle`.
+    fn assert_rejected(
+        mut params: serde_json::Value,
+        key: &str,
+        value: serde_json::Value,
+        needle: &str,
+    ) {
+        params[key] = value;
+        let err = build_spec(&evolve_req(params)).expect_err("must reject");
+        match err {
+            CreateError::Validation(msg) => assert!(
+                msg.contains(needle),
+                "expected rejection mentioning `{needle}`, got: {msg}"
+            ),
+            other => panic!("expected Validation error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_evolve_rejects_depth_over_cap() {
+        assert_rejected(valid_evolve_params(), "depth", json!(5), "depth");
+    }
+
+    #[test]
+    fn validate_evolve_rejects_nodes_over_cap() {
+        assert_rejected(valid_evolve_params(), "nodes", json!(17), "nodes");
+    }
+
+    #[test]
+    fn validate_evolve_rejects_lookback_over_cap() {
+        assert_rejected(valid_evolve_params(), "lookback", json!(201), "lookback");
+    }
+
+    #[test]
+    fn validate_evolve_rejects_k_over_cap() {
+        assert_rejected(valid_evolve_params(), "k", json!(17), "k");
+    }
+
+    #[test]
+    fn validate_evolve_rejects_off_lattice_window() {
+        assert_rejected(valid_evolve_params(), "windows", json!([5, 7]), "lattice");
+    }
+
+    #[test]
+    fn validate_evolve_rejects_missing_seed() {
+        // Drop the seed entirely — a serde reject wrapped as a clear `400`.
+        let err = build_spec(&evolve_req(
+            json!({ "start": "2021-01-01", "end": "2021-01-10", "resolution": "1h" }),
+        ))
+        .expect_err("missing seed must reject");
+        match err {
+            CreateError::Validation(msg) => assert!(msg.contains("seed"), "message: {msg}"),
+            other => panic!("expected Validation error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_evolve_rejects_bad_mode() {
+        assert_rejected(
+            valid_evolve_params(),
+            "mode",
+            json!("prod"),
+            "evolve params",
+        );
+    }
+
+    #[test]
+    fn validate_evolve_rejects_missing_window() {
+        let err =
+            build_spec(&evolve_req(json!({ "seed": 7 }))).expect_err("missing window rejects");
+        assert!(matches!(err, CreateError::Validation(_)));
+    }
+
+    #[test]
+    fn evolve_spec_never_writes_a_vintage() {
+        // The load-bearing lifecycle predicate: an evolve spec is not a vintage-writing run.
+        let spec = build_spec(&evolve_req(valid_evolve_params())).unwrap();
+        assert!(!spec.writes_vintage(), "evolve must never write a vintage");
+        assert_eq!(spec.run_type(), "evolve");
+    }
 }

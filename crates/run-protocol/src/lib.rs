@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 /// The run-protocol wire version. The CLI stamps it on the terminal [`ProgressLine::Done`] line and the
 /// server checks it (logging a warning on mismatch — see `qe_server::runs::manager`). Bump this on any
 /// backward-incompatible change to the wire shapes below.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// The `protocol_version` a terminal `done` line that predates QE-406 (or any line that omits the
 /// field) deserializes to — distinct from every real [`PROTOCOL_VERSION`] so the server can detect and
@@ -136,6 +136,12 @@ pub enum ProgressLine {
         /// so its `{"t":"done",…}` shape carries no `vintage` key.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         vintage: Option<String>,
+        /// The sealed **formula-pool** id, when a terminal produces one (QE-452 `evolve` job). Omitted
+        /// for the backtest/train jobs so their `done` shape is unchanged; **mutually exclusive** with
+        /// `vintage` (an evolve run never writes a vintage — §13.3). A v1 `done` line (which predates
+        /// QE-452) omits this and deserializes to `None`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pool: Option<String>,
     },
     /// Terminal failure.
     Error {
@@ -169,6 +175,7 @@ pub fn emit_done(w: &mut impl Write, result: &str) -> io::Result<()> {
             result: result.to_owned(),
             protocol_version: PROTOCOL_VERSION,
             vintage: None,
+            pool: None,
         },
     )
 }
@@ -185,6 +192,25 @@ pub fn emit_train_done(w: &mut impl Write, result: &str, vintage: &str) -> io::R
             result: result.to_owned(),
             protocol_version: PROTOCOL_VERSION,
             vintage: Some(vintage.to_owned()),
+            pool: None,
+        },
+    )
+}
+
+/// Write the terminal `done` line naming the sealed **formula `pool`** (the QE-452 `evolve` form),
+/// stamped with the current [`PROTOCOL_VERSION`]. Emits `pool: Some(..)` and **never** a `vintage` — an
+/// evolve run produces a pool artifact, never a vintage (§13.3).
+///
+/// # Errors
+/// Propagates any write / serialisation failure.
+pub fn emit_evolve_done(w: &mut impl Write, result: &str, pool: &str) -> io::Result<()> {
+    write_line(
+        w,
+        &ProgressLine::Done {
+            result: result.to_owned(),
+            protocol_version: PROTOCOL_VERSION,
+            vintage: None,
+            pool: Some(pool.to_owned()),
         },
     )
 }
@@ -310,6 +336,106 @@ pub struct TrainParams {
     pub profile: Option<String>,
 }
 
+// ---- QE-452 evolve run-spec (the GP indicator-evolution campaign) --------------------------------
+
+/// Maximum `Expr`-tree depth an evolve campaign may declare (design §3/§13.4 caps). The grammar
+/// (`ExprTree::repair`, QE-436) already enforces this on the engine side; a declared cap above it is a
+/// leakage-inviting request and is rejected at create time.
+pub const EVOLVE_MAX_DEPTH: usize = 4;
+/// Maximum `Expr`-tree node count an evolve campaign may declare (design §3/§13.4 caps).
+pub const EVOLVE_MAX_NODES: usize = 16;
+/// Maximum indicator lookback (bars) an evolve campaign may declare (design §3/§13.4 caps).
+pub const EVOLVE_MAX_LOOKBACK: usize = 200;
+/// Maximum frozen-pool size `K` an evolve campaign may seal (design §3/§9; mirrors
+/// `qe_wfo::gp::freeze::MAX_POOL_SIZE`).
+pub const EVOLVE_MAX_POOL: usize = 16;
+/// The fixed window-length lattice an evolve campaign's declared windows must lie on (design §13.4
+/// guardrail chips).
+pub const EVOLVE_WINDOW_LATTICE: [usize; 5] = [5, 10, 20, 50, 100];
+
+/// The campaign mode of an evolve run (design §13.6). `sandbox` = RESEARCH (cannot reach a production
+/// vintage — a physically separate artifacts root); `production` is only *launchable* once the compiled
+/// prerequisite gate is satisfied (QE-454, not Phase A). Default `Sandbox` (fail-safe). An unknown mode
+/// string is a serde reject → a clear `400`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvolveMode {
+    /// Research mode — the pool is written to a separate research root and can never reach production.
+    #[default]
+    Sandbox,
+    /// Production mode — only launchable when the prerequisite const gate is satisfied (QE-454).
+    Production,
+}
+
+impl EvolveMode {
+    /// The canonical wire string (`"sandbox"` / `"production"`).
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            EvolveMode::Sandbox => "sandbox",
+            EvolveMode::Production => "production",
+        }
+    }
+}
+
+/// Evolve-campaign parameters (QE-452) — the `params` object of a `type:"evolve"` create-run request,
+/// persisted verbatim in `meta.params` and mapped onto the `qe evolve` flags.
+///
+/// **`seed` is REQUIRED** (diverges from [`TrainParams`]' optional seed, design §13.10): a missing
+/// `seed` is a serde reject (an evolve approval must stay byte-reproducible off the recorded seed). Every
+/// **other** field is `#[serde(default)]` so the body otherwise parses leniently; the window
+/// (`start`/`end`/`resolution`) required-ness and the caps (`depth≤4`, `nodes≤16`, `lookback≤200`,
+/// `windows ∈ lattice`, `K≤16`) are enforced in one place (`qe_server::runs::manager::validate_evolve`)
+/// as a uniform `400`, never a serde `422`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct EvolveParams {
+    /// Master illumination seed (**required**; `--seed`). Every per-offspring RNG stream derives from it
+    /// (`task_rng`, QE-451), so a fixed seed + fixed snapshot reproduces the pool byte-identically.
+    pub seed: u64,
+    /// Campaign mode — `sandbox` (default) or `production`.
+    #[serde(default)]
+    pub mode: EvolveMode,
+    /// Inclusive window start `YYYY-MM-DD` (required; `--start`).
+    #[serde(default)]
+    pub start: String,
+    /// Exclusive window end `YYYY-MM-DD` (required; `--end`).
+    #[serde(default)]
+    pub end: String,
+    /// Bar resolution (required; `--resolution`).
+    #[serde(default)]
+    pub resolution: String,
+    /// Illumination generations (`--generations`); omitted ⇒ the CLI default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generations: Option<usize>,
+    /// Offspring evaluated per generation (`--offspring`); omitted ⇒ the CLI default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offspring: Option<usize>,
+    /// Quantiser state count for the trivial decision head (`--states`); omitted ⇒ the CLI default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub states: Option<u16>,
+    /// Declared max tree depth (`--depth`); capped at [`EVOLVE_MAX_DEPTH`]. Omitted ⇒ the engine cap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub depth: Option<usize>,
+    /// Declared max tree node count (`--nodes`); capped at [`EVOLVE_MAX_NODES`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nodes: Option<usize>,
+    /// Declared max indicator lookback in bars (`--lookback`); capped at [`EVOLVE_MAX_LOOKBACK`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lookback: Option<usize>,
+    /// Declared window-length lattice (`--windows`); each entry must be in [`EVOLVE_WINDOW_LATTICE`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub windows: Option<Vec<usize>>,
+    /// Frozen-pool size `K` (`--k`); capped at [`EVOLVE_MAX_POOL`]. Omitted ⇒ the CLI default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub k: Option<usize>,
+    /// Optional config-file path override (`--config`); omitted ⇒ the CLI default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config: Option<String>,
+    /// Optional operating profile override (`--profile`); omitted ⇒ the CLI default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -334,7 +460,7 @@ mod tests {
         let mut lines = s.lines();
         assert_eq!(
             lines.next().unwrap(),
-            r#"{"t":"done","result":"result.json","protocol_version":1}"#
+            r#"{"t":"done","result":"result.json","protocol_version":2}"#
         );
         assert_eq!(lines.next().unwrap(), r#"{"t":"error","msg":"boom"}"#);
     }
@@ -344,5 +470,45 @@ mod tests {
         let p = BacktestParams::default();
         assert_eq!(p.taker_fee_bps, 2.0);
         assert_eq!(p.slippage_model, "square-root-impact");
+    }
+
+    #[test]
+    fn protocol_version_is_two() {
+        assert_eq!(PROTOCOL_VERSION, 2, "QE-452 bumped the run protocol 1 → 2");
+    }
+
+    #[test]
+    fn evolve_done_carries_pool_and_never_vintage() {
+        let mut buf = Vec::new();
+        emit_evolve_done(&mut buf, "result.json", "pool-abc123").unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert_eq!(
+            s.trim_end(),
+            r#"{"t":"done","result":"result.json","protocol_version":2,"pool":"pool-abc123"}"#
+        );
+        // Round-trips back to a Done carrying the pool, no vintage.
+        match serde_json::from_str::<ProgressLine>(s.trim_end()).unwrap() {
+            ProgressLine::Done { pool, vintage, .. } => {
+                assert_eq!(pool.as_deref(), Some("pool-abc123"));
+                assert_eq!(vintage, None);
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn evolve_params_requires_seed_but_defaults_the_rest() {
+        // A missing seed is a serde reject (seed is REQUIRED).
+        let err = serde_json::from_str::<EvolveParams>(r#"{"start":"a"}"#).unwrap_err();
+        assert!(err.to_string().contains("seed"), "missing seed: {err}");
+        // With just a seed, every other field takes its default.
+        let p: EvolveParams = serde_json::from_str(r#"{"seed":7}"#).unwrap();
+        assert_eq!(p.seed, 7);
+        assert_eq!(p.mode, EvolveMode::Sandbox);
+        assert_eq!(p.k, None);
+        assert!(p.windows.is_none());
+        // Unknown mode string is a serde reject → a clear 400 upstream.
+        let bad = serde_json::from_str::<EvolveParams>(r#"{"seed":1,"mode":"prod"}"#);
+        assert!(bad.is_err(), "unknown mode must reject");
     }
 }
