@@ -30,6 +30,22 @@ use super::store::RunStore;
 /// How many trailing bytes of subprocess stderr to keep as the failure message.
 const STDERR_TAIL_BYTES: usize = 4096;
 
+/// Reason recorded when a run is cooperatively halted by an operator (QE-452 Phase B `POST
+/// /api/runs/{id}/halt`). Because `RunStatus` stays 4-state (design §13.12 AC5), a halt is a terminal
+/// [`RunStatus::Failed`] carrying this distinguishing reason rather than a new wire variant.
+const HALT_REASON: &str = "run halted by operator request";
+
+/// The outcome of [`RunManager::halt`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HaltOutcome {
+    /// The run was halted (or was already being torn down); its resulting terminal status.
+    Halted(RunStatus),
+    /// The run id is unknown.
+    NotFound,
+    /// The run had already reached a terminal state — nothing to halt; its terminal status.
+    AlreadyTerminal(RunStatus),
+}
+
 /// A create-run failure.
 #[derive(Debug, thiserror::Error)]
 pub enum CreateError {
@@ -226,6 +242,49 @@ impl RunManager {
                 let _ = handle.await;
                 self.terminally_mark_interrupted(&id, SHUTDOWN_DRAIN_REASON);
             }
+        }
+    }
+
+    /// QE-452 Phase B — cooperatively **halt** run `id` (`POST /api/runs/{id}/halt`). Reuses the QE-407
+    /// shutdown-drain machinery verbatim (no new kill path): pull the supervisor `JoinHandle` out of the
+    /// in-flight [`Self::registry`], `abort()` it (dropping its `Child` fires the existing
+    /// `kill_on_drop(true)`), `await` the cancellation to settle, then terminally mark the run.
+    ///
+    /// Because `RunStatus` stays 4-state (design §13.12 AC5 — no new wire variant), a halted run is
+    /// recorded as terminal [`RunStatus::Failed`] with the [`HALT_REASON`] error, which distinguishes an
+    /// operator halt from an ordinary failure. A run with no live supervisor is either unknown
+    /// ([`HaltOutcome::NotFound`]) or already terminal ([`HaltOutcome::AlreadyTerminal`], never re-halted).
+    pub async fn halt(&self, id: &str) -> HaltOutcome {
+        // Take the live supervisor handle (mirrors `shutdown`'s drain). Present ⇒ the run is in-flight.
+        let handle = { self.registry.lock().await.remove(id) };
+        if let Some(handle) = handle {
+            handle.abort();
+            // Await the cancellation to fully settle (Child dropped → killed) before writing the terminal
+            // record, so the aborted task can't interleave a later `meta.json` write.
+            let _ = handle.await;
+            return self.mark_halted(id);
+        }
+        // No live supervisor: the run is unknown, or already terminal (can't be halted).
+        match self.store.read_meta(id) {
+            Ok(Some(meta)) => HaltOutcome::AlreadyTerminal(meta.status),
+            Ok(None) => HaltOutcome::NotFound,
+            // A meta read error is surfaced as not-found for the halt path (best-effort operator action).
+            Err(_) => HaltOutcome::NotFound,
+        }
+    }
+
+    /// Terminally mark run `id` as halted (`Failed` + [`HALT_REASON`]) if it is still non-terminal, then
+    /// report the resulting status. A run that finished during the abort keeps its real terminal outcome.
+    fn mark_halted(&self, id: &str) -> HaltOutcome {
+        match self.store.read_meta(id) {
+            Ok(Some(mut meta)) => {
+                if matches!(meta.status, RunStatus::Queued | RunStatus::Running) {
+                    let exit = meta.exit;
+                    finish_failed(&self.store, &mut meta, exit, HALT_REASON.to_owned());
+                }
+                HaltOutcome::Halted(meta.status)
+            }
+            _ => HaltOutcome::NotFound,
         }
     }
 

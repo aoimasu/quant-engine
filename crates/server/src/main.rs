@@ -124,10 +124,22 @@ async fn main() -> ExitCode {
     }
     let auth = Arc::new(AuthContext::new(auth_config, verifier));
 
+    // QE-452 Phase B: the formula-pool artefact roots (sandbox = `<artifacts>/research/pools`, production
+    // = `<artifacts>/pools` — the §13.6 barrier-2 separate roots) + the durable governance lifecycle store
+    // (`<data_dir>/governance`), and the `require_role` seam's allowlists (fail-closed from env). QE-454
+    // replaces the seam with authoritative RBAC + audit.
+    let pools = Arc::new(qe_server::PoolState::from_dirs(
+        &server_dirs.artifacts_dir,
+        &cfg.data_dir,
+    ));
+    let roles = Arc::new(qe_server::RoleConfig::from_env());
+
     // Keep a handle to the manager for the post-serve drain (QE-407); `AppState` takes ownership of one
     // `Arc` clone.
     let shutdown_manager = Arc::clone(&manager);
-    let state = AppState::new(manager, auth, read);
+    let state = AppState::new(manager, auth, read)
+        .with_pools(pools)
+        .with_roles(roles);
     let router = build_router(&cfg.static_dir, state);
 
     let listener = match tokio::net::TcpListener::bind(cfg.addr).await {

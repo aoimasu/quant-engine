@@ -436,6 +436,67 @@ pub struct EvolveParams {
     pub profile: Option<String>,
 }
 
+/// One occupied MAP-Elites niche of an evolve run's archive — the heatmap cell the QE-453 CampaignMonitor's
+/// `ArchiveHeatmap` renders (design §13.4). The three descriptor axes are the pure-structural
+/// family/timescale/complexity bands (§4.5); `best_fitness` is the cell champion's fitness (`None` when
+/// non-finite, so a `-inf`/`NaN` never breaks JSON). Not a hashed artefact — plain `f64` is fine.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ArchiveCell {
+    /// Dominant-family band label (one of the five `IndicatorFamily` variants).
+    pub family: String,
+    /// Structural-lookback timescale band label.
+    pub timescale: String,
+    /// Node-count complexity band label (`trivial`/`simple`/`complex`).
+    pub complexity: String,
+    /// The cell champion's node count.
+    pub node_count: usize,
+    /// The cell champion's fitness (`None` when non-finite).
+    #[serde(default)]
+    pub best_fitness: Option<f64>,
+}
+
+/// The GP-aware trial-count basis the QE-453 `TrialCountBar` renders (design §13.4/§13.5): the
+/// distinct-canonical `N` against the analytic `cells·gens·windows` floor and the finite `E[maxSharpe]`
+/// deflation bar (`N == floor` is the "QE-439 blind floor" tell the SPA highlights). Diagnostic only — the
+/// authoritative deflation lives in the sealed pool's `DeflationSummary`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ArchiveTrialBasis {
+    /// Distinct-canonical formulas evaluated (incl. rejects) — the QE-439 basis.
+    pub distinct_evaluations: u64,
+    /// The trial basis `N` the DSR deflated against (`max(distinct, analytic floor)`).
+    pub n_trials: u64,
+    /// The analytic `cells·gens·windows` floor (so an `N == floor` blind-floor is visible).
+    pub analytic_floor: u64,
+    /// The finite best-of-`N` noise Sharpe bar (`None` when non-finite).
+    #[serde(default)]
+    pub expected_max_sharpe: Option<f64>,
+    /// Occupied niches in the archive.
+    pub occupied_cells: usize,
+    /// Total niches in the grid (`5×3×3 = 45`).
+    pub total_cells: usize,
+}
+
+/// The `archive.json` sidecar an evolve run writes into its run dir (QE-452 Phase B) — the MAP-Elites
+/// archive snapshot the QE-453 CampaignMonitor consumes, served by `GET /api/runs/{id}/archive`. A shared
+/// DTO in this leaf so the CLI producer, the server route, and the SPA read one shape. Deterministic for a
+/// fixed seed (cells in sorted-cell order); not a hashed artefact.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct EvolveArchive {
+    /// The sealed pool id this run produced (deep-link join key).
+    pub pool_id: String,
+    /// The campaign mode (`sandbox` / `production`).
+    pub mode: String,
+    /// Illumination generations run.
+    pub generations: usize,
+    /// Offspring per generation.
+    pub offspring: usize,
+    /// The occupied heatmap cells (sorted-cell order).
+    #[serde(default)]
+    pub cells: Vec<ArchiveCell>,
+    /// The trial-count deflation basis bars.
+    pub trial_basis: ArchiveTrialBasis,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

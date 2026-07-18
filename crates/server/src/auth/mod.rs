@@ -309,9 +309,10 @@ impl AuthContext {
 }
 
 /// The authenticated email, injected into request extensions by [`require_session`] for downstream
-/// handlers (e.g. [`me`]).
+/// handlers (e.g. [`me`]) and the QE-452 Phase B [`require_role`] seam. Public so governance handlers can
+/// read it as the transition **actor** and the role guard can resolve the caller's roles per-request.
 #[derive(Debug, Clone)]
-struct AuthedEmail(String);
+pub struct AuthedEmail(pub String);
 
 /// Public (unauthenticated) auth routes: the OAuth entry + redirect target.
 pub fn public_routes() -> Router<AppState> {
@@ -451,14 +452,120 @@ pub async fn require_session(
     }
 }
 
-/// Assemble the protected sub-router (`/me` + the QE-255 runs routes + the QE-257 read APIs) behind
-/// [`require_session`].
-pub fn protected_routes(auth: Arc<AuthContext>) -> Router<AppState> {
+/// Assemble the protected sub-router behind [`require_session`]: `/me`, the QE-255 runs routes, the
+/// QE-257 read APIs, the QE-452 Phase B pool **read** routes (session-gated), and the QE-452 Phase B
+/// **governance** routes (each additionally behind a [`require_role`] seam — `roles` supplies that seam's
+/// allowlists). Because the governance routes are merged **inside** this sub-router, `require_session`
+/// (the outermost `route_layer`) always runs first, so the [`AuthedEmail`] the role guard reads is
+/// guaranteed present.
+pub fn protected_routes(auth: Arc<AuthContext>, roles: Arc<RoleConfig>) -> Router<AppState> {
     Router::new()
         .route("/me", get(me))
         .merge(crate::runs::api::routes())
         .merge(crate::read::routes())
+        .merge(crate::pools::read_routes())
+        .merge(crate::pools::governance_routes(roles))
         .route_layer(axum::middleware::from_fn_with_state(auth, require_session))
+}
+
+/// Coarse governance roles (design §13.8). **Phase B placeholder** — a minimal, boot-resolved allowlist
+/// seam. The AUTHORITATIVE enforcement (per-request server-side resolution, separation of duties — an
+/// approver ≠ the launcher — dual sign-off, and the tamper-evident audit binding) is **QE-454**; this
+/// only proves the seam is on the governance-route path so QE-454 can harden it in place.
+#[derive(Debug, Clone, Default)]
+pub struct RoleConfig {
+    /// Emails allowed to launch/monitor/halt campaigns (`QE_ROLE_OPERATORS`).
+    pub operators: Vec<String>,
+    /// Emails allowed to approve/reject/revoke/seal pools (`QE_ROLE_APPROVERS`).
+    pub approvers: Vec<String>,
+}
+
+const ENV_ROLE_OPERATORS: &str = "QE_ROLE_OPERATORS";
+const ENV_ROLE_APPROVERS: &str = "QE_ROLE_APPROVERS";
+
+impl RoleConfig {
+    /// Resolve the role allowlists from the environment (both **fail-closed**: unset/blank ⇒ nobody).
+    pub fn from_env() -> Self {
+        Self {
+            operators: parse_allowlist(&std::env::var(ENV_ROLE_OPERATORS).unwrap_or_default()),
+            approvers: parse_allowlist(&std::env::var(ENV_ROLE_APPROVERS).unwrap_or_default()),
+        }
+    }
+
+    /// Whether `email` holds the operator role (case-insensitive, trimmed).
+    #[must_use]
+    pub fn is_operator(&self, email: &str) -> bool {
+        contains_email(&self.operators, email)
+    }
+
+    /// Whether `email` holds the approver role (case-insensitive, trimmed).
+    #[must_use]
+    pub fn is_approver(&self, email: &str) -> bool {
+        contains_email(&self.approvers, email)
+    }
+}
+
+/// Whether the normalized `email` is in the (already-normalized) `allowlist`.
+fn contains_email(allowlist: &[String], email: &str) -> bool {
+    let candidate = email.trim().to_lowercase();
+    !candidate.is_empty() && allowlist.iter().any(|a| a == &candidate)
+}
+
+/// `require_role(Operator)` seam (design §13.8): gate a route on the caller (the [`AuthedEmail`] set by
+/// [`require_session`]) holding the operator role, else `403`. **QE-454** replaces this with authoritative
+/// RBAC + audit; here it only proves the seam sits on the governance path.
+pub async fn require_operator(
+    State(roles): State<Arc<RoleConfig>>,
+    req: axum::extract::Request,
+    next: Next,
+) -> Response {
+    role_gate(&roles, Role::Operator, req, next).await
+}
+
+/// `require_role(Approver)` seam (design §13.8) — the approve/reject/revoke/seal governance routes. See
+/// [`require_operator`]; **QE-454** adds separation-of-duties + dual sign-off + audit.
+pub async fn require_approver(
+    State(roles): State<Arc<RoleConfig>>,
+    req: axum::extract::Request,
+    next: Next,
+) -> Response {
+    role_gate(&roles, Role::Approver, req, next).await
+}
+
+/// The two governance roles the Phase B seam distinguishes.
+#[derive(Debug, Clone, Copy)]
+enum Role {
+    Operator,
+    Approver,
+}
+
+/// Shared body of the [`require_operator`]/[`require_approver`] guards: read the request's
+/// [`AuthedEmail`], check the role, and either forward or `403`. Fail-closed — a missing `AuthedEmail`
+/// (should never happen inside `protected_routes`) or a role miss is refused.
+async fn role_gate(
+    roles: &RoleConfig,
+    role: Role,
+    req: axum::extract::Request,
+    next: Next,
+) -> Response {
+    let held = req
+        .extensions()
+        .get::<AuthedEmail>()
+        .map(|AuthedEmail(email)| match role {
+            Role::Operator => roles.is_operator(email),
+            Role::Approver => roles.is_approver(email),
+        })
+        .unwrap_or(false);
+    if held {
+        next.run(req).await
+    } else {
+        // QE-454 will replace this placeholder with authoritative RBAC + a tamper-evident audit entry.
+        reject(
+            StatusCode::FORBIDDEN,
+            "role required — this governance action is gated on a server-side role (authoritative \
+             RBAC + audit land in QE-454)",
+        )
+    }
 }
 
 /// Build the Google authorization-code consent URL.

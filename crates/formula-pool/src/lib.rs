@@ -26,6 +26,13 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+pub mod lifecycle;
+
+pub use lifecycle::{
+    LifecycleError, PoolGovernance, PoolGovernanceStore, PoolLifecycleState, PoolTransition,
+    TransitionRecord,
+};
+
 /// The pool artefact format version. Part of the hashed content, so a format change changes the hash.
 pub const POOL_FORMAT_VERSION: u16 = 1;
 
