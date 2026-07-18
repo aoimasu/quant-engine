@@ -962,3 +962,113 @@ exit 0
         "409 reports a failed run, not a green one: {rbody}"
     );
 }
+
+// ---- QE-454 Phase B — run supervision (§13.10): per-run deadline + evolve semaphore --------------
+
+/// Build an app + manager with a custom evolve-concurrency bound and per-run wall-clock deadline.
+fn app_and_manager_supervised(
+    data_dir: &Path,
+    script: &Path,
+    max_concurrency: usize,
+    evolve_concurrency: usize,
+    run_deadline: Duration,
+) -> (Router, Arc<RunManager>) {
+    let spawner = Arc::new(CliJobSpawner::new(script.to_path_buf()));
+    let manager = Arc::new(
+        RunManager::new(data_dir.join("runs"), spawner, max_concurrency)
+            .with_evolve_concurrency(evolve_concurrency)
+            .with_run_deadline(run_deadline),
+    );
+    let auth = common::auth_context(TEST_EMAIL, None);
+    let router = build_router(
+        &data_dir.join("static"),
+        common::app_state_under(Arc::clone(&manager), auth, data_dir),
+    );
+    (router, manager)
+}
+
+/// §13.10: a run that blows past the per-run wall-clock ceiling is aborted (child killed) and terminally
+/// **failed** with the ceiling reason — a runaway campaign can never hold a supervisor open forever.
+#[tokio::test]
+async fn a_run_past_the_wall_clock_ceiling_is_aborted_and_failed() {
+    let tmp = TempDir::new().unwrap();
+    // A job that emits a progress line then blocks FOREVER (never emits `done`).
+    let script = tmp.path().join("job_hang.sh");
+    write_script(
+        &script,
+        r#"#!/bin/sh
+printf '{"t":"progress","pct":10,"stage":"load","msg":"loading"}\n'
+while true; do sleep 0.05; done
+"#,
+    );
+    // A tiny deadline so the abort fires quickly (the real default is ~24h).
+    let (app, _m) =
+        app_and_manager_supervised(tmp.path(), &script, 2, 1, Duration::from_millis(300));
+
+    let (status, body) = post_run(&app, &create_evolve_body()).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let id = body["id"].as_str().unwrap().to_owned();
+
+    // The run is terminally failed once the ceiling elapses.
+    let meta = poll_status(&app, &id, "failed", TIMEOUT).await;
+    assert_eq!(meta["status"], "failed");
+    assert!(
+        meta["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("wall-clock ceiling"),
+        "the failure names the wall-clock ceiling: {meta}"
+    );
+}
+
+/// §13.10: the separate evolve semaphore (default 1) serialises evolve campaigns — a second campaign stays
+/// `queued` behind the first even though the shared worker pool has spare capacity.
+#[tokio::test]
+async fn the_evolve_semaphore_serialises_campaigns() {
+    let tmp = TempDir::new().unwrap();
+    let release = tmp.path().join("release");
+    // A blocking evolve job: emits progress, waits for the release sentinel, then succeeds.
+    let script = tmp.path().join("evolve_block.sh");
+    write_script(
+        &script,
+        &format!(
+            r#"#!/bin/sh
+run_dir=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --run-dir) run_dir="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+printf '{{"t":"progress","pct":10,"stage":"scan","msg":"scanning"}}\n'
+while [ ! -f "{release}" ]; do sleep 0.02; done
+printf '{{"ok":true}}' > "$run_dir/result.json"
+printf '{{"t":"done","result":"result.json","protocol_version":2,"pool":"pool-x"}}\n'
+exit 0
+"#,
+            release = release.display()
+        ),
+    );
+    // Shared pool has 4 slots, but the EVOLVE bound is 1 — so only one campaign runs at a time.
+    let (app, _m) = app_and_manager_supervised(tmp.path(), &script, 4, 1, Duration::from_secs(30));
+
+    let (_, b1) = post_run(&app, &create_evolve_body()).await;
+    let id1 = b1["id"].as_str().unwrap().to_owned();
+    let (_, b2) = post_run(&app, &create_evolve_body()).await;
+    let id2 = b2["id"].as_str().unwrap().to_owned();
+
+    // The first campaign runs; the second stays queued behind the evolve semaphore.
+    poll_status(&app, &id1, "running", TIMEOUT).await;
+    // Give the second a moment; it must NOT be running (blocked on the evolve permit, not the pool permit).
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let (_, meta2) = get(&app, &format!("/api/runs/{id2}")).await;
+    assert_eq!(
+        meta2["status"], "queued",
+        "the second evolve campaign is serialised behind the first: {meta2}"
+    );
+
+    // Release: both finish.
+    std::fs::write(&release, b"go").unwrap();
+    poll_status(&app, &id1, "succeeded", TIMEOUT).await;
+    poll_status(&app, &id2, "succeeded", TIMEOUT).await;
+}

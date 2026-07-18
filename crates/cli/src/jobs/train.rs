@@ -525,6 +525,11 @@ pub fn run_train_job(
         dsr: Some(robustness.dsr),
         spa_pvalue: Some(robustness.spa_pvalue),
         n_trials,
+        // QE-454 Phase B: the GP-only deflation fields stay absent on the normal train path, so this `gate`
+        // line + the run's `meta.json` are byte-identical to pre-Phase-B (golden-safety).
+        uncensored_pbo: None,
+        variance_trials: None,
+        distinct_evaluations: None,
     });
 
     // ---- seal ------------------------------------------------------------------------------------

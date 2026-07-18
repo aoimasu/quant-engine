@@ -23,9 +23,9 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{http::StatusCode, Extension, Json, Router};
 use qe_formula_pool::{
-    FormulaPool, FormulaPoolContent, FormulaPoolRepository, PoolError, PoolGovernance,
-    PoolGovernanceStore, PoolLifecycleState, PoolMode, PoolTransition, RevocationRecord,
-    Revocations, TransitionRecord,
+    FormulaPool, FormulaPoolContent, FormulaPoolRepository, GovernanceRecord, PoolError,
+    PoolGovernance, PoolGovernanceStore, PoolLifecycleState, PoolMode, PoolTransition,
+    RevocationRecord, Revocations, TransitionRecord,
 };
 use qe_run_protocol::EvolveArchive;
 use serde::Serialize;
@@ -33,6 +33,7 @@ use serde_json::json;
 
 use crate::audit::{AuditAction, AuditLog, SignoffState};
 use crate::auth::{require_approver, require_operator, AuthedEmail, RoleConfig};
+use crate::pool_seal::{seal_allowed, SealContext, SealDecision};
 use crate::runs::store::atomic_write;
 use crate::runs::RunManager;
 use crate::AppState;
@@ -86,6 +87,55 @@ impl PoolState {
     /// The governance record for `id` (a fresh `Draft` when none exists yet).
     fn governance(&self, id: &str) -> Result<PoolGovernance, PoolError> {
         self.governance.read(id)
+    }
+
+    /// **Structural barrier 3** (design §13.6) — load a pool from the **production** root **only**, asserting
+    /// [`FormulaPoolContent::assert_production_eligible`]. A sandbox-identity pool copied into the prod dir
+    /// verifies its content hash (it is a real pool) but is refused here — its sealed `mode == Sandbox`
+    /// cannot be flipped without breaking the hash. Returns `Ok(None)` when the pool is absent from the
+    /// production root (it may be a legitimate sandbox pool under the research root), and
+    /// [`PoolError::NotProductionEligible`] for a non-production pool sitting in the production dir.
+    fn load_production(&self, id: &str) -> Result<Option<FormulaPool>, PoolError> {
+        match self.production.load(id) {
+            Ok(pool) => {
+                pool.content.assert_production_eligible()?;
+                Ok(Some(pool))
+            }
+            Err(PoolError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Whether a pool is present under the **research** (sandbox) root.
+    fn research_has(&self, id: &str) -> bool {
+        self.research.load(id).is_ok()
+    }
+
+    /// The `governance/records/<pool_id>.json` path for a Phase-B [`GovernanceRecord`].
+    fn governance_record_path(&self, pool_id: &str) -> std::path::PathBuf {
+        self.governance
+            .root()
+            .join("records")
+            .join(format!("{pool_id}.json"))
+    }
+
+    /// Persist a [`GovernanceRecord`] atomically under `<governance>/records/` (design §13.9). Records the
+    /// governance↔lineage binding for a sealed pool; lives **outside** any hashed artefact.
+    ///
+    /// # Errors
+    /// [`PoolError`] on serialise/write failure.
+    fn write_governance_record(
+        &self,
+        pool_id: &str,
+        record: &GovernanceRecord,
+    ) -> Result<(), PoolError> {
+        let path = self.governance_record_path(pool_id);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let bytes =
+            serde_json::to_vec_pretty(record).map_err(|e| PoolError::Serialize(e.to_string()))?;
+        atomic_write(&path, &bytes).map_err(PoolError::Io)
     }
 
     /// The `governance/revocations.json` path (a sibling of the per-pool governance records).
@@ -320,10 +370,19 @@ fn read_archive(path: &std::path::Path) -> ArchiveOutcome {
 async fn approve(
     State(pools): State<Arc<PoolState>>,
     State(audit): State<Arc<AuditLog>>,
+    State(manager): State<Arc<RunManager>>,
     Extension(AuthedEmail(actor)): Extension<AuthedEmail>,
     Path(id): Path<String>,
 ) -> Response {
-    governance_action(pools, audit, id, PoolTransition::Approve, actor).await
+    governance_action(
+        pools,
+        audit,
+        Some(manager),
+        id,
+        PoolTransition::Approve,
+        actor,
+    )
+    .await
 }
 
 /// `POST /api/formula-pools/{id}/reject` — `Draft → Rejected` (approver role; single-approver but audited).
@@ -333,7 +392,7 @@ async fn reject(
     Extension(AuthedEmail(actor)): Extension<AuthedEmail>,
     Path(id): Path<String>,
 ) -> Response {
-    governance_action(pools, audit, id, PoolTransition::Reject, actor).await
+    governance_action(pools, audit, None, id, PoolTransition::Reject, actor).await
 }
 
 /// `POST /api/formula-pools/{id}/revoke` — `Approved`/`Sealed → Revoked` (approver role). Appends an
@@ -346,23 +405,274 @@ async fn revoke(
     Extension(AuthedEmail(actor)): Extension<AuthedEmail>,
     Path(id): Path<String>,
 ) -> Response {
-    governance_action(pools, audit, id, PoolTransition::Revoke, actor).await
+    governance_action(pools, audit, None, id, PoolTransition::Revoke, actor).await
 }
 
-/// `POST /api/formula-pools/{id}/seal` — `Approved → Sealed` (approver role).
+/// `POST /api/formula-pools/{id}/seal` — the **server-authoritative** production-seal (approver role,
+/// design §13.5/§13.7, QE-454 Phase B).
 ///
-/// **FAIL-CLOSED**: a `production`-mode pool is refused with a structured `409` **before any state change**
-/// (the server-authoritative `seal_allowed` predicate lands in QE-454 Phase B). A sandbox pool may seal,
-/// but a sandbox seal **cannot** reach a production vintage — sealing only marks the pool sealed; it
-/// **never** auto-mints a vintage (§13.2). Seal is not one of the §13.9 audit actions, so it appends no
-/// audit entry here.
+/// - A pool under the **production** root is sealed **only** if [`seal_allowed`] clears every §13.5
+///   hard-block **plus** mode/const/dual-sig/not-revoked. Any failure ⇒ `409` with a **named blocker list**
+///   **and** an appended **rejected-attempt** audit entry. Success ⇒ mark the cache `Sealed`, record a
+///   [`GovernanceRecord`], and append a seal-evidence audit entry — **no vintage is minted** (§13.2).
+/// - A pool sitting in the production dir whose sealed `mode != Production` is refused at load (barrier 3).
+/// - A **sandbox** pool (research root) keeps the QE-452 lifecycle-only seal (mark sealed; no predicate, no
+///   vintage) — a sandbox seal can never reach production.
 async fn seal(
     State(pools): State<Arc<PoolState>>,
     State(audit): State<Arc<AuditLog>>,
+    State(manager): State<Arc<RunManager>>,
     Extension(AuthedEmail(actor)): Extension<AuthedEmail>,
     Path(id): Path<String>,
 ) -> Response {
-    governance_action(pools, audit, id, PoolTransition::Seal, actor).await
+    // 1. Barrier 3: try the production root first, asserting production-eligibility off the async worker.
+    let prod = {
+        let pools = Arc::clone(&pools);
+        let task_id = id.clone();
+        tokio::task::spawn_blocking(move || pools.load_production(&task_id)).await
+    };
+    let prod_pool = match prod {
+        Ok(Ok(p)) => p,
+        Ok(Err(PoolError::NotProductionEligible { .. })) => {
+            return barrier3_not_production_eligible(&id)
+        }
+        Ok(Err(e)) => return internal(format!("failed to load production pool: {e}")),
+        Err(_) => return internal("production pool load task failed".to_owned()),
+    };
+
+    match prod_pool {
+        // A production-eligible pool → the server-authoritative predicate.
+        Some(pool) => production_seal(pools, audit, manager, id, actor, pool).await,
+        // Not in the production root: a legitimate sandbox pool keeps the lifecycle-only seal.
+        None => {
+            let has_sandbox = {
+                let pools = Arc::clone(&pools);
+                let task_id = id.clone();
+                tokio::task::spawn_blocking(move || pools.research_has(&task_id))
+                    .await
+                    .unwrap_or(false)
+            };
+            if has_sandbox {
+                governance_action(pools, audit, None, id, PoolTransition::Seal, actor).await
+            } else {
+                not_found_pool(&id)
+            }
+        }
+    }
+}
+
+/// The production-seal orchestration (design §13.7). Resolves the launcher server-side
+/// (`pool_id → run → launch entry`, carry-forward #1), reads the audit replay + revocation status, runs
+/// [`seal_allowed`] under the async worker, and branches: `409` + named blockers + a rejected-attempt audit
+/// entry on failure, or mark-sealed + `GovernanceRecord` + a seal-evidence audit entry on success. No
+/// request field feeds the predicate.
+async fn production_seal(
+    pools: Arc<PoolState>,
+    audit: Arc<AuditLog>,
+    manager: Arc<RunManager>,
+    id: String,
+    _actor: String,
+    pool: FormulaPool,
+) -> Response {
+    let ts = now_ms();
+    let entries = match audit.read_all() {
+        Ok(e) => e,
+        Err(e) => return internal(format!("failed to read audit log: {e}")),
+    };
+
+    // Carry-forward #1: resolve the launcher server-side — the pool-bound launch entry first, then the
+    // live run-bound entry via pool_id → run_id → launch entry. ALWAYS resolved server-side. An unresolved
+    // launcher is left `None` and becomes a `launcher_unresolved` BLOCK inside `seal_allowed` (never passed
+    // to `derive_signoff` as None, which would exclude nobody and defeat SoD).
+    let facts = PoolFacts {
+        pool_id: pool.content.pool_id.clone(),
+        pool_hash: pool.content.lineage.pool_hash.clone(),
+        mode: pool.content.mode,
+    };
+    let launcher = resolve_launcher(&entries, &facts, Some(&manager)).await;
+
+    // Revocation status (server-side read of revocations.json).
+    let revoked = {
+        let pools = Arc::clone(&pools);
+        let pool_hash = pool.content.lineage.pool_hash.clone();
+        tokio::task::spawn_blocking(move || {
+            pools
+                .read_revocations()
+                .map(|r| r.is_revoked(&pool_hash))
+                .unwrap_or(false)
+        })
+        .await
+        .unwrap_or(false)
+    };
+
+    // The predicate reads ONLY {hash-verified pool, audit replay, const} (+ the two server-derived facts).
+    let content = pool.content.clone();
+    let decision: SealDecision = {
+        let entries = entries.clone();
+        let launcher = launcher.clone();
+        match tokio::task::spawn_blocking(move || {
+            seal_allowed(
+                &content,
+                &entries,
+                SealContext {
+                    basis_version: qe_validation::DEFLATION_BASIS_VERSION,
+                    launcher: launcher.as_deref(),
+                    revoked,
+                },
+            )
+        })
+        .await
+        {
+            Ok(d) => d,
+            Err(_) => return internal("seal predicate task failed".to_owned()),
+        }
+    };
+
+    if !decision.allowed {
+        // Failure ⇒ 409 + a named blocker list + an appended rejected-attempt audit entry (design §13.7).
+        if let Err(e) = audit
+            .append(
+                &_actor,
+                AuditAction::Reject,
+                &pool.content.lineage.pool_hash,
+                "",
+                "",
+                &decision.evidence_hash,
+                ts,
+            )
+            .await
+        {
+            tracing::warn!(pool_id = %id, error = %e, "failed to append rejected-seal audit entry");
+        }
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": "production seal refused — one or more hard-blocks failed",
+                "pool_id": id,
+                "blockers": decision.blockers,
+                "evidence_hash": decision.evidence_hash,
+            })),
+        )
+            .into_response();
+    }
+
+    // Success ⇒ advance the cache Approved → Sealed (no vintage is minted).
+    let cache = {
+        let pools = Arc::clone(&pools);
+        let task_id = id.clone();
+        let actor_c = _actor.clone();
+        tokio::task::spawn_blocking(move || {
+            apply_cache_transition(&pools, &task_id, PoolTransition::Seal, &actor_c, ts)
+        })
+        .await
+    };
+    match cache {
+        Ok(Ok(_)) => {}
+        Ok(Err(CacheError::Illegal(msg))) => {
+            return (StatusCode::CONFLICT, Json(json!({ "error": msg }))).into_response()
+        }
+        Ok(Err(CacheError::Io(msg))) => return internal(msg),
+        Err(_) => return internal("governance cache task failed".to_owned()),
+    }
+
+    // Append a seal-evidence audit entry (Approve action bound to the pool_hash, carrying the evidence
+    // hash) so the governance↔lineage binding is captured in the tamper-evident chain.
+    let launch_entry_hash =
+        launcher_entry_hash(&entries, &pool.content.pool_id, launcher.as_deref());
+    let approval_hashes = approval_entry_hashes(&entries, &pool.content.lineage.pool_hash);
+    let seal_entry = audit
+        .append(
+            &_actor,
+            AuditAction::Approve,
+            &pool.content.lineage.pool_hash,
+            "",
+            "",
+            &decision.evidence_hash,
+            ts,
+        )
+        .await;
+    if let Err(e) = seal_entry {
+        return internal(format!("failed to append seal audit entry: {e}"));
+    }
+
+    // Record the GovernanceRecord (governance↔lineage binding to the reproducible sealed-pool hash). No
+    // vintage exists, so `vintage_content_hash` carries the pool's own content hash (§13.9: recompute the
+    // pool from Lineage, recompute its content hash, confirm two approvals against that exact hash).
+    let record = GovernanceRecord {
+        vintage_content_hash: pool.content_hash.clone(),
+        pool_formula_hashes: pool.content.formula_hashes(),
+        launch_entry_hash,
+        approval_entry_hashes: approval_hashes,
+        evidence_hash: decision.evidence_hash.clone(),
+    };
+    {
+        let pools = Arc::clone(&pools);
+        let pool_id = pool.content.pool_id.clone();
+        let write =
+            tokio::task::spawn_blocking(move || pools.write_governance_record(&pool_id, &record))
+                .await;
+        match write {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => return internal(format!("failed to persist governance record: {e}")),
+            Err(_) => return internal("governance record task failed".to_owned()),
+        }
+    }
+
+    (
+        StatusCode::OK,
+        Json(json!({
+            "pool_id": id,
+            "lifecycle": "sealed",
+            "evidence_hash": decision.evidence_hash,
+            "vintage_minted": false,
+        })),
+    )
+        .into_response()
+}
+
+/// The `entry_hash` of the launch entry for this pool (via `pool_id`, or the run bound to `launcher`), for
+/// the [`GovernanceRecord`] linkage. Empty when no launch entry is recorded.
+fn launcher_entry_hash(
+    entries: &[crate::audit::AuditEntry],
+    pool_id: &str,
+    _launcher: Option<&str>,
+) -> String {
+    entries
+        .iter()
+        .find(|e| e.action == AuditAction::Launch && e.subject_hash == pool_id)
+        .or_else(|| entries.iter().find(|e| e.action == AuditAction::Launch))
+        .map(|e| e.entry_hash.clone())
+        .unwrap_or_default()
+}
+
+/// The `entry_hash`es of the two most recent distinct-approver `approve` entries bound to `pool_hash`.
+fn approval_entry_hashes(entries: &[crate::audit::AuditEntry], pool_hash: &str) -> Vec<String> {
+    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut hashes = Vec::new();
+    for e in entries {
+        if e.action == AuditAction::Approve && e.subject_hash == pool_hash {
+            let actor = e.actor_email.to_lowercase();
+            if seen.insert(actor) {
+                hashes.push(e.entry_hash.clone());
+            }
+        }
+    }
+    hashes
+}
+
+/// The structured `409` for barrier 3 (design §13.6): a pool sitting in the production dir whose sealed
+/// `mode` is not `Production` is structurally unloadable in production.
+fn barrier3_not_production_eligible(id: &str) -> Response {
+    (
+        StatusCode::CONFLICT,
+        Json(json!({
+            "error": "pool in the production directory is not production-eligible — its sealed mode is \
+                      not `production` (structural barrier 3; a sandbox pool cannot masquerade as \
+                      production without breaking its content hash)",
+            "pool_id": id,
+        })),
+    )
+        .into_response()
 }
 
 /// The verified facts a governance action needs from the loaded pool.
@@ -379,6 +689,7 @@ struct PoolFacts {
 async fn governance_action(
     pools: Arc<PoolState>,
     audit: Arc<AuditLog>,
+    manager: Option<Arc<RunManager>>,
     id: String,
     transition: PoolTransition,
     actor: String,
@@ -402,9 +713,11 @@ async fn governance_action(
         }
     };
 
-    // 2. FAIL-CLOSED: refuse to seal a production pool — before any state mutation (design §5, §13.6).
+    // A production seal never reaches `governance_action` — the `seal` handler routes production pools to
+    // the server-authoritative `production_seal` predicate; only sandbox pools take the lifecycle-only
+    // path here. Defense-in-depth: refuse a production pool that somehow arrives on this path.
     if transition == PoolTransition::Seal && facts.mode == PoolMode::Production {
-        return production_seal_gated(&id);
+        return internal("production seal must go through the seal_allowed predicate".to_owned());
     }
 
     let ts = now_ms();
@@ -414,7 +727,10 @@ async fn governance_action(
     };
 
     // 3. Separation of duties (approve only): the approver must not be the pool's launcher (design §13.8).
-    let launcher = AuditLog::launcher_for_pool(&entries, &facts.pool_id);
+    //    QE-454 Phase B carry-forward #1 — resolve the launcher BOTH by `pool_id` (the pool-bound launch
+    //    entry, if any) AND by the `pool_id → run → launch entry` binding (the live evolve-launch entry is
+    //    run-bound with `subject_hash = ""`), so the SoD `403` fires on the LIVE path, not only in tests.
+    let launcher = resolve_launcher(&entries, &facts, manager.as_ref()).await;
     if transition == PoolTransition::Approve {
         if let Some(l) = &launcher {
             if l.eq_ignore_ascii_case(&actor) {
@@ -507,6 +823,31 @@ async fn governance_action(
     (StatusCode::OK, Json(body)).into_response()
 }
 
+/// Resolve the launcher of a pool for the separation-of-duties check (design carry-forward #1). Tries the
+/// **pool-bound** launch entry first (`subject_hash == pool_id`), then the **run-bound** live evolve-launch
+/// entry via `pool_id → run_id → launch entry` (the live entry is written run-bound with an empty
+/// `subject_hash`). Returns the first match, or `None` when no launch entry can be tied to this pool.
+async fn resolve_launcher(
+    entries: &[crate::audit::AuditEntry],
+    facts: &PoolFacts,
+    manager: Option<&Arc<RunManager>>,
+) -> Option<String> {
+    if let Some(l) = AuditLog::launcher_for_pool(entries, &facts.pool_id) {
+        return Some(l);
+    }
+    let manager = manager?;
+    let store = manager.store().clone();
+    let pool_id = facts.pool_id.clone();
+    let entries = entries.to_vec();
+    tokio::task::spawn_blocking(move || {
+        let run_id = store.find_run_id_by_pool(&pool_id).ok().flatten()?;
+        AuditLog::launcher_for_run(&entries, &run_id)
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
 /// A governance-cache transition failure.
 enum CacheError {
     /// An illegal lifecycle edge (carries the guarded-transition message).
@@ -552,20 +893,6 @@ fn latest_approval_hash(entries: &[crate::audit::AuditEntry], pool_hash: &str) -
         .rev()
         .find(|e| e.action == AuditAction::Approve && e.subject_hash == pool_hash)
         .map(|e| e.entry_hash.clone())
-}
-
-/// The structured `409` for a fail-closed production seal (unchanged from Phase B — Phase A must not open it).
-fn production_seal_gated(id: &str) -> Response {
-    (
-        StatusCode::CONFLICT,
-        Json(json!({
-            "error": "governance not yet enabled — sealing to production is gated on QE-454 Phase B \
-                      (seal_allowed / DEFLATION_BASIS_VERSION)",
-            "pool_id": id,
-            "mode": "production",
-        })),
-    )
-        .into_response()
 }
 
 /// The `403` for a separation-of-duties violation (the approver is the pool's launcher, design §13.8).

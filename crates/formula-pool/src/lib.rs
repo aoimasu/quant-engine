@@ -96,6 +96,62 @@ pub struct DeflationSummary {
     pub uncensored_pbo: Option<Decimal>,
 }
 
+/// The realised-turnover ceiling as a fraction of `n_bars` a production formula must stay under (design
+/// §13.5 hard-block 6; `max_turnover_frac = 0.25`).
+pub const MAX_TURNOVER_FRAC: &str = "0.25";
+/// The per-formula capacity floor (USD) a production formula must clear (design §13.5 hard-block 6,
+/// `CAPACITY_FLOOR ≈ $250k`).
+pub const CAPACITY_FLOOR_USD: i64 = 250_000;
+
+/// Per-formula **tradability + parsimony evidence** for the §13.5 hard-blocks 5–8 that `seal_allowed`
+/// re-derives (QE-454 Phase B). This is the *displayed = enforced = evidenced* per-formula row: the exact
+/// numbers the SPA PoolReview shows, the seal predicate enforces, and the audit `evidence_hash` captures.
+///
+/// It is carried in an **optional** [`FormulaPoolContent::gate_evidence`] block (absent-by-default), so a
+/// pool sealed without it (every pre-Phase-B / format-v1 pool) serialises **byte-identically** — and an
+/// **absent** evidence block is a *hard-block* at seal time (every absent stat blocks, never a vacuous
+/// pass, design §13.5). Every numeric bar is exact [`Decimal`] (string-serialised) so it is byte-stable.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FormulaGateEvidence {
+    /// The `formula_hash` this evidence row belongs to (binds the row to its formula; a mismatch blocks).
+    pub formula_hash: String,
+    /// Hard-block 5 (QE-434): the formula's rank-IC is same-sign across the two folds **and** clears the
+    /// Benjamini-Hochberg FDR screen.
+    pub ic_two_fold_same_sign_fdr_pass: bool,
+    /// Hard-block 6: the **minimum** over the `{1×, 2×}` cost-stress of the net log-growth (must be finite
+    /// and `> 0`).
+    #[serde(with = "rust_decimal::serde::str")]
+    pub cost_stress_min_net_log_growth: Decimal,
+    /// Hard-block 6: realised turnover as a fraction of `n_bars` (must be `≤ 0.25`).
+    #[serde(with = "rust_decimal::serde::str")]
+    pub realised_turnover_frac: Decimal,
+    /// Hard-block 6: estimated capacity in USD (must be `≥ 250_000`).
+    #[serde(with = "rust_decimal::serde::str")]
+    pub capacity_usd: Decimal,
+    /// Hard-block 7 (QE-436): the formula is within the MDL / node-count / depth / lookback caps **and**
+    /// clears deflation against its own node-count stratum.
+    pub within_caps_and_stratum_deflated: bool,
+    /// Hard-block 8 (`nulls.rs`): the formula beats its turnover-matched random-entry null (does not
+    /// "SCRAPE NOISE").
+    pub random_entry_null_pass: bool,
+}
+
+impl FormulaGateEvidence {
+    /// Whether this formula clears **all** of hard-blocks 5–8 (design §13.5). Every clause must pass;
+    /// a non-finite / non-positive cost-stress growth, an over-turnover, or a sub-floor capacity blocks.
+    #[must_use]
+    pub fn passes(&self) -> bool {
+        let max_turnover = Decimal::from_str_exact(MAX_TURNOVER_FRAC).unwrap_or(Decimal::ZERO);
+        let capacity_floor = Decimal::from(CAPACITY_FLOOR_USD);
+        self.ic_two_fold_same_sign_fdr_pass
+            && self.cost_stress_min_net_log_growth > Decimal::ZERO
+            && self.realised_turnover_frac <= max_turnover
+            && self.capacity_usd >= capacity_floor
+            && self.within_caps_and_stratum_deflated
+            && self.random_entry_null_pass
+    }
+}
+
 /// The pool's **review lineage** (design §13.10): the reproducible provenance that binds an approval to a
 /// byte-reproducible pool. Plain strings + the seed keep this a leaf (no `qe-determinism` dep).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -130,6 +186,12 @@ pub struct FormulaPoolContent {
     pub formulas: Vec<PoolFormula>,
     /// The deflation-summary block.
     pub deflation: DeflationSummary,
+    /// **Optional** per-formula tradability + parsimony evidence (design §13.5 hard-blocks 5–8, QE-454
+    /// Phase B). Absent-by-default (`skip_serializing_if`), so a pool sealed without it serialises
+    /// byte-identically to a pre-Phase-B/format-v1 pool; an **absent** block is a hard-block at seal
+    /// time (every absent stat blocks). When present, it carries one row per formula.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate_evidence: Option<Vec<FormulaGateEvidence>>,
     /// The review lineage.
     pub lineage: PoolLineage,
 }
@@ -171,6 +233,23 @@ impl FormulaPoolContent {
     pub fn content_hash(&self) -> Result<String, PoolError> {
         let bytes = serde_json::to_vec(self).map_err(|e| PoolError::Serialize(e.to_string()))?;
         Ok(hex(&Sha256::digest(&bytes)))
+    }
+
+    /// **Structural barrier 3** (design §13.6): assert this pool is eligible to load on the **production**
+    /// path, reusing the exact-match-on-a-hashed-identity-field discipline of
+    /// [`qe_vintage::schema::assert_schema`]. The pool's `mode` is a **hashed** content field, so a
+    /// sandbox-identity pool copied into the production directory still verifies its `content_hash` (it is
+    /// a real pool) but fails here — its sealed `mode == Sandbox` cannot be flipped without breaking the
+    /// hash. Fail-closed: any non-production mode is refused. The production repository load path calls
+    /// this, so a sandbox pool is **structurally unloadable** in production even if the file is copied in.
+    ///
+    /// # Errors
+    /// [`PoolError::NotProductionEligible`] when `mode != Production`.
+    pub fn assert_production_eligible(&self) -> Result<(), PoolError> {
+        if self.mode != PoolMode::Production {
+            return Err(PoolError::NotProductionEligible { mode: self.mode });
+        }
+        Ok(())
     }
 
     /// The sorted `formula_hash` list (the identity payload; equals `lineage.pool_hash`'s preimage).
@@ -357,6 +436,15 @@ pub enum PoolError {
         "formula pool formulas must be strictly ascending by formula_hash (sorted + deduplicated)"
     )]
     FormulasNotSorted,
+    /// The pool is not eligible to load on the production path — its sealed `mode` is not `Production`
+    /// (structural barrier 3, design §13.6). A sandbox pool copied into the prod dir fails here.
+    #[error(
+        "formula pool is not production-eligible: sealed mode is {mode:?}, expected Production"
+    )]
+    NotProductionEligible {
+        /// The pool's sealed (hashed) mode.
+        mode: PoolMode,
+    },
     /// Underlying I/O error.
     #[error("formula pool I/O error: {0}")]
     Io(#[from] std::io::Error),
@@ -442,6 +530,7 @@ mod tests {
             mode: PoolMode::Sandbox,
             formulas,
             deflation: deflation(),
+            gate_evidence: None,
             lineage,
         }
     }
@@ -544,6 +633,86 @@ mod tests {
             sealed.content.deflation.trial_variance
         );
         assert_eq!(loaded.content_hash, sealed.content_hash);
+    }
+
+    fn good_evidence(formula_hash: &str) -> FormulaGateEvidence {
+        FormulaGateEvidence {
+            formula_hash: formula_hash.to_owned(),
+            ic_two_fold_same_sign_fdr_pass: true,
+            cost_stress_min_net_log_growth: dec(5, 3), // 0.005 > 0
+            realised_turnover_frac: dec(20, 2),        // 0.20 ≤ 0.25
+            capacity_usd: Decimal::from(300_000),      // ≥ 250k
+            within_caps_and_stratum_deflated: true,
+            random_entry_null_pass: true,
+        }
+    }
+
+    #[test]
+    fn assert_production_eligible_is_fail_closed_on_a_sandbox_pool() {
+        // A sandbox pool (default) is refused; a production pool passes. The mode is a HASHED field, so a
+        // copied sandbox pool cannot masquerade as production without breaking its content hash.
+        let mut c = content(&["rank(close,20)"]);
+        assert!(matches!(
+            c.assert_production_eligible(),
+            Err(PoolError::NotProductionEligible {
+                mode: PoolMode::Sandbox
+            })
+        ));
+        c.mode = PoolMode::Production;
+        assert!(c.assert_production_eligible().is_ok());
+    }
+
+    #[test]
+    fn absent_gate_evidence_serialises_byte_identically() {
+        // Golden-safety: a pool with `gate_evidence: None` must serialise WITHOUT the key, so a
+        // pre-Phase-B/format-v1 pool is byte-identical and its content hash is unchanged.
+        let sealed = FormulaPool::seal(content(&["rank(close,20)", "zscore(high,50)"])).unwrap();
+        let json = serde_json::to_string(&sealed).unwrap();
+        assert!(
+            !json.contains("gate_evidence"),
+            "absent gate_evidence must not appear on the wire (byte-stability): {json}"
+        );
+        // Round-trips back with the field absent.
+        let back: FormulaPool = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.content.gate_evidence, None);
+        assert_eq!(back.content_hash, sealed.content_hash);
+    }
+
+    #[test]
+    fn formula_gate_evidence_passes_and_each_clause_blocks_alone() {
+        let base = good_evidence("abc");
+        assert!(base.passes(), "the all-green evidence passes");
+        // Flip each clause bad → the formula blocks.
+        assert!(!FormulaGateEvidence {
+            ic_two_fold_same_sign_fdr_pass: false,
+            ..base.clone()
+        }
+        .passes());
+        assert!(!FormulaGateEvidence {
+            cost_stress_min_net_log_growth: dec(0, 0), // not > 0
+            ..base.clone()
+        }
+        .passes());
+        assert!(!FormulaGateEvidence {
+            realised_turnover_frac: dec(26, 2), // 0.26 > 0.25
+            ..base.clone()
+        }
+        .passes());
+        assert!(!FormulaGateEvidence {
+            capacity_usd: Decimal::from(249_999), // < 250k
+            ..base.clone()
+        }
+        .passes());
+        assert!(!FormulaGateEvidence {
+            within_caps_and_stratum_deflated: false,
+            ..base.clone()
+        }
+        .passes());
+        assert!(!FormulaGateEvidence {
+            random_entry_null_pass: false,
+            ..base
+        }
+        .passes());
     }
 
     #[test]

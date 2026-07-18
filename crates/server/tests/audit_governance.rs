@@ -352,7 +352,8 @@ async fn production_seal_capability_is_fail_closed_and_seal_stays_gated() {
     );
     assert!(persistent.production_seal_capability_allowed());
 
-    // And regardless, a production `/seal` STILL 409s in Phase A (Phase A must not open sealing).
+    // And a production `/seal` of a pool lacking the dual sign-off / per-formula evidence is refused by the
+    // Phase-B predicate with a named blocker list (fail-closed).
     let tmp = TempDir::new().unwrap();
     let data = tmp.path().join("data");
     let artifacts = tmp.path().join("artifacts");
@@ -363,9 +364,12 @@ async fn production_seal_capability_is_fail_closed_and_seal_stays_gated() {
     assert_eq!(
         status,
         StatusCode::CONFLICT,
-        "production seal stays fail-closed: {body}"
+        "production seal is refused by the predicate: {body}"
     );
-    assert_eq!(body["mode"], "production");
+    assert!(
+        body["blockers"].as_array().is_some_and(|b| !b.is_empty()),
+        "the refusal carries a named blocker list: {body}"
+    );
 }
 
 // ---- 5. revocation is forward-only (inert on the read path, no history rewrite) ----------------
@@ -494,4 +498,285 @@ async fn me_capabilities_mirror_roles_but_never_authorize() {
         StatusCode::FORBIDDEN,
         "capabilities never authorize — the server enforces"
     );
+}
+
+// ---- 8. QE-454 Phase B — the server-authoritative seal predicate + barriers + carry-forward #1 -----
+
+/// A **production** pool that passes all four deflation-summary hard-blocks AND carries a passing
+/// per-formula `gate_evidence` row (hard-blocks 5–8). Distinct id ⇒ distinct `pool_hash`.
+fn production_pool_with_evidence(id: &str) -> FormulaPool {
+    let sexpr = "rank(close,20)";
+    let formula_hash = sha256_hex(sexpr);
+    let pool_hash = sha256_hex(&format!("{formula_hash}\n"));
+    let content: FormulaPoolContent = serde_json::from_value(json!({
+        "format_version": 1,
+        "pool_id": id,
+        "mode": "production",
+        "formulas": [{ "sexpr": sexpr, "formula_hash": formula_hash }],
+        "deflation": {
+            "gp_aware": true, "distinct_evaluations": 500000, "n_trials": 500000,
+            "analytic_floor": 7200, "variance_trials": 500000, "trial_variance": "0.02",
+            "expected_max_sharpe": "9.0", "champion_dsr": "0.98", "uncensored_pbo": "0.20"
+        },
+        "gate_evidence": [{
+            "formula_hash": formula_hash,
+            "ic_two_fold_same_sign_fdr_pass": true,
+            "cost_stress_min_net_log_growth": "0.005",
+            "realised_turnover_frac": "0.20",
+            "capacity_usd": "300000",
+            "within_caps_and_stratum_deflated": true,
+            "random_entry_null_pass": true
+        }],
+        "lineage": {
+            "campaign_id": id, "seed": 7, "mode": "production", "code_commit": "commit-test",
+            "input_snapshot_id": "snap-1", "config_hash": "cfg-hash", "pool_hash": pool_hash
+        }
+    }))
+    .expect("valid production pool content");
+    FormulaPool::seal(content).expect("seal production pool")
+}
+
+/// Seed the audit log with a pool-bound launch entry (the launcher) so the SoD launcher resolves.
+async fn seed_launch(audit: &AuditLog, pool_id: &str) {
+    audit
+        .append(
+            LAUNCHER,
+            AuditAction::Launch,
+            pool_id,
+            "run-x",
+            "",
+            "",
+            now_ms(),
+        )
+        .await
+        .unwrap();
+}
+
+/// HAPPY PATH: a genuinely-passing production pool with two distinct approver signatures (neither the
+/// launcher) SEALS — marks `Sealed`, records a `GovernanceRecord`, mints NO vintage.
+#[tokio::test]
+async fn a_passing_production_pool_with_two_distinct_signoffs_seals() {
+    let tmp = TempDir::new().unwrap();
+    let data = tmp.path().join("data");
+    let artifacts = tmp.path().join("artifacts");
+    let pool = production_pool_with_evidence("pool-good");
+    write_pool(&artifacts, &pool);
+    let (app, audit) = build_app(&data, &artifacts, roles());
+    seed_launch(&audit, "pool-good").await;
+
+    // Two distinct approvers sign off (neither the launcher).
+    post_as(&app, "/api/formula-pools/pool-good/approve", APPROVER_A).await;
+    let (_, body) = post_as(&app, "/api/formula-pools/pool-good/approve", APPROVER_B).await;
+    assert_eq!(body["signoff"], "two_distinct_signoffs", "{body}");
+
+    // Seal succeeds under the server-authoritative predicate.
+    let (status, body) = post_as(&app, "/api/formula-pools/pool-good/seal", APPROVER_A).await;
+    assert_eq!(status, StatusCode::OK, "the happy path must seal: {body}");
+    assert_eq!(body["lifecycle"], "sealed");
+    assert_eq!(
+        body["vintage_minted"], false,
+        "sealing NEVER mints a vintage"
+    );
+    assert_eq!(body["evidence_hash"].as_str().unwrap().len(), 64);
+
+    // A GovernanceRecord was written under <data>/governance/records/.
+    let record_path = data
+        .join("governance")
+        .join("records")
+        .join("pool-good.json");
+    assert!(record_path.exists(), "a GovernanceRecord must be recorded");
+    let record: GovernanceRecord =
+        serde_json::from_slice(&std::fs::read(&record_path).unwrap()).unwrap();
+    assert_eq!(record.approval_entry_hashes.len(), 2, "two approvals bound");
+    assert_eq!(
+        record.vintage_content_hash, pool.content_hash,
+        "binds the sealed-pool hash"
+    );
+
+    // The pool now reads Sealed.
+    let (_, detail) = get_as(&app, "/api/formula-pools/pool-good", APPROVER_A).await;
+    assert_eq!(detail["lifecycle"], "sealed");
+}
+
+/// Launcher-as-approver / single-sig / pool_hash-mismatch all still 409 on the LIVE seal path.
+#[tokio::test]
+async fn launcher_self_approve_single_sig_and_hash_mismatch_all_block_the_live_seal() {
+    let tmp = TempDir::new().unwrap();
+    let data = tmp.path().join("data");
+    let artifacts = tmp.path().join("artifacts");
+    write_pool(&artifacts, &production_pool_with_evidence("pool-sod"));
+    let mut r = roles();
+    r.approvers.push(LAUNCHER.to_owned()); // launcher also holds the approver role
+    let (app, audit) = build_app(&data, &artifacts, r);
+    seed_launch(&audit, "pool-sod").await;
+
+    // Launcher-as-approver is refused at /approve (SoD 403 fires LIVE — carry-forward #1).
+    let (status, _) = post_as(&app, "/api/formula-pools/pool-sod/approve", LAUNCHER).await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "launcher self-approve is refused live"
+    );
+
+    // Only ONE distinct valid approver → seal blocks on the dual-sig clause.
+    post_as(&app, "/api/formula-pools/pool-sod/approve", APPROVER_A).await;
+    let (status, body) = post_as(&app, "/api/formula-pools/pool-sod/seal", APPROVER_A).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let names: Vec<String> = body["blockers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| b.as_str().unwrap().to_owned())
+        .collect();
+    assert!(
+        names.contains(&"insufficient_distinct_approver_signoffs".to_owned()),
+        "single-sig blocks: {names:?}"
+    );
+    // The pool is not sealed.
+    let (_, detail) = get_as(&app, "/api/formula-pools/pool-sod", APPROVER_A).await;
+    assert_eq!(detail["lifecycle"], "approved");
+}
+
+/// A rejected production seal appends a rejected-attempt audit entry (design §13.7).
+#[tokio::test]
+async fn a_rejected_seal_appends_a_rejected_attempt_audit_entry() {
+    let tmp = TempDir::new().unwrap();
+    let data = tmp.path().join("data");
+    let artifacts = tmp.path().join("artifacts");
+    write_pool(&artifacts, &production_pool_with_evidence("pool-rej"));
+    let (app, audit) = build_app(&data, &artifacts, roles());
+    seed_launch(&audit, "pool-rej").await;
+    post_as(&app, "/api/formula-pools/pool-rej/approve", APPROVER_A).await; // only one signoff
+
+    let before = audit.read_all().unwrap().len();
+    let (status, _) = post_as(&app, "/api/formula-pools/pool-rej/seal", APPROVER_A).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let after = audit.read_all().unwrap();
+    assert_eq!(
+        after.len(),
+        before + 1,
+        "a rejected-attempt entry is appended"
+    );
+    let last = after.last().unwrap();
+    assert_eq!(last.action, AuditAction::Reject);
+    assert!(
+        !last.evidence_hash.is_empty(),
+        "the rejected attempt records the evidence hash"
+    );
+}
+
+/// STRUCTURAL BARRIER 3: a sandbox-identity pool copied into the PRODUCTION directory is structurally
+/// unloadable in production — `/seal` refuses it at load (its sealed mode is not production).
+#[tokio::test]
+async fn a_sandbox_pool_in_the_production_dir_is_structurally_unloadable() {
+    let tmp = TempDir::new().unwrap();
+    let data = tmp.path().join("data");
+    let artifacts = tmp.path().join("artifacts");
+    // Build a SANDBOX-mode pool and write it (as-is) into the PRODUCTION root (the copy-into-prod attack).
+    let sandbox = sealed_pool("pool-smuggled", "sandbox");
+    FormulaPoolRepository::new(artifacts.join("pools"))
+        .write(&sandbox)
+        .unwrap();
+    let (app, _audit) = build_app(&data, &artifacts, roles());
+
+    let (status, body) = post_as(&app, "/api/formula-pools/pool-smuggled/seal", APPROVER_A).await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "barrier 3 refuses the smuggled pool: {body}"
+    );
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap()
+            .contains("production-eligible"),
+        "the refusal names the production-eligibility barrier: {body}"
+    );
+}
+
+/// STRUCTURAL BARRIER 2: the physically separate research artifacts root is never listed by
+/// `GET /api/vintages` — a sandbox/research pool is off the production load path by directory boundary.
+#[tokio::test]
+async fn the_research_root_is_never_listed_by_get_vintages() {
+    let tmp = TempDir::new().unwrap();
+    let data = tmp.path().join("data");
+    let artifacts = tmp.path().join("artifacts");
+    // A research pool exists under research/pools …
+    write_pool(&artifacts, &sealed_pool("pool-research", "sandbox"));
+    let (app, _audit) = build_app(&data, &artifacts, roles());
+    // … but GET /api/vintages (the production vintage list) never surfaces it.
+    let (status, body) = get_as(&app, "/api/vintages", APPROVER_A).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let list = body.as_array().expect("vintages list");
+    assert!(
+        list.iter().all(|v| v["id"] != "pool-research"),
+        "a research pool must never appear in the vintage list: {body}"
+    );
+}
+
+/// CARRY-FORWARD #1 (the actual live-path fix): the launcher is resolved via the RUN-BOUND launch entry
+/// (`subject_hash = ""`, `run_id` set — exactly what the live evolve-launch path writes) through the
+/// `pool_id → run → launch entry` binding, so the SoD 403 fires LIVE (not only when the launch entry is
+/// pool-bound). Without the binding, `derive_signoff(launcher=None)` would let the launcher self-approve.
+#[tokio::test]
+async fn the_run_bound_launch_entry_resolves_the_launcher_so_sod_fires_live() {
+    use qe_server::runs::model::IndexEntry;
+    use qe_server::runs::store::RunStore;
+    use qe_server::runs::{RunMeta, RunStatus, TrainProgress};
+
+    let tmp = TempDir::new().unwrap();
+    let data = tmp.path().join("data");
+    let artifacts = tmp.path().join("artifacts");
+    write_pool(&artifacts, &production_pool_with_evidence("pool-runbound"));
+    let mut r = roles();
+    r.approvers.push(LAUNCHER.to_owned()); // launcher also holds the approver role
+    let (app, audit) = build_app(&data, &artifacts, r);
+
+    // Simulate a completed evolve run that produced `pool-runbound` (meta.train.pool == pool_id).
+    let store = RunStore::new(data.join("runs"));
+    let run_id = "evolve-run-42";
+    let meta = RunMeta {
+        id: run_id.to_owned(),
+        run_type: "evolve".to_owned(),
+        status: RunStatus::Succeeded,
+        params: json!({ "seed": 7 }),
+        progress: Default::default(),
+        train: Some(TrainProgress {
+            pool: Some("pool-runbound".to_owned()),
+            ..Default::default()
+        }),
+        created_ms: now_ms(),
+        started_ms: Some(now_ms()),
+        finished_ms: Some(now_ms()),
+        exit: Some(0),
+        error: None,
+        artifacts: vec![],
+    };
+    store.init_run(&meta).unwrap();
+    store
+        .write_index(&[IndexEntry {
+            id: run_id.to_owned(),
+            run_type: "evolve".to_owned(),
+            created_ms: now_ms(),
+            label: "evolve".to_owned(),
+        }])
+        .unwrap();
+
+    // The live evolve-launch entry is RUN-bound: subject_hash = "", run_id = the run id (NOT the pool id).
+    audit
+        .append(LAUNCHER, AuditAction::Launch, "", run_id, "", "", now_ms())
+        .await
+        .unwrap();
+
+    // The launcher tries to approve its own pool → SoD 403 (resolved via pool_id → run → launch entry).
+    let (status, body) = post_as(&app, "/api/formula-pools/pool-runbound/approve", LAUNCHER).await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "SoD must fire on the LIVE run-bound path: {body}"
+    );
+    assert!(body["error"]
+        .as_str()
+        .unwrap()
+        .contains("separation of duties"));
 }

@@ -13,8 +13,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use qe_run_protocol::{
-    ProgressLine, EVOLVE_MAX_DEPTH, EVOLVE_MAX_LOOKBACK, EVOLVE_MAX_NODES, EVOLVE_MAX_POOL,
-    EVOLVE_WINDOW_LATTICE, PROTOCOL_VERSION,
+    EvolveMode, ProgressLine, EVOLVE_MAX_DEPTH, EVOLVE_MAX_LOOKBACK, EVOLVE_MAX_NODES,
+    EVOLVE_MAX_POOL, EVOLVE_WINDOW_LATTICE, PROTOCOL_VERSION,
 };
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{Mutex, Semaphore};
@@ -70,12 +70,33 @@ const RECONCILE_REASON: &str = "run was interrupted by a server restart (no live
 /// `running`.
 const SHUTDOWN_DRAIN_REASON: &str = "run did not finish before server shutdown";
 
+/// Reason recorded when a run is terminally failed because it blew past its wall-clock ceiling (QE-454
+/// §13.10). A multi-hour campaign that never terminates is killed (`kill_on_drop`) and marked `failed`
+/// rather than left `running` forever.
+const RUN_DEADLINE_REASON: &str = "run exceeded the wall-clock ceiling";
+
+/// Default per-run wall-clock ceiling (design §13.10 "~24h hard ceiling"): a run that has not terminated by
+/// this bound is aborted + terminally failed. Overridable per-manager for tests via
+/// [`RunManager::with_run_deadline`].
+pub const DEFAULT_MAX_RUN_SECS: u64 = 24 * 60 * 60;
+
+/// Default bound on **concurrently-running evolve campaigns** (design §13.10): a separate semaphore
+/// (default 1) so a multi-hour illumination campaign never starves interactive backtests. Overridable via
+/// `QE_SERVER_MAX_EVOLVE_CONCURRENCY` / [`RunManager::with_evolve_concurrency`].
+pub const DEFAULT_MAX_EVOLVE_CONCURRENCY: usize = 1;
+
 /// Owns the run store, the spawn seam, and the worker-pool bound. Wrapped in an `Arc` and shared as
 /// axum state.
 pub struct RunManager {
     store: RunStore,
     spawner: Arc<dyn JobSpawner>,
     permits: Arc<Semaphore>,
+    /// QE-454 §13.10: a **separate** bound on concurrently-running evolve campaigns (default 1). An evolve
+    /// supervisor acquires one of these **in addition to** a shared worker-pool permit, so a long campaign
+    /// serialises against other campaigns without ever blocking interactive backtests.
+    evolve_permits: Arc<Semaphore>,
+    /// QE-454 §13.10: the per-run wall-clock ceiling; a run that exceeds it is aborted + terminally failed.
+    run_deadline: Duration,
     index_lock: Arc<Mutex<()>>,
     /// QE-407: live supervisor `JoinHandle`s keyed by run id. Each `create` inserts its handle and the
     /// supervisor self-deregisters on completion, so at shutdown this is exactly the set of in-flight
@@ -98,10 +119,27 @@ impl RunManager {
             store: RunStore::new(runs_dir),
             spawner,
             permits: Arc::new(Semaphore::new(max_concurrency.max(1))),
+            evolve_permits: Arc::new(Semaphore::new(DEFAULT_MAX_EVOLVE_CONCURRENCY.max(1))),
+            run_deadline: Duration::from_secs(DEFAULT_MAX_RUN_SECS),
             index_lock: Arc::new(Mutex::new(())),
             registry: Arc::new(Mutex::new(HashMap::new())),
             accepting: Arc::new(AtomicBool::new(true)),
         }
+    }
+
+    /// QE-454 §13.10: set the bound on concurrently-running evolve campaigns (clamped to ≥1). A real deploy
+    /// resolves this from `QE_SERVER_MAX_EVOLVE_CONCURRENCY`; tests set it directly.
+    #[must_use]
+    pub fn with_evolve_concurrency(mut self, max_evolve: usize) -> Self {
+        self.evolve_permits = Arc::new(Semaphore::new(max_evolve.max(1)));
+        self
+    }
+
+    /// QE-454 §13.10: set the per-run wall-clock ceiling (tests use a tiny value to exercise the abort).
+    #[must_use]
+    pub fn with_run_deadline(mut self, deadline: Duration) -> Self {
+        self.run_deadline = deadline;
+        self
     }
 
     /// The underlying store (for read handlers).
@@ -176,6 +214,8 @@ impl RunManager {
         let store = self.store.clone();
         let spawner = Arc::clone(&self.spawner);
         let permits = Arc::clone(&self.permits);
+        let evolve_permits = Arc::clone(&self.evolve_permits);
+        let run_deadline = self.run_deadline;
         let registry = Arc::clone(&self.registry);
         let task_id = id.clone();
         // Hold the registry lock across `spawn` + `insert` so the task's self-deregister (which also
@@ -184,7 +224,16 @@ impl RunManager {
         // no double-remove.
         let mut reg = self.registry.lock().await;
         let handle = tokio::spawn(async move {
-            supervise(store, spawner, permits, meta, spec).await;
+            supervise(
+                store,
+                spawner,
+                permits,
+                evolve_permits,
+                run_deadline,
+                meta,
+                spec,
+            )
+            .await;
             registry.lock().await.remove(&task_id);
         });
         reg.insert(id.clone(), handle);
@@ -380,6 +429,10 @@ fn validate_evolve(p: &EvolveParams) -> Result<(), CreateError> {
     require("start", &p.start)?;
     require("end", &p.end)?;
     require("resolution", &p.resolution)?;
+    // QE-454 §13.6 barrier 1: a `production` campaign cannot even be LAUNCHED unless the compiled
+    // `DEFLATION_BASIS_VERSION` carries every prerequisite bit — a tampered client is blocked at the door
+    // (400), long before any seal. The const is server-side + non-editable; no request field can flip it.
+    validate_evolve_basis(p.mode, qe_validation::DEFLATION_BASIS_VERSION)?;
     cap("depth", p.depth, EVOLVE_MAX_DEPTH)?;
     cap("nodes", p.nodes, EVOLVE_MAX_NODES)?;
     cap("lookback", p.lookback, EVOLVE_MAX_LOOKBACK)?;
@@ -392,6 +445,21 @@ fn validate_evolve(p: &EvolveParams) -> Result<(), CreateError> {
                 )));
             }
         }
+    }
+    Ok(())
+}
+
+/// QE-454 §13.6 barrier 1 — the pure production-launch prerequisite gate (testable at any `basis_version`,
+/// since the compiled [`qe_validation::DEFLATION_BASIS_VERSION`] is currently satisfied). A `production`
+/// campaign is refused (`400`) unless `basis_version` carries every [`qe_validation::REQUIRED_DEFLATION_BASIS`]
+/// bit; `sandbox` is never gated on the basis.
+fn validate_evolve_basis(mode: EvolveMode, basis_version: u32) -> Result<(), CreateError> {
+    if mode == EvolveMode::Production && !qe_validation::basis_satisfied(basis_version) {
+        let missing = qe_validation::missing_basis_prereqs(basis_version);
+        return Err(CreateError::Validation(format!(
+            "production evolve campaigns are gated on the compiled deflation-basis prerequisites \
+             (DEFLATION_BASIS_VERSION); missing: {missing:?}"
+        )));
     }
     Ok(())
 }
@@ -422,6 +490,8 @@ async fn supervise(
     store: RunStore,
     spawner: Arc<dyn JobSpawner>,
     permits: Arc<Semaphore>,
+    evolve_permits: Arc<Semaphore>,
+    run_deadline: Duration,
     mut meta: RunMeta,
     spec: RunSpec,
 ) {
@@ -434,6 +504,25 @@ async fn supervise(
             finish_failed(&store, &mut meta, None, "worker pool closed".to_owned());
             return;
         }
+    };
+
+    // QE-454 §13.10: an evolve campaign ALSO acquires a separate evolve permit (default 1) so a multi-hour
+    // campaign serialises against other campaigns without starving interactive backtests. Held for the run.
+    let _evolve_permit = if matches!(spec, RunSpec::Evolve(_)) {
+        match evolve_permits.acquire().await {
+            Ok(p) => Some(p),
+            Err(_) => {
+                finish_failed(
+                    &store,
+                    &mut meta,
+                    None,
+                    "evolve worker pool closed".to_owned(),
+                );
+                return;
+            }
+        }
+    } else {
+        None
     };
 
     meta.status = RunStatus::Running;
@@ -453,16 +542,33 @@ async fn supervise(
     let stderr = child.stderr.take();
 
     // Drain stdout (progress → meta + stdout.log) and stderr (tail) concurrently to avoid a pipe
-    // deadlock if the child writes a lot to both.
-    let stdout_fut = drain_stdout(stdout, &store, &mut meta, &spec);
-    let stderr_fut = drain_stderr_tail(stderr);
-    let (done_seen, err_tail) = tokio::join!(stdout_fut, stderr_fut);
+    // deadlock if the child writes a lot to both. QE-454 §13.10: the whole drain is wrapped in a per-run
+    // wall-clock deadline — a run that has not terminated by `run_deadline` is aborted (the child is killed
+    // via `kill_on_drop` + an explicit `start_kill`) and terminally failed, so a runaway campaign can never
+    // hold a supervisor open forever.
+    let drain = async {
+        let stdout_fut = drain_stdout(stdout, &store, &mut meta, &spec);
+        let stderr_fut = drain_stderr_tail(stderr);
+        tokio::join!(stdout_fut, stderr_fut)
+    };
+    let (done_seen, err_tail, deadline_exceeded) =
+        match tokio::time::timeout(run_deadline, drain).await {
+            Ok((done_seen, err_tail)) => (done_seen, err_tail, false),
+            Err(_) => {
+                // Ceiling hit: kill the child so its `wait()` returns promptly (drop also fires
+                // `kill_on_drop`), then fall through to the terminal-mark below.
+                let _ = child.start_kill();
+                (false, String::new(), true)
+            }
+        };
 
     let exit = child.wait().await.ok().and_then(|s| s.code());
     meta.exit = exit;
     meta.finished_ms = Some(now_ms());
 
-    if done_seen && exit == Some(0) && store.result_path(&meta.id).exists() {
+    if deadline_exceeded {
+        finish_failed(&store, &mut meta, exit, RUN_DEADLINE_REASON.to_owned());
+    } else if done_seen && exit == Some(0) && store.result_path(&meta.id).exists() {
         meta.status = RunStatus::Succeeded;
         meta.error = None;
         meta.artifacts = vec!["result.json".to_owned()];
@@ -587,12 +693,17 @@ async fn drain_stdout(
                 dsr,
                 spa_pvalue,
                 n_trials,
+                uncensored_pbo,
+                variance_trials,
+                distinct_evaluations,
             }) => {
                 meta.progress = Progress {
                     pct,
                     stage: "gate".to_owned(),
                     msg: format!("G1 {}", if promoted { "passed" } else { "failed" }),
                 };
+                // QE-454 Phase B: the three GP-deflation fields pass through absent-by-default — the normal
+                // train `gate` line carries `None`, so `GateSnapshot`/`meta.json` stay byte-identical.
                 train_mut(meta).gate = Some(GateSnapshot {
                     promoted,
                     failed,
@@ -601,6 +712,9 @@ async fn drain_stdout(
                     dsr,
                     spa_pvalue,
                     n_trials,
+                    uncensored_pbo,
+                    variance_trials,
+                    distinct_evaluations,
                 });
                 let _ = store.write_meta(meta);
             }
@@ -784,6 +898,33 @@ mod tests {
         let err =
             build_spec(&evolve_req(json!({ "seed": 7 }))).expect_err("missing window rejects");
         assert!(matches!(err, CreateError::Validation(_)));
+    }
+
+    #[test]
+    fn production_launch_is_refused_when_the_basis_is_unsatisfied() {
+        use qe_run_protocol::EvolveMode;
+        // The gate is pure/injectable so the `const < REQUIRED` case is testable even though the compiled
+        // const is satisfied. An unsatisfied basis (0) refuses a PRODUCTION launch with a 400 naming the
+        // missing prereqs — a tampered client cannot even launch a production campaign.
+        let err = validate_evolve_basis(EvolveMode::Production, 0)
+            .expect_err("production must be refused when the basis is unsatisfied");
+        match err {
+            CreateError::Validation(msg) => {
+                assert!(msg.contains("DEFLATION_BASIS_VERSION"), "message: {msg}");
+                assert!(msg.contains("QE-439"), "must name a missing prereq: {msg}");
+            }
+            other => panic!("expected Validation error, got {other:?}"),
+        }
+        // Sandbox is NEVER gated on the basis (research can always launch).
+        assert!(validate_evolve_basis(EvolveMode::Sandbox, 0).is_ok());
+        // A fully-satisfied basis lets production launch.
+        assert!(validate_evolve_basis(
+            EvolveMode::Production,
+            qe_validation::REQUIRED_DEFLATION_BASIS
+        )
+        .is_ok());
+        // And the compiled const is satisfied (prereqs merged), so a real production launch is allowed.
+        assert!(qe_validation::deflation_basis_satisfied());
     }
 
     #[test]

@@ -89,6 +89,35 @@ impl RunStore {
         }
     }
 
+    /// QE-454 Phase B carry-forward #1 — the **`pool_id → run_id`** binding. Find the id of the (evolve)
+    /// run whose sealed pool is `pool_id` by scanning the index newest-first and matching
+    /// `meta.train.pool == pool_id` (`campaign_id == pool_id`, so the pool's id equals the run's produced
+    /// pool). `None` when no run produced that pool. The seal predicate uses this to resolve the launcher
+    /// (`run_id → launch entry`), so a production seal always passes a resolved launcher to the SoD check.
+    ///
+    /// # Errors
+    /// A filesystem/parse error reading `index.json` or a run's `meta.json`.
+    pub fn find_run_id_by_pool(&self, pool_id: &str) -> io::Result<Option<String>> {
+        let index = self.read_index()?;
+        for entry in index.iter().rev() {
+            if entry.run_type != "evolve" {
+                continue;
+            }
+            if let Some(meta) = self.read_meta(&entry.id)? {
+                let produced = meta
+                    .train
+                    .as_ref()
+                    .and_then(|t| t.pool.as_deref())
+                    .map(|p| p == pool_id)
+                    .unwrap_or(false);
+                if produced {
+                    return Ok(Some(meta.id));
+                }
+            }
+        }
+        Ok(None)
+    }
+
     /// Read a run's `result.json` bytes.
     ///
     /// A thin wrapper over `fs::read(result_path)` so the run-store's blocking filesystem primitives all

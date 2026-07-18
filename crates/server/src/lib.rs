@@ -32,6 +32,7 @@ use tower_http::trace::TraceLayer;
 pub mod audit;
 pub mod auth;
 pub mod config;
+pub mod pool_seal;
 pub mod pools;
 pub mod read;
 pub mod runs;
@@ -214,6 +215,15 @@ pub const ENV_DATA_DIR: &str = "QE_SERVER_DATA_DIR";
 /// Environment variable naming the max number of concurrently-running run subprocesses.
 pub const ENV_MAX_CONCURRENCY: &str = "QE_SERVER_MAX_CONCURRENCY";
 
+/// QE-454 §13.10: environment variable naming the max number of concurrently-running **evolve** campaigns
+/// (a separate bound from [`ENV_MAX_CONCURRENCY`], default 1) so a multi-hour campaign never starves
+/// interactive backtests.
+pub const ENV_MAX_EVOLVE_CONCURRENCY: &str = "QE_SERVER_MAX_EVOLVE_CONCURRENCY";
+
+/// QE-454 §13.10: environment variable naming the per-run wall-clock ceiling in seconds (default ~24h). A
+/// run that exceeds it is aborted (`kill_on_drop`) and terminally failed.
+pub const ENV_MAX_RUN_SECS: &str = "QE_SERVER_MAX_RUN_SECS";
+
 /// Server transport configuration (bind address + static-assets dir).
 ///
 /// These are server-only knobs, so they live here rather than in `qe-config`'s training-domain schema;
@@ -313,11 +323,23 @@ impl ServerConfig {
         let spawner = Arc::new(
             CliJobSpawner::new(self.cli_bin.clone()).with_config_path(self.config_path.clone()),
         );
-        Arc::new(RunManager::new(
-            self.data_dir.join("runs"),
-            spawner,
-            self.max_concurrency,
-        ))
+        // QE-454 §13.10: the separate evolve-concurrency bound (default 1) + the per-run wall-clock ceiling
+        // (~24h), resolved from the environment (invalid values fall back to the defaults, fail-safe).
+        let max_evolve = std::env::var(ENV_MAX_EVOLVE_CONCURRENCY)
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|&n| n >= 1)
+            .unwrap_or(runs::manager::DEFAULT_MAX_EVOLVE_CONCURRENCY);
+        let max_run_secs = std::env::var(ENV_MAX_RUN_SECS)
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .filter(|&n| n >= 1)
+            .unwrap_or(runs::manager::DEFAULT_MAX_RUN_SECS);
+        Arc::new(
+            RunManager::new(self.data_dir.join("runs"), spawner, self.max_concurrency)
+                .with_evolve_concurrency(max_evolve)
+                .with_run_deadline(Duration::from_secs(max_run_secs)),
+        )
     }
 }
 

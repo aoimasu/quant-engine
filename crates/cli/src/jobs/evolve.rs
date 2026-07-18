@@ -263,6 +263,11 @@ pub fn run_evolve_job(
             champion_dsr: dec(deflation.champion_dsr),
             uncensored_pbo: deflation.uncensored_pbo.map(dec),
         },
+        // QE-454 Phase B: the per-formula tradability/parsimony evidence (§13.5 hard-blocks 5–8) is not
+        // yet emitted by the sandbox evolve path — left absent so the pool serialises byte-identically to a
+        // pre-Phase-B pool. An absent evidence block is a production seal hard-block (every absent stat
+        // blocks); wiring the real per-formula IC/cost/MDL/null evidence is a production-path follow-up.
+        gate_evidence: None,
         lineage: PoolLineage {
             campaign_id: pool_id.clone(),
             seed: params.seed,
