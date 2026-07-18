@@ -354,7 +354,6 @@ _All sixteen delivered — see [`reviewed/`](mds/reviewed/) (qe-434..449)._
 
 | Ticket | Title | Depends on | Status |
 |--------|-------|------------|:------:|
-| [QE-456](./mds/tickets/QE-456.md) | `GET /api/vintages/{id}` vintage-detail read endpoint resliced to EXACTLY what QE-467 persists (composition + weights + gate/deflation evidence + `data_provenance` + holdout-series handle + split/regime) + vintage→run reverse-join — additive, no recompute  *(R1 · backend/api)* | QE-467, QE-257, QE-260 | — |
 | [QE-457](./mds/tickets/QE-457.md) | SPA Vintage Inspector screen (mirrors evolve PoolReview; **provenance banner** + net-of-cost/tradability-led gate card + holdout regime composition + "not paper-confirmed" label; inspection only)  *(R1 · frontend)* | QE-456, QE-467, QE-259 | — |
 | [QE-458](./mds/tickets/QE-458.md) | Steerable-search params (budget / indicator subset / windows) + **gate-monotone whitelist** + **deflation-scaling** (subset cardinality→N, noise-series false-discovery test) + **archive-coverage floor** + regime-coverage invariant + steer-delta into lineage  *(R1 · run-protocol/server/wfo)* | QE-467, QE-260, QE-437, QE-439, QE-451 | — |
 | [QE-459](./mds/tickets/QE-459.md) | SPA steering controls (indicator picker / budget / windows) with blocklisted thresholds shown as fixed guardrail chips  *(R1 · frontend)* | QE-458, QE-261 | — |
