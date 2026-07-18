@@ -42,9 +42,10 @@ pub enum Liquidity {
 /// that DSR cannot deflate** — the bias is systematic (per-fill), not selection noise, so the
 /// absolute-vs-noise-ceiling DSR/PBO/SPA apparatus passes it through undeflated.
 ///
-/// The `maker_rate_is_never_charged_on_the_backtest_path` test guards this: it asserts the current
-/// fill path only ever charges the **taker** rate, so a future change that starts selecting
-/// [`Liquidity::Maker`] is forced to trip it and consciously address the markout.
+/// The `apply_fill_charges_the_taker_rate_not_the_maker_rate` test (in `backtest.rs`) guards this on
+/// the **production** fill path: it drives a real `backtest()` and asserts the charged fee equals the
+/// **taker** rate and never the maker rate, so a future change that starts selecting
+/// [`Liquidity::Maker`] in `apply_fill` is forced to trip it and consciously address the markout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FeeSchedule {
     /// Taker rate (fraction of notional).
@@ -485,14 +486,14 @@ mod tests {
     }
 
     #[test]
-    fn maker_rate_is_never_charged_on_the_backtest_path() {
-        // QE-449 latent-trap guard (maxdama §7.6). The engine is a pure taker today: the fill path
-        // (backtest.rs `apply_fill`, and the `simulate` fixtures here) charges `Liquidity::Taker`
-        // unconditionally, and no code path selects `Liquidity::Maker` (grep-confirmed: only the enum
-        // arm + `maker_is_cheaper_than_taker` reference it). This test asserts the fees on the current
-        // path are the **taker** fees and never the maker fees — so any future maker-rebate change that
-        // starts routing `Liquidity::Maker` fills is forced to trip this guard and consciously add the
-        // paired adverse-selection markout (see the `FeeSchedule` invariant).
+    fn simulate_over_taker_fills_charges_the_taker_rate_only() {
+        // QE-449 latent-trap guard (maxdama §7.6), `simulate` level. This covers the `simulate` event
+        // walker (a dev/test helper — the production selection path is `backtest.rs::apply_fill`, guarded
+        // separately by `apply_fill_charges_the_taker_rate_not_the_maker_rate`). Every fixture fill carries
+        // `Liquidity::Taker`, mirroring `apply_fill`'s unconditional taker role, and no code path selects
+        // `Liquidity::Maker` (grep-confirmed: only the enum arm + `maker_is_cheaper_than_taker` reference
+        // it). Asserts the fees are the **taker** fees and never the maker fees. See the `FeeSchedule`
+        // adverse-selection invariant.
         let events = vec![buy("1", "100"), sell("1", "100")];
         let cfg = FrictionConfig::default();
         let pnl = simulate(&events, &cfg);
