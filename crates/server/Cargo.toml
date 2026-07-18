@@ -87,3 +87,10 @@ dotenvy = "0.15"
 
 [dev-dependencies]
 tempfile.workspace = true
+# QE-467: the sealed-vintage fixture regenerator (`tests/regenerate_fixture.rs`, `#[ignore]`d) builds a
+# `VintageContent` and seals it via the real seal path after a `VINTAGE_FORMAT_VERSION` bump. Dev-only —
+# excluded from the production firewall graph (see `qe-architecture`).
+qe-determinism.workspace = true
+qe-risk.workspace = true
+qe-signal.workspace = true
+rust_decimal.workspace = true

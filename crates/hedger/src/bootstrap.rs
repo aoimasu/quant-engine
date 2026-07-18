@@ -348,6 +348,9 @@ mod tests {
             worst_case_loss: None,
             catalogue: qe_signal::CatalogueIdentity::current(),
             lineage: Lineage::new("cfg", "snap", "commit", vec![]),
+            seal_evidence: qe_vintage::SealEvidence::default(),
+            holdout_series: qe_vintage::HoldoutReturnSeries::default(),
+            provenance: qe_vintage::ResearchProvenance::default(),
         };
         Vintage::seal(content).unwrap()
     }

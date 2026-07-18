@@ -148,6 +148,9 @@ mod tests {
             worst_case_loss: None,
             catalogue,
             lineage: Lineage::new("cfg", "snap", "commit", vec![1]),
+            seal_evidence: crate::SealEvidence::default(),
+            holdout_series: crate::HoldoutReturnSeries::default(),
+            provenance: crate::ResearchProvenance::default(),
         }
     }
 

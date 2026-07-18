@@ -38,7 +38,172 @@ pub mod schema;
 /// - `7` (QE-441): added [`VintageContent::shocks`] (the frozen, content-addressed bar-level scenario-shock
 ///   set that shaped the tail-aware `size_bps` in the single-strategy sizing fitness), riding the lineage
 ///   alongside `slippage` / `sizer`.
-pub const VINTAGE_FORMAT_VERSION: u16 = 7;
+/// - `8` (QE-467): the research-flow persistence foundation — added [`VintageContent::seal_evidence`]
+///   (the gate's own tradability + deflation outputs: DSR/PBO/SPA, realised turnover, `capacity_usd`,
+///   cost-stress `min{1×,2×}` net, and the deferred IC/FDR/uncensored-PBO slots),
+///   [`VintageContent::holdout_series`] (the canonical net-of-cost holdout return series on the DEPLOYED
+///   capacity-capped weights, addressable by [`HoldoutReturnSeries::handle`]), and
+///   [`VintageContent::provenance`] (hashed `data_provenance` + the extended lineage the research flow
+///   needs: holdout split, holdout regime composition, per-holdout consultation count, and steer delta).
+///   The whole schema is defined here; downstream tickets (QE-458/QE-460) **populate** the deferred
+///   fields under this single bump — nobody bumps the version again.
+pub const VINTAGE_FORMAT_VERSION: u16 = 8;
+
+/// The persisted **seal evidence** (QE-467): the gate's own tradability + deflation outputs, carried into
+/// the sealed artefact so every downstream surface (inspector QE-456/457, leaderboard QE-466, flow
+/// QE-460) **reads** — never recomputes — them. Part of the hashed content (content-addressed).
+///
+/// The DSR/PBO/SPA + turnover + `capacity_usd` are the ensemble train gate's own outputs and are
+/// populated on the real seal path. The `Option` fields are schema slots defined here and populated by
+/// the path that actually computes them: `uncensored_pbo`/`ic`/`fdr` are GP/IC-screen concerns (absent on
+/// the normal train path, exactly like `GateSnapshot::uncensored_pbo`), and `cost_stress_net_min` is the
+/// deployed ensemble's `min{1×,2×}` cost-stressed net (design §4.6a).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+pub struct SealEvidence {
+    /// Deflated Sharpe Ratio (QE-131) the DSR criterion evaluated.
+    pub dsr: f64,
+    /// Probability of Backtest Overfitting (CSCV, QE-131).
+    pub pbo: f64,
+    /// White's Reality Check / SPA data-snooping p-value (QE-131).
+    pub spa_pvalue: f64,
+    /// Effective number of trials the DSR deflated against.
+    pub n_trials: u64,
+    /// Realised turnover of the DEPLOYED capacity-capped ensemble over the train window — the exact
+    /// round-trip-notional-per-period figure the sealed capacity model prices with (QE-431/440).
+    pub realised_turnover: f64,
+    /// Modelled deployable capacity in USD of the DEPLOYED book at the target AUM (QE-431/440).
+    pub capacity_usd: f64,
+    /// Cost-stressed net: `min` over friction multipliers `m ∈ {1×,2×}` of the deployed ensemble's
+    /// net-of-cost holdout return (design §4.6a, QE-431/450). `None` on a path that does not run the
+    /// cost-stress sweep.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_stress_net_min: Option<f64>,
+    /// The uncensored PBO the GP/evolve monitor surfaces (QE-454). Absent on the normal (non-evolve) train
+    /// path — populated by the evolve/GP path, matching `GateSnapshot::uncensored_pbo`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uncensored_pbo: Option<f64>,
+    /// Information Coefficient (QE-434 rank-IC) of the admitted factor screen. `None` on paths that do not
+    /// run the IC screen (the ensemble train path) — populated by the IC-screen/evolve path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ic: Option<f64>,
+    /// Benjamini–Hochberg false-discovery level the IC screen admitted at (QE-434). `None` where no IC
+    /// screen ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fdr: Option<f64>,
+}
+
+/// The canonical **net-of-cost holdout return series on the DEPLOYED capacity-capped weights** (QE-438),
+/// persisted per vintage and content-addressed. It is the exact series the leaderboard's cross-vintage
+/// correlation (QE-430 R(N)/Fisher-z) and the inspector consume — **never** gross / equal-weight /
+/// lone-Sharpe. Addressable by [`handle`](Self::handle) so the detail endpoint (QE-456) returns a ref, not
+/// a re-run. The seal writer rounds each return to a hash-stable precision (like `weights`) so it
+/// round-trips byte-identically.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct HoldoutReturnSeries {
+    /// Per-bar net-of-cost returns of the deployed ensemble over the frozen holdout.
+    pub returns: Vec<f64>,
+}
+
+impl HoldoutReturnSeries {
+    /// The content handle: lowercase-hex SHA-256 over the series' canonical JSON — the stable ref a detail
+    /// endpoint returns instead of re-running the backtest.
+    ///
+    /// # Errors
+    /// [`VintageError::Serialize`] if the series cannot be serialised.
+    pub fn handle(&self) -> Result<String, VintageError> {
+        let bytes = serde_json::to_vec(self).map_err(|e| VintageError::Serialize(e.to_string()))?;
+        Ok(hex(&Sha256::digest(&bytes)))
+    }
+}
+
+/// The data provenance of the bars a vintage was trained / validated on (QE-467): whether the pinned
+/// input snapshot is real market data, a synthetic generator's output, or a labelled mix. Hashed into the
+/// vintage id, so a synthetic-derived vintage is no longer indistinguishable from a real one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum DataProvenance {
+    /// Real market data (the default for a train over a real/loaded store).
+    #[default]
+    Real,
+    /// Deterministic synthetic data (the `qe ingest --synthetic` offline generator).
+    Synthetic,
+    /// A labelled mix of real and synthetic coverage — never a silent blend.
+    Mixed,
+}
+
+/// An inclusive-exclusive labelled range (bar timestamps or index labels). Kept as opaque strings so the
+/// schema is format-agnostic — the flow (QE-460) writes the concrete labels.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct TimeRange {
+    /// Inclusive start label.
+    pub start: String,
+    /// Exclusive end label.
+    pub end: String,
+}
+
+/// The frozen holdout split (design §4) the gate consulted, recorded so the verdict's bars are
+/// reproducible from the sealed artefact. Schema defined by QE-467; **populated by QE-460**.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct HoldoutSplit {
+    /// The frozen holdout window (`None` until QE-460 writes it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub holdout_range: Option<TimeRange>,
+    /// The train window disjoint from the holdout (`None` until QE-460 writes it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub train_range: Option<TimeRange>,
+    /// Embargo bars purged between the train window and the holdout (QE-113/117).
+    pub embargo_bars: u64,
+}
+
+/// One regime's share of the holdout window (QE-125): the regime label and how many holdout bars carried
+/// it. The holdout regime composition (design §4) — populated by QE-460.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RegimeShare {
+    /// The regime label (QE-125) the bars were classified into.
+    pub regime: String,
+    /// Number of holdout bars in this regime.
+    pub bars: u64,
+}
+
+/// The steer delta the search recorded (design §6, QE-458): the indicator-subset the campaign steered to
+/// plus the budget knobs. Schema defined by QE-467; **populated by QE-458**.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SteerDelta {
+    /// Hash of the steered indicator subset (which catalogue/evolved indicators were in play).
+    pub indicator_subset_hash: String,
+    /// Search generations the steered budget ran.
+    pub generations: u64,
+    /// Population / variation steps per direction.
+    pub population: u64,
+    /// WFO windows the steered run scored over.
+    pub windows: u64,
+    /// Cross-validation folds the steered run scored over.
+    pub folds: u64,
+}
+
+/// The **extended lineage / provenance block** (QE-467) riding the sealed vintage alongside the resolvable
+/// [`Lineage`] — the "sibling lineage block on `VintageContent`" the ticket permits (so the widely-shared
+/// `qe_determinism::Lineage` stays untouched). Part of the hashed content, so `data_provenance` and every
+/// populated field changes the vintage id.
+///
+/// QE-467 defines the **whole** schema and populates `data_provenance`. The remaining fields are the
+/// research flow's, populated **downstream under this single bump**: QE-460 writes `holdout_split` /
+/// `regime_composition` / `consultation_count`; QE-458 writes `steer_delta`. Nobody bumps the version
+/// again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ResearchProvenance {
+    /// Whether the input data is real, synthetic, or a labelled mix (QE-467).
+    pub data_provenance: DataProvenance,
+    /// The frozen holdout split `{holdout_range, embargo, train_range}` (QE-460).
+    pub holdout_split: HoldoutSplit,
+    /// The holdout regime composition — the regimes the holdout spanned (QE-125 / QE-460).
+    pub regime_composition: Vec<RegimeShare>,
+    /// Per-holdout consultation count — the overlap-keyed budget QE-460 increments (design §4/§11.3).
+    pub consultation_count: u64,
+    /// The steer delta the search recorded (QE-458); `None` for an unsteered vintage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steer_delta: Option<SteerDelta>,
+}
 
 /// The hashed content of a vintage — everything the content hash covers.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -87,6 +252,20 @@ pub struct VintageContent {
     pub catalogue: CatalogueIdentity,
     /// The lineage that produced this vintage (QE-006).
     pub lineage: Lineage,
+    /// The persisted **seal evidence** (QE-467): the gate's own tradability + deflation outputs
+    /// (DSR/PBO/SPA, realised turnover, `capacity_usd`, cost-stress `min{1×,2×}` net, IC/FDR/uncensored-PBO
+    /// slots), carried into the artefact so downstream reads (never recomputes) them. Part of the hashed
+    /// content, so it changes the vintage id.
+    pub seal_evidence: SealEvidence,
+    /// The canonical **net-of-cost holdout return series on the DEPLOYED capacity-capped weights** (QE-438,
+    /// QE-467), content-addressed and addressable by [`HoldoutReturnSeries::handle`]. Part of the hashed
+    /// content, so it changes the vintage id.
+    pub holdout_series: HoldoutReturnSeries,
+    /// The **extended lineage / provenance block** (QE-467): hashed `data_provenance` plus the holdout
+    /// split, holdout regime composition, per-holdout consultation count, and steer delta the research
+    /// flow needs. Schema owned here; deferred fields populated downstream (QE-458/QE-460). Part of the
+    /// hashed content, so it changes the vintage id.
+    pub provenance: ResearchProvenance,
 }
 
 impl VintageContent {
@@ -126,6 +305,38 @@ impl VintageContent {
         if let Some(loss) = self.worst_case_loss {
             if !loss.is_finite() || loss < 0.0 {
                 return Err(VintageError::InvalidWorstCaseLoss { value: loss });
+            }
+        }
+        // QE-467: a non-finite holdout return would serialise to JSON `null` and fail re-load — caught at
+        // seal time, like the weights, so a corrupt series never reaches the leaderboard/inspector.
+        for (index, &value) in self.holdout_series.returns.iter().enumerate() {
+            if !value.is_finite() {
+                return Err(VintageError::NonFiniteHoldoutReturn { index, value });
+            }
+        }
+        // QE-467: the persisted seal-evidence figures must be finite (same round-trip reason). The
+        // `Option` slots are checked only when populated.
+        let ev = &self.seal_evidence;
+        let mut evidence_fields = vec![
+            ("dsr", ev.dsr),
+            ("pbo", ev.pbo),
+            ("spa_pvalue", ev.spa_pvalue),
+            ("realised_turnover", ev.realised_turnover),
+            ("capacity_usd", ev.capacity_usd),
+        ];
+        for (name, opt) in [
+            ("cost_stress_net_min", ev.cost_stress_net_min),
+            ("uncensored_pbo", ev.uncensored_pbo),
+            ("ic", ev.ic),
+            ("fdr", ev.fdr),
+        ] {
+            if let Some(v) = opt {
+                evidence_fields.push((name, v));
+            }
+        }
+        for (field, value) in evidence_fields {
+            if !value.is_finite() {
+                return Err(VintageError::NonFiniteEvidence { field, value });
             }
         }
         Ok(())
@@ -332,6 +543,22 @@ pub enum VintageError {
         /// The offending value.
         value: f64,
     },
+    /// A holdout-series return is not finite (QE-467) — would serialise to JSON `null` and fail re-load.
+    #[error("vintage holdout return {index} is not finite: {value}")]
+    NonFiniteHoldoutReturn {
+        /// Index of the offending return.
+        index: usize,
+        /// The non-finite value.
+        value: f64,
+    },
+    /// A persisted seal-evidence figure is not finite (QE-467).
+    #[error("vintage seal evidence `{field}` is not finite: {value}")]
+    NonFiniteEvidence {
+        /// The offending evidence field name.
+        field: &'static str,
+        /// The non-finite value.
+        value: f64,
+    },
     /// The persisted catalogue identity does not match this build's catalogue **exactly** (QE-402): a
     /// catalogue reorder or a same-width `CATALOGUE_VERSION` bump. Loading is refused — the sealed
     /// genomes would silently address different indicators.
@@ -441,6 +668,20 @@ mod tests {
             worst_case_loss: Some(0.28), // QE-130 stress figure
             catalogue: CatalogueIdentity::current(), // QE-402 pinned identity
             lineage: lineage(),
+            seal_evidence: SealEvidence {
+                dsr: 0.8,
+                pbo: 0.1,
+                spa_pvalue: 0.02,
+                n_trials: 64,
+                realised_turnover: 0.5,
+                capacity_usd: 1_500_000.0,
+                cost_stress_net_min: Some(0.12),
+                ..SealEvidence::default()
+            },
+            holdout_series: HoldoutReturnSeries {
+                returns: vec![0.01, -0.02, 0.03],
+            },
+            provenance: ResearchProvenance::default(),
         }
     }
 
@@ -530,8 +771,8 @@ mod tests {
         // set (e.g. a heavier gap) yields a different vintage id — the shocks that shaped `size_bps` are
         // pinned into the reproducible lineage (content-addressed / frozen-per-vintage).
         assert_eq!(
-            VINTAGE_FORMAT_VERSION, 7,
-            "the shocks field bumped the format version"
+            VINTAGE_FORMAT_VERSION, 8,
+            "QE-467 bumped the format version to 8 (seal evidence + holdout series + provenance)"
         );
         let base = Vintage::seal(content()).unwrap();
         let mut other = content();
@@ -551,6 +792,129 @@ mod tests {
         shocked.write(&mut buf).unwrap();
         let loaded = Vintage::load(buf.as_slice()).unwrap();
         assert_eq!(loaded.content.shocks, shocked.content.shocks);
+    }
+
+    #[test]
+    fn seal_evidence_is_part_of_the_hash_and_round_trips() {
+        // QE-467: the persisted seal evidence rides the hashed content, so a different DSR (or any figure)
+        // yields a different vintage id — downstream reads it, so it must be pinned into the lineage.
+        let base = Vintage::seal(content()).unwrap();
+        let mut other = content();
+        other.seal_evidence.dsr = 1.9; // vs 0.8
+        assert_ne!(
+            Vintage::seal(other).unwrap().content_hash,
+            base.content_hash
+        );
+
+        // A different capacity_usd also moves the id.
+        let mut cap = content();
+        cap.seal_evidence.capacity_usd = 42.0;
+        assert_ne!(Vintage::seal(cap).unwrap().content_hash, base.content_hash);
+
+        // And the whole block round-trips through disk verify.
+        let mut buf: Vec<u8> = Vec::new();
+        base.write(&mut buf).unwrap();
+        let loaded = Vintage::load(buf.as_slice()).unwrap();
+        assert_eq!(loaded.content.seal_evidence, base.content.seal_evidence);
+        assert_eq!(loaded.content.seal_evidence.cost_stress_net_min, Some(0.12));
+
+        // A non-finite evidence figure is rejected at seal time.
+        let mut bad = content();
+        bad.seal_evidence.capacity_usd = f64::INFINITY;
+        assert!(matches!(
+            Vintage::seal(bad),
+            Err(VintageError::NonFiniteEvidence {
+                field: "capacity_usd",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn holdout_series_is_part_of_the_hash_and_addressable() {
+        // QE-467: the canonical net-of-cost holdout series (on deployed weights) rides the hashed content,
+        // so a different series yields a different vintage id.
+        let base = Vintage::seal(content()).unwrap();
+        let mut other = content();
+        other.holdout_series.returns = vec![0.05, 0.05, 0.05];
+        let changed = Vintage::seal(other).unwrap();
+        assert_ne!(changed.content_hash, base.content_hash);
+
+        // The handle is a stable 64-hex ref (what the detail endpoint returns instead of a re-run), and it
+        // is sensitive to the series contents.
+        let handle = base.content.holdout_series.handle().unwrap();
+        assert_eq!(handle.len(), 64);
+        assert!(handle.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(handle, base.content.holdout_series.handle().unwrap());
+        assert_ne!(handle, changed.content.holdout_series.handle().unwrap());
+
+        // It round-trips through disk verify.
+        let mut buf: Vec<u8> = Vec::new();
+        base.write(&mut buf).unwrap();
+        let loaded = Vintage::load(buf.as_slice()).unwrap();
+        assert_eq!(loaded.content.holdout_series, base.content.holdout_series);
+
+        // A non-finite holdout return is rejected at seal time.
+        let mut bad = content();
+        bad.holdout_series.returns = vec![0.01, f64::NAN];
+        assert!(matches!(
+            Vintage::seal(bad),
+            Err(VintageError::NonFiniteHoldoutReturn { index: 1, .. })
+        ));
+    }
+
+    #[test]
+    fn provenance_is_part_of_the_hash_and_downstream_fields_round_trip() {
+        // QE-467: flipping data_provenance real→synthetic changes the vintage id — a synthetic-derived
+        // vintage is no longer indistinguishable from a real one.
+        let base = Vintage::seal(content()).unwrap();
+        let mut synth = content();
+        synth.provenance.data_provenance = DataProvenance::Synthetic;
+        assert_ne!(
+            Vintage::seal(synth).unwrap().content_hash,
+            base.content_hash
+        );
+
+        // The deferred fields (schema owned here, populated downstream) can be written and round-trip —
+        // proving QE-458/QE-460 can populate them under THIS bump without another version change.
+        let mut populated = content();
+        populated.provenance.holdout_split = HoldoutSplit {
+            holdout_range: Some(TimeRange {
+                start: "2021-06-01".to_string(),
+                end: "2021-07-01".to_string(),
+            }),
+            train_range: Some(TimeRange {
+                start: "2020-01-01".to_string(),
+                end: "2021-05-01".to_string(),
+            }),
+            embargo_bars: 24,
+        };
+        populated.provenance.regime_composition = vec![
+            RegimeShare {
+                regime: "trend".to_string(),
+                bars: 300,
+            },
+            RegimeShare {
+                regime: "chop".to_string(),
+                bars: 120,
+            },
+        ];
+        populated.provenance.consultation_count = 3;
+        populated.provenance.steer_delta = Some(SteerDelta {
+            indicator_subset_hash: "a".repeat(64),
+            generations: 40,
+            population: 12,
+            windows: 6,
+            folds: 4,
+        });
+        let sealed = Vintage::seal(populated).unwrap();
+        assert_ne!(sealed.content_hash, base.content_hash);
+
+        let mut buf: Vec<u8> = Vec::new();
+        sealed.write(&mut buf).unwrap();
+        let loaded = Vintage::load(buf.as_slice()).unwrap();
+        assert_eq!(loaded.content.provenance, sealed.content.provenance);
+        assert_eq!(loaded.content.provenance.consultation_count, 3);
     }
 
     #[test]

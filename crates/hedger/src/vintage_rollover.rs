@@ -203,6 +203,9 @@ mod tests {
                 format!("commit-{id}"),
                 vec![seed],
             ),
+            seal_evidence: qe_vintage::SealEvidence::default(),
+            holdout_series: qe_vintage::HoldoutReturnSeries::default(),
+            provenance: qe_vintage::ResearchProvenance::default(),
         };
         Vintage::seal(content).unwrap()
     }

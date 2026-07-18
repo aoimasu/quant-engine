@@ -553,6 +553,65 @@ pub fn run_train_job(
     let sizer =
         PortfolioSizer::from_kelly(fractional_kelly(&in_sample_returns, DEFAULT_KELLY_FRACTION));
 
+    // ---- QE-467: persist the seal evidence + the canonical net-of-cost holdout series ----------------
+    // Carry the gate's OWN outputs (and cheap functions of the exact DEPLOYED capacity-capped object) into
+    // the sealed artefact so every downstream surface reads — never recomputes — them. `evaluate_g1`, the
+    // seal predicate, and the gate thresholds are untouched; this only persists what the gate produced.
+    // Deployed-book modelled capacity ($) at TARGET_AUM_USD — the sum of the same per-member capacities
+    // the sealed weights were water-filled against (`strategy_capacities`), not equal-weight.
+    let deployed_capacities = strategy_capacities(&chromosomes, &selected_bt, train_adv_notional);
+    // Round to whole dollars so the figure is REPRODUCIBLE in the hashed content. `hash_stable` rounds via
+    // `value * 1e12`; for a multi-million-dollar magnitude that product exceeds f64's exact-integer range
+    // (2^53 ≈ 9.0e15), so its `.round()` operates on already-imprecise low bits and yields a
+    // non-reproducible result — unfit for a content hash. (serde_json itself round-trips any finite f64 via
+    // ryu; the instability is in `hash_stable`, not the JSON codec.) An integer-valued f64 (≪ 2^53) is
+    // exact and stable, which is ample precision for a capacity figure.
+    let capacity_usd = deployed_capacities.iter().sum::<f64>().round();
+    // Realised turnover of the deployed ensemble: weight-summed per-member round-trip notional per period —
+    // the exact turnover the capacity model prices with.
+    let realised_turnover = hash_stable(ensemble_turnover(&chromosomes, &selected_bt, &weights));
+    // Cost-stressed net (design §4.6a): `min` over friction multipliers m ∈ {1×,2×} of the DEPLOYED
+    // ensemble's total net-of-cost holdout return. 1× is the honest `train_cfg`; 2× scales the assumed
+    // fees + slippage only (funding is a realised cashflow and untouched). COMPUTED AT SEAL as a cheap
+    // deterministic function of the exact deployed weights — not captured from a gate field: cost-stress is
+    // not a G1 criterion, so persisting it is evidence recording, not re-deciding the gate.
+    let net_1x: f64 = holdout_returns.iter().sum();
+    let cfg_2x = BacktestConfig {
+        friction: train_cfg.friction.with_multiplier(Decimal::from(2)),
+        ..train_cfg.clone()
+    };
+    let net_2x: f64 = combine(&chromosomes, &weights, holdout_bars, &cfg_2x)
+        .iter()
+        .sum();
+    let seal_evidence = qe_vintage::SealEvidence {
+        dsr: hash_stable(robustness.dsr),
+        pbo: hash_stable(robustness.pbo),
+        spa_pvalue: hash_stable(robustness.spa_pvalue),
+        n_trials: n_trials as u64,
+        realised_turnover,
+        capacity_usd,
+        cost_stress_net_min: Some(hash_stable(net_1x.min(net_2x))),
+        // The normal (non-evolve) train path does not run the GP uncensored-PBO monitor or the IC/FDR
+        // factor screen — schema slots defined in QE-467, populated by the evolve/IC-screen path, exactly
+        // like `GateSnapshot::uncensored_pbo` is `None` here.
+        uncensored_pbo: None,
+        ic: None,
+        fdr: None,
+    };
+    // The canonical net-of-cost holdout series on the DEPLOYED capacity-capped weights (QE-438), rounded to
+    // a hash-stable precision so it round-trips byte-identically (same rule as `weights`).
+    let holdout_series = qe_vintage::HoldoutReturnSeries {
+        returns: holdout_returns.iter().map(|&r| hash_stable(r)).collect(),
+    };
+    // The extended lineage / provenance block (QE-467). This train job runs a deterministic offline search
+    // over the loaded store, so the data provenance is `Real`; the holdout split / regime composition /
+    // consultation count / steer delta are the research flow's fields, populated downstream (QE-458/QE-460)
+    // under this same bump.
+    let provenance = qe_vintage::ResearchProvenance {
+        data_provenance: qe_vintage::DataProvenance::Real,
+        ..qe_vintage::ResearchProvenance::default()
+    };
+
     let content = VintageContent {
         format_version: VINTAGE_FORMAT_VERSION,
         vintage_id: vintage_id.clone(),
@@ -574,6 +633,9 @@ pub fn run_train_job(
         // `catalogue_schema()` the search/seal ran against, so this is the honest identity.
         catalogue: qe_signal::CatalogueIdentity::from_schema(&schema),
         lineage: params.lineage.clone(),
+        seal_evidence,
+        holdout_series,
+        provenance,
     };
     let vintage = Vintage::seal(content)?;
     let content_hash = vintage.content_hash.clone();
@@ -780,6 +842,27 @@ fn strategy_capacities(
             )
         })
         .collect()
+}
+
+/// The deployed ensemble's realised turnover (QE-467): the weight-summed per-member round-trip notional
+/// per period `Σ_c w_c · (trades_c · 2 · size_frac_c / n_c)` — the exact turnover the capacity model
+/// (`strategy_capacities`) prices each member with, aggregated onto the deployed weights. Persisted as
+/// seal evidence so the leaderboard/inspector read it instead of recomputing.
+fn ensemble_turnover(
+    genomes: &[Genome],
+    bts: &[qe_wfo::backtest::BacktestResult],
+    weights: &[f64],
+) -> f64 {
+    genomes
+        .iter()
+        .zip(bts)
+        .zip(weights)
+        .map(|((g, bt), &w)| {
+            let n = bt.returns.len().max(1) as f64;
+            let size_frac = f64::from(g.risk.size_bps) / BPS_DENOMINATOR;
+            w * (bt.trades as f64 * 2.0 * size_frac) / n
+        })
+        .sum()
 }
 
 /// Representative rolling ADV in **dollars** over the train window (QE-440): the mean per-bar
