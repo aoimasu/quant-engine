@@ -72,6 +72,11 @@ fn ensemble_and_gate_wire_are_frozen() {
             dsr: Some(0.8),
             spa_pvalue: Some(0.03),
             n_trials: 12,
+            // QE-454 Phase B golden-safety: the three GP-deflation fields are absent-by-default, so the
+            // `gate` wire bytes are UNCHANGED (this frozen wire string is byte-identical to pre-Phase-B).
+            uncensored_pbo: None,
+            variance_trials: None,
+            distinct_evaluations: None,
         },
         r#"{"t":"gate","pct":85,"stage":"gate","promoted":true,"failed":[],"in_sample_sharpe":1.5,"holdout_sharpe":1.1,"dsr":0.8,"spa_pvalue":0.03,"n_trials":12}"#,
     );

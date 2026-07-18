@@ -464,6 +464,23 @@ impl AuditLog {
             .find(|e| e.action == AuditAction::Launch && e.subject_hash == pool_id)
             .map(|e| e.actor_email.clone())
     }
+
+    /// The launcher of the campaign `run_id`, resolved from the `launch` entry bound to that **run**
+    /// (`run_id == run_id`). QE-454 Phase B carry-forward #1: the live evolve-launch entry is written
+    /// **run-bound** (`subject_hash = ""`, `run_id = <uuid>`), so `seal_allowed` resolves the launcher by
+    /// the chain `pool_id → run → launch entry` and passes it — never `None` — to [`derive_signoff`], so
+    /// the separation-of-duties clause fires on the LIVE path (not only in tests). `None` when no `launch`
+    /// entry carries that run id.
+    #[must_use]
+    pub fn launcher_for_run(entries: &[AuditEntry], run_id: &str) -> Option<String> {
+        if run_id.is_empty() {
+            return None;
+        }
+        entries
+            .iter()
+            .find(|e| e.action == AuditAction::Launch && e.run_id == run_id)
+            .map(|e| e.actor_email.clone())
+    }
 }
 
 /// A shared, cheaply-cloneable handle to the audit log.

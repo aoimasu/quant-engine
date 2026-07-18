@@ -93,6 +93,16 @@ impl Revocations {
         self.revoked.contains_key(pool_hash)
     }
 
+    /// Retain only the **non-revoked** `pool_hash`es from `pool_hashes` (order-preserving). The drop-in
+    /// primitive the QE-454 AC5 live-path filters use: the server read/seal paths already gate on
+    /// [`is_revoked`], and the G1/promotion + evolved-catalogue activation paths (which do not yet consume
+    /// pools — "runtime never loads a pool") reuse this once they activate an evolved pool, so a revoked
+    /// pool becomes inert on the live path **without** rewriting history (design §13.9).
+    #[must_use]
+    pub fn retain_active<'a>(&self, pool_hashes: &'a [String]) -> Vec<&'a String> {
+        pool_hashes.iter().filter(|h| !self.is_revoked(h)).collect()
+    }
+
     /// Record a revocation (idempotent by `pool_hash` — a re-revoke overwrites with the latest record).
     pub fn insert(&mut self, record: RevocationRecord) {
         self.revoked.insert(record.pool_hash.clone(), record);
@@ -164,5 +174,21 @@ mod tests {
         let bytes = rev.to_json().unwrap();
         let back = Revocations::from_json(&bytes).unwrap();
         assert_eq!(back, rev);
+    }
+
+    #[test]
+    fn retain_active_drops_revoked_pool_hashes_order_preserving() {
+        let mut rev = Revocations::new();
+        rev.insert(RevocationRecord {
+            pool_id: "p".to_owned(),
+            pool_hash: "b".repeat(64),
+            revoked_by: "a@x.io".to_owned(),
+            ts_ms: 1,
+            revoke_entry_hash: "c".repeat(64),
+        });
+        let hashes = vec!["a".repeat(64), "b".repeat(64), "z".repeat(64)];
+        let active = rev.retain_active(&hashes);
+        // The revoked "b…" is dropped; the others survive in order.
+        assert_eq!(active, vec![&hashes[0], &hashes[2]]);
     }
 }

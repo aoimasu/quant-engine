@@ -37,6 +37,7 @@
 //!
 //! A clean DSR/PBO/SPA is evidence the *selection* was honest — never proof the *inputs* were.
 
+pub mod basis;
 pub mod dsr;
 pub mod ic;
 pub mod nulls;
@@ -47,6 +48,10 @@ pub mod stats;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub use basis::{
+    basis_satisfied, deflation_basis_satisfied, missing_basis_prereqs, DEFLATION_BASIS_VERSION,
+    REQUIRED_DEFLATION_BASIS,
+};
 pub use dsr::{
     deflated_sharpe_ratio, effective_trials, expected_max_sharpe, expected_max_sharpe_ln,
     probabilistic_sharpe_ratio, trial_sharpe_variance,

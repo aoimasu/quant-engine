@@ -162,6 +162,17 @@ pub struct GateSnapshot {
     pub spa_pvalue: Option<f64>,
     /// Effective number of trials the DSR deflated against.
     pub n_trials: usize,
+    /// QE-454 Phase B (design §13.5 "displayed = enforced = evidenced"): the **uncensored PBO** the GP/evolve
+    /// monitor surfaces. **Absent-by-default** (`skip_serializing_if`) — the normal (non-evolve) train run
+    /// leaves it `None`, so `GateSnapshot`/`TrainProgress`/`meta.json` serialise byte-identically.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uncensored_pbo: Option<f64>,
+    /// QE-454 Phase B: the uncensored Sharpe-dispersion population size. Absent-by-default (normal path `None`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variance_trials: Option<u64>,
+    /// QE-454 Phase B: distinct-canonical formulas evaluated (QE-439 GP trial basis). Absent-by-default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub distinct_evaluations: Option<u64>,
 }
 
 /// The rich training progress a `train` run exposes for polling (QE-261). Holds the **latest** of each

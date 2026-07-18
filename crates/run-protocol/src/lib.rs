@@ -123,6 +123,19 @@ pub enum ProgressLine {
         spa_pvalue: Option<f64>,
         /// Effective number of trials the DSR deflated against.
         n_trials: usize,
+        /// QE-454 Phase B (design §13.5 "displayed = enforced = evidenced"): the **uncensored PBO** the
+        /// GP/evolve monitor surfaces. **Absent-by-default** (`skip_serializing_if`) — the normal train
+        /// path emits `None`, so its `gate` line + `meta.json` are byte-identical to pre-Phase-B.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        uncensored_pbo: Option<f64>,
+        /// QE-454 Phase B: the uncensored Sharpe-dispersion population size (paired with `distinct_evaluations`
+        /// so a censored population is visible). Absent-by-default (normal train path emits `None`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        variance_trials: Option<u64>,
+        /// QE-454 Phase B: distinct-canonical formulas evaluated (the QE-439 GP trial basis). Absent-by-default
+        /// (normal train path emits `None`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        distinct_evaluations: Option<u64>,
     },
     /// Terminal success: the artefact filename written into the run dir.
     Done {

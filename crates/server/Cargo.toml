@@ -36,6 +36,15 @@ qe-vintage.workspace = true
 # (no `qe-runtime`/`qe-venue` edge — runtime never loads a pool), so this edge is firewall-legal and the
 # `qe-server` firewall rule provably covers it (crates/architecture/tests/firewall.rs).
 qe-formula-pool.workspace = true
+# QE-454 Phase B: the `DEFLATION_BASIS_VERSION` prerequisite const (§13.6 barrier 1) the production-launch
+# check + the server-authoritative `seal_allowed` predicate gate on. `qe-validation` is a downstream stats
+# leaf (deps: qe-determinism only — no `qe-wfo`/`qe-ensemble`/`qe-runtime`/`qe-venue`), so this edge is
+# firewall-legal (the `qe-server` firewall rule provably covers it — crates/architecture/tests/firewall.rs).
+qe-validation.workspace = true
+# QE-454 Phase B: the seal predicate compares the pool's string-serialised `Decimal` deflation/tradability
+# bars against the hard-block thresholds (0.5 PBO / 0.95 DSR). `rust_decimal` is the workspace money/decimal
+# type already pervasive across the engine leaves — firewall-neutral.
+rust_decimal.workspace = true
 # QE-406: the shared run protocol — the `ProgressLine` parse type + the `BacktestParams`/`TrainParams`
 # wire DTOs (re-exported from `runs::model`). A pure serde leaf, so this edge is firewall-neutral.
 qe-run-protocol.workspace = true

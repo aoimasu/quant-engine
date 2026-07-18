@@ -392,10 +392,13 @@ async fn illegal_seal_before_approve_is_rejected() {
     );
 }
 
-/// LOAD-BEARING: a `production`-mode pool's `/seal` is refused with the structured governance-gated `409`,
-/// and the pool is **never** sealed. (Approve first, to prove the refusal is the seal gate, not the edge.)
+/// LOAD-BEARING (QE-454 Phase B): a `production`-mode pool without the dual sign-off / per-formula evidence
+/// / a resolved launcher is refused by the server-authoritative `seal_allowed` predicate with a **named
+/// blocker list** (`409`), and the pool is **never** sealed. (Approve first, to prove the refusal is the
+/// seal predicate, not the lifecycle edge.) The richer happy-path + per-hard-block coverage lives in
+/// `audit_governance.rs` (which wires a persistent-key audit log).
 #[tokio::test]
-async fn production_seal_is_fail_closed_until_qe454() {
+async fn production_seal_without_signoffs_is_blocked_with_named_blockers() {
     let tmp = TempDir::new().unwrap();
     let artifacts = tmp.path().join("artifacts");
     let data = tmp.path().join("data");
@@ -403,29 +406,37 @@ async fn production_seal_is_fail_closed_until_qe454() {
     write_pool(&artifacts, &sealed_pool("pool-prod", "production"));
     let (app, _m) = build_app(&data, &artifacts, &script, roles_with_approver());
 
-    // Approve succeeds (only /seal is fail-closed for production).
+    // Approve succeeds (only /seal runs the predicate).
     let (status, body) = post(&app, "/api/formula-pools/pool-prod/approve").await;
     assert_eq!(status, StatusCode::OK, "approve prod: {body}");
     assert_eq!(body["lifecycle"], "approved");
 
-    // Seal is REFUSED with the structured governance-gated error.
+    // Seal is REFUSED by the predicate with a named blocker list.
     let (status, body) = post(&app, "/api/formula-pools/pool-prod/seal").await;
     assert_eq!(
         status,
         StatusCode::CONFLICT,
         "production seal must 409: {body}"
     );
-    assert_eq!(body["mode"], "production");
+    let blockers = body["blockers"].as_array().expect("named blocker list");
+    let names: Vec<&str> = blockers.iter().filter_map(|b| b.as_str()).collect();
+    // The fixture has no dual sign-off, no per-formula evidence, and a censored dispersion population.
     assert!(
-        body["error"].as_str().unwrap().contains("QE-454"),
-        "governance-gated error names the QE-454 boundary: {body}"
+        names.contains(&"launcher_unresolved")
+            || names.contains(&"insufficient_distinct_approver_signoffs"),
+        "must block on the SoD/launcher clause: {names:?}"
     );
+    assert!(
+        names.contains(&"hb5_8_per_formula_evidence_absent"),
+        "must block on absent per-formula evidence: {names:?}"
+    );
+    assert!(!body["evidence_hash"].as_str().unwrap_or("").is_empty());
 
     // The pool is NOT sealed — it stays `Approved`.
     let (_, detail) = get(&app, "/api/formula-pools/pool-prod").await;
     assert_eq!(
         detail["lifecycle"], "approved",
-        "a production pool never reaches Sealed in Phase B"
+        "a blocked production pool never reaches Sealed"
     );
 }
 
