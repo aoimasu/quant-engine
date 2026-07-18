@@ -71,15 +71,39 @@ trigger, monitor, and review runs in a browser.
 # 1) build the SPA
 cd web && npm ci && npm run build          # → web/dist
 
-# 2) run the server (serves web/dist at / and the API at /api)
-QE_SERVER_STATIC_DIR=web/dist \
-QE_ADMIN_ALLOWED_EMAILS=you@example.com \
-QE_GOOGLE_CLIENT_ID=… QE_GOOGLE_CLIENT_SECRET=… QE_GOOGLE_REDIRECT_URI=… QE_SESSION_SECRET=… \
-    cargo run -p qe-server
+# 2) configure — copy the template and fill in your values (Google OAuth client, allowlisted email)
+cp .env.example .env                       # then edit .env
+
+# 3) run the server (serves web/dist at / and the API at /api); loads .env on startup
+cargo run -p qe-server --features http
 ```
 
-Sign in with Google (allowlisted email) → trigger/monitor/review backtest & training runs.
+`qe-server` loads a **`.env`** file at startup (via `dotenvy`) before resolving any config, so the
+copied-and-filled `.env.example` is picked up automatically — no `export`/inline env needed. Real
+process-env vars still win over `.env`, so you can override one value inline
+(`QE_SERVER_ADDR=127.0.0.1:9000 cargo run -p qe-server --features http`).
+
+Notes for local dev:
+
+- **`--features http` is required** for Google sign-in to complete — the default build wires a
+  disabled verifier (the server still boots and serves health/static, but login cannot finish).
+- Default bind is **`127.0.0.1:8080`** (`QE_SERVER_ADDR` to change). On loopback `QE_SESSION_SECRET`
+  is optional (an ephemeral secret is generated); it is only required off-loopback (fail-closed).
+- Set your Google OAuth redirect URI to `http://127.0.0.1:8080/auth/callback` and add your email to
+  `QE_ADMIN_ALLOWED_EMAILS` (empty ⇒ nobody can sign in). `.env.example` also pre-points the read-side
+  market store at the committed sample store so read APIs work offline.
+- To exercise the evolve/governance seal flow, also set `QE_ROLE_{OPERATORS,APPROVERS,ADMINS}` and a
+  persistent `QE_AUDIT_SIGNING_KEY` (production sealing stays fail-closed by design either way).
+
+Sign in with Google (allowlisted email) → trigger/monitor/review backtest, training & **evolve** runs.
 All state is paper/offline; there is no live order submission.
+
+> **Two env-file conventions — pick by run mode.** **`.env`** (from `.env.example`) is for the local
+> `cargo run -p qe-server` above — loaded in-process by `dotenvy`, loopback defaults. **`.env.server`**
+> (from `.env.server.example`) is for the **Docker Compose** admin image below — loaded by Compose's
+> `--env-file`, binds `0.0.0.0` so `QE_SESSION_SECRET` + an https redirect URI are required. Both feed
+> the same `QE_*` config; the `QE_OAUTH_GOOGLE_*` and `QE_GOOGLE_*` names are interchangeable aliases.
+> Both `.env` and `.env.server` are gitignored — never commit the filled-in files.
 
 ## Configuration (12-factor)
 
@@ -101,6 +125,10 @@ hard-coded absolute paths:
 
 Point them anywhere (a mounted volume, a scratch dir) via config or `QE_STORAGE__*` env vars.
 
+`qe-server` additionally loads a **`.env`** file from the repo root on startup (see the Admin UI
+section); process-env vars take precedence over `.env`. The CLI does not auto-load `.env` — pass
+`--config` or `QE_`-prefixed vars directly.
+
 ## Docker (dev/prod parity)
 
 The optional `Dockerfile` builds the workspace and runs the **same `qe` binary** as the local run:
@@ -112,6 +140,17 @@ docker run --rm -v "$PWD/data:/app/data" quant-engine version
 ```
 
 State is written to the mounted `/app/data` volume; no platform-specific assumptions.
+
+For the **admin server + SPA image**, `docker-compose.server.yml` runs the same `qe-server` behind a
+mounted `./data` volume; supply its environment via `.env.server` (copy `.env.server.example`):
+
+```sh
+cp .env.server.example .env.server         # fill in the OAuth + session values (see docs/deploy)
+docker compose --env-file .env.server -f docker-compose.server.yml up --build
+```
+
+The container binds `0.0.0.0`, so `QE_SESSION_SECRET` and an https redirect URI are required
+(fail-closed) — see `docs/deploy/README.md`.
 
 ## Workspace
 
