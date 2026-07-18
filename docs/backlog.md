@@ -322,6 +322,43 @@ _All sixteen delivered — see [`reviewed/`](mds/reviewed/) (qe-434..449)._
 
 ---
 
+<a id="research-flow"></a>
+# Research flow (design QE-455)
+
+> **Spec of record:** [`docs/architecture/qe-455-research-flow-design.md`](./architecture/qe-455-research-flow-design.md)
+> — **steer the already-deflated in-run search, do not loop a best-of-N around it.** The `train` MAP-Elites/WFO
+> search + `ensemble` DE + `evolve` GP already *are* the "mutate indicator sets to find the best combined
+> vintage" engine; this epic adds the **controls to steer & inspect** it (budget, indicator subset,
+> windows — behind a compiled gate-monotone whitelist), a **server-owned composite `RunSpec::Flow`**
+> (train→backtest in one supervised, atomic, resumable lifecycle over a **frozen OOS holdout**), a **real-`http`
+> ingest thin slice** (one exchange, few instruments, provenance-tagged) alongside `qe ingest --synthetic`, and
+> the missing **vintage inspector + leaderboard**. Produced by a five-discipline panel interviewing the owner
+> (2026-07-18).
+>
+> **Dominant guardrail:** an **outer genetic loop across runs / auto-selector over the leaderboard is
+> explicitly REJECTED** as overfitting. No steer knob may relax a G1 threshold (cost-stress / turnover /
+> capacity / DSR-PBO / holdout-embargo are compiled floors, off the whitelist); the holdout is frozen and
+> recorded in lineage; the leaderboard is inspection, not selection; **promotion stays through the existing
+> per-run G1 gate + seal.** Additive over the QE-430..454 deflation backbone; not new spec features; does not
+> change the P0–P2 gates. Rollout **R1** (inspect & steer, no engine change) → **R2** (composite flow) → **R3**
+> (real ingest, the long pole).
+
+| Ticket | Title | Depends on | Status |
+|--------|-------|------------|:------:|
+| [QE-456](./mds/tickets/QE-456.md) | `GET /api/vintages/{id}` vintage-detail read endpoint (composition → indicators + weights + G1 gate/deflation snapshot + holdout split) — additive, no engine change  *(R1 · backend/api)* | QE-257, QE-260 | — |
+| [QE-457](./mds/tickets/QE-457.md) | SPA Vintage Inspector screen (mirrors evolve PoolReview; net-of-cost/tradability-led gate card; inspection only)  *(R1 · frontend)* | QE-456, QE-259 | — |
+| [QE-458](./mds/tickets/QE-458.md) | Steerable-search params (budget / indicator subset / windows) + the **gate-monotone whitelist guardrail** — a steered run cannot seal a vintage the un-steered gate rejects  *(R1 · run-protocol/server/wfo)* | QE-260, QE-437, QE-451 | — |
+| [QE-459](./mds/tickets/QE-459.md) | SPA steering controls (indicator picker / budget / windows) with blocklisted thresholds shown as fixed guardrail chips  *(R1 · frontend)* | QE-458, QE-261 | — |
+| [QE-460](./mds/tickets/QE-460.md) | `RunSpec::Flow` composite run-kind: server-owned train→backtest sequencing, deterministic vintage handoff, **frozen OOS holdout** carved once + recorded in lineage  *(R2 · run-protocol/server)* | QE-452, QE-419, QE-458 | — |
+| [QE-461](./mds/tickets/QE-461.md) | Flow supervision: dedicated concurrency lane + resume-from-sealed-vintage checkpoint + authorised halt (runs are terminal 4-state today)  *(R2 · backend/orchestration)* | QE-460, QE-407 | — |
+| [QE-462](./mds/tickets/QE-462.md) | SPA single stepped Flow page (configure train+backtest+steer once → run)  *(R2 · frontend)* | QE-460, QE-459 | — |
+| [QE-463](./mds/tickets/QE-463.md) | Real `http` ingest decoder for one exchange (Binance USDT-M): incremental / resumable / idempotent historical download behind the default-off `http` feature  *(R3 · ingest — the long pole)* | QE-253 | — |
+| [QE-464](./mds/tickets/QE-464.md) | `ingest` run-kind + `POST /api/ingest` trigger (instruments / range / fetch-all) + **real-vs-synthetic provenance** on the store/coverage  *(R3 · server/storage/ingest)* | QE-463, QE-257 | — |
+| [QE-465](./mds/tickets/QE-465.md) | SPA ingest-trigger screen + **provenance column** in MarketData  *(R3 · frontend)* | QE-464 | — |
+| [QE-466](./mds/tickets/QE-466.md) | Vintage **leaderboard/comparison** surface: rank sealed vintages on net-of-cost / capacity-at-size / cross-vintage correlation (NOT gross Sharpe) + steer diffs — **INFORMATIONAL, introduces no best-of-N selection**; promotion stays via the existing gate/seal  *(R1 · backend/frontend)* | QE-456, QE-457 | — |
+
+---
+
 # Phase 3 — Live, attribution & ops   *(gated by G2; live capital gated by G3)*
 
 | Ticket | Title | Depends on | Status |
