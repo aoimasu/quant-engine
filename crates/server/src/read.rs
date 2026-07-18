@@ -252,22 +252,26 @@ fn build_detail(repo: &VintageRepository, store: &RunStore, id: &str) -> DetailO
     };
     let primary_run = producing_runs.first().map(|r| r.run_id.clone());
 
-    DetailOutcome::Body(Box::new(build_detail_body(
-        &vintage,
-        holdout_series_handle,
-        producing_runs,
-        primary_run,
-    )))
+    match build_detail_body(&vintage, holdout_series_handle, producing_runs, primary_run) {
+        Ok(detail) => DetailOutcome::Body(Box::new(detail)),
+        Err(msg) => DetailOutcome::Internal(msg),
+    }
 }
 
 /// Project the (already hash-verified) sealed [`Vintage`] into the response DTO. Split out from
 /// [`build_detail`] so the composition/sidecar reslice is unit-testable without a run store.
+///
+/// # Errors
+/// A message (mapped to a `500`, never a panic and never a silent JSON `null`) if a chromosome has no
+/// aligned weight — a broken seal invariant (`VintageContent::validate` guarantees `weights` is aligned
+/// one-to-one with `chromosomes`, so this is unreachable for a validly-sealed artefact, but we surface
+/// it rather than emit a silent `NaN`/`null`).
 fn build_detail_body(
     vintage: &Vintage,
     holdout_series_handle: String,
     producing_runs: Vec<ProducingRun>,
     primary_run: Option<String>,
-) -> VintageDetail {
+) -> Result<VintageDetail, String> {
     let content = &vintage.content;
     // The current build's catalogue schema. `VintageRepository::load` already asserted the sealed
     // `CatalogueIdentity` matches this build **exactly** (QE-402), so this schema is the authoritative
@@ -285,15 +289,26 @@ fn build_detail_body(
                 .into_iter()
                 .map(|feature| resolve_indicator(feature, ids))
                 .collect();
-            ChromosomeComposition {
+            // The seal validates `weights.len() == chromosomes.len()`; a missing weight is a broken
+            // invariant we surface as an error rather than a silent `NaN`/`null`.
+            let weight = content.weights.get(index).copied().ok_or_else(|| {
+                format!(
+                    "vintage `{}` has no weight aligned to chromosome {index} \
+                     ({} weights for {} chromosomes) — broken seal invariant",
+                    content.vintage_id,
+                    content.weights.len(),
+                    content.chromosomes.len(),
+                )
+            })?;
+            Ok(ChromosomeComposition {
                 index,
-                weight: content.weights.get(index).copied().unwrap_or(f64::NAN),
+                weight,
                 indicators,
-            }
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>, String>>()?;
 
-    VintageDetail {
+    Ok(VintageDetail {
         id: content.vintage_id.clone(),
         label: content.vintage_id.clone(),
         content_hash: vintage.content_hash.clone(),
@@ -316,7 +331,7 @@ fn build_detail_body(
         },
         producing_runs,
         primary_run,
-    }
+    })
 }
 
 /// Resolve a genome feature index to a referenced indicator, distinguishing catalogue from evolved. An

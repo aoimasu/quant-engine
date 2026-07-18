@@ -450,6 +450,33 @@ async fn vintage_detail_unknown_id_is_404() {
 }
 
 #[tokio::test]
+async fn vintage_detail_corrupt_artefact_is_500_not_a_panic() {
+    let tmp = TempDir::new().unwrap();
+    let artifacts = tmp.path().join("artifacts");
+    seal_rich_vintage(&artifacts, "rich_vintage");
+
+    // Tamper the sealed artefact on disk: overwrite the stored `content_hash` so `Vintage::load`'s
+    // hash verification fails (HashMismatch → DetailOutcome::Internal → 500), exercising AC #4
+    // end-to-end. The file is `{ "content": {...}, "content_hash": "..." }`.
+    let path = artifacts.join("rich_vintage.json");
+    let mut doc: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    doc["content_hash"] = Value::String("0".repeat(64));
+    std::fs::write(&path, serde_json::to_vec(&doc).unwrap()).unwrap();
+
+    let app = build_app_with_artifacts(&tmp, artifacts);
+    let (status, body) = send(&app, get_authed("/api/vintages/rich_vintage")).await;
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "a corrupt/failing-verify artefact is a 500, never a panic: {body}"
+    );
+    assert!(
+        body["error"].as_str().is_some_and(|e| !e.is_empty()),
+        "500 carries an error message body: {body}"
+    );
+}
+
+#[tokio::test]
 async fn vintage_detail_requires_a_session() {
     let tmp = TempDir::new().unwrap();
     let app = build_app(&tmp);
