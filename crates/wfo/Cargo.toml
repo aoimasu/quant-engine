@@ -17,6 +17,12 @@ qe-storage.workspace = true
 # QE-431: the single content-addressed slippage/impact calibration (upstream shared source of truth).
 # `qe-risk` reaches only `qe-domain`/`qe-error` — no search⟂portfolio firewall edge.
 qe-risk.workspace = true
+# QE-451 Phase 1b: the merged deflation/IC/PBO/null machinery (QE-439/434/414/131). `qe-validation`
+# reaches only `qe-determinism` — search⟂portfolio firewall PERMITS `qe-wfo → qe-validation` (it forbids
+# only `qe-wfo → qe-ensemble/qe-runtime/qe-venue`), so this edge is firewall-legal (see firewall.rs).
+qe-validation.workspace = true
+# QE-451 Phase 1b: the frozen-pool `pool_hash` (SHA-256 over the sorted canonical-sexpr formula hashes).
+sha2.workspace = true
 # Exact decimal for cost / funding / P&L arithmetic — never float money (QE-109).
 rust_decimal.workspace = true
 # Genome serialisation (QE-110): the canonical vintage-lineage form is JSON.

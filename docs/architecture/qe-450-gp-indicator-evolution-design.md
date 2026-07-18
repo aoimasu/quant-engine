@@ -183,6 +183,17 @@ returns** (one shared formula scored across ~20 liquid perps; effective-independ
 **measured** cross-asset return correlation, not assumed). Wrap it with gates applied **at archive insertion**
 (they tighten the survivor set but do **not** reduce the trial count N):
 
+> **DSR-honest basis correction (QE-451 Phase 1b).** The trial count `N` that deflates the DSR axis is
+> **`max(distinct-canonical count, N*)`**, where `N*` is the **shuffle-null-calibrated** effective count
+> ([§5 κ-null row](#5-overfitting-controls-the-backbone); `qe_wfo::gp::calibrate_null_basis`), **not** the
+> raw `max(distinct, cells·gens·windows floor)` alone. On pure noise the raw `max(distinct, analytic-floor)`
+> basis **under-deflates the DSR** (the empirical best-of-N Sharpe is heavier-tailed than the parametric
+> `E[max SR]` Gumbel assumes, so DSR sits `> 0.7` on a label-shuffled champion); only `N* ≥ P` brings the
+> shuffled-champion DSR to ≈ 0.5. `assess_gp_champion`/`gp_trial_basis` are **basis-agnostic** (they deflate
+> against whatever `N` the caller supplies) and nothing auto-applies `N*` yet — **the QE-454 production seal
+> MUST fold `N*` in** (deflate against `max(distinct, N*)`) before G1; sealing on the analytic floor alone
+> would ship the under-deflated DSR.
+
 - **(a) Cost-stressed fitness** = `min` over friction multiplier `m ∈ {1.0, 2.0}` of re-costed `log_growth`
   via the existing `friction::cost_sweep` (free, because `decide()` is cost-blind so the event stream is
   identical). Require finite and `> 0`; optional `m = 3.0` non-ruin check; persist the chosen multiplier in
@@ -205,7 +216,7 @@ This is where the feature is won or lost. Ordered by severity.
 
 | Control | Ticket | Detail |
 |---|---|---|
-| **GP-aware deflation trial basis** | **QE-439 (#10) — HARD BLOCKER** | Replace `effective_trials(cells,gens,windows)` blindness with `N = max(distinct-CANONICAL formulas ever scored, cells·gens·windows floor, complexity floor)`. Canonicalise (constant-fold, normalise commutative order, collapse rank-monotone wrappers, algebraic dedup) then content-hash. **Count every evaluated formula — including IC-screen and cost/turnover/capacity rejects** (screening filters compute, never the hypothesis count). Record `distinct_evaluations` in `RobustnessReport`. **Numerical fix:** `expected_max_sharpe` computes `normal_ppf(1−1/n)`; for `n ≳ 4.5e15`, `1−1/n` rounds to 1.0 → `+∞`. Add a log-space `expected_max_sharpe_ln(ln_n)` path (`~√(2 ln N)`); the bar self-caps near 8–13 even at `N ~ 1e20`. |
+| **GP-aware deflation trial basis** | **QE-439 (#10) — HARD BLOCKER** | Replace `effective_trials(cells,gens,windows)` blindness with `N = max(distinct-CANONICAL formulas ever scored, cells·gens·windows floor, complexity floor, **shuffle-null-calibrated N***)`. Canonicalise (constant-fold, normalise commutative order, collapse rank-monotone wrappers, algebraic dedup) then content-hash. **Count every evaluated formula — including IC-screen and cost/turnover/capacity rejects** (screening filters compute, never the hypothesis count). Record `distinct_evaluations` in `RobustnessReport`. **The DSR-honest basis is `max(distinct, N*)`, NOT the analytic floor alone** — the raw `max(distinct, cells·gens·windows)` can *under*-deflate the DSR axis (best-of-N in-sample Sharpe is heavier-tailed than the Gumbel `E[max SR]` assumes; a label-shuffled champion sits at DSR `> 0.7` on the raw basis, ≈ 0.5 only once `N* ≥ P` from the κ-null calibration is folded in — see the κ-null row). QE-451 Phase 1b ships `gp_trial_basis`/`assess_gp_champion` **basis-agnostic** + `calibrate_null_basis`; **the QE-454 production seal MUST deflate against `max(distinct, N*)`** (nothing auto-applies `N*` yet). **Numerical fix:** `expected_max_sharpe` computes `normal_ppf(1−1/n)`; for `n ≳ 4.5e15`, `1−1/n` rounds to 1.0 → `+∞`. Add a log-space `expected_max_sharpe_ln(ln_n)` path (`~√(2 ln N)`); the bar self-caps near 8–13 even at `N ~ 1e20`. |
 | **Uncensored dispersion + PBO** | extends QE-414 | Feed the return series of **every** evaluated formula (not just archive champions) into `variance_returns` (the DSR dispersion population) and a stratified full-population sample into PBO/CSCV. MAP-Elites keeps only per-cell maxima → under-disperses → **inflates** DSR; uncensoring restores honesty. Make **uncensored PBO the primary GP gate**; demote DSR to necessary-not-sufficient. |
 | **In-search MDL / parsimony** | **QE-436 (#7)** | Two-part rent in the offline pool-selection objective: `penalised_mean = mean_log_growth − (1/N_bars)·[n_struct·ln(4·f_eff·t) + n_const·½·ln(T_eff)]`, `ln(4·f_eff·t) ≈ 7.5` nats/node. Lexicographic tie-break to the shorter tree inside `should_replace`'s noise band. Keep MDL **out** of the per-genome fitness that feeds DSR (avoids interacting with the deflation stage). Backed by hard caps in `Expr::repair`. |
 | **Complexity-stratified trial variance** | `dsr.rs::trial_sharpe_variance` | Bigger trees overfit harder ⇒ wider in-sample Sharpe dispersion. Estimate `V` **within node-count strata** and deflate each candidate against the `V` of its own size band. Replaces the retracted `B^{κn}` N-multiplier (*dissent §12.1*). |
@@ -290,7 +301,9 @@ This is where the feature is won or lost. Ordered by severity.
 4. The interpreter contains **no `f64`** in any evaluation path (grep/CI guard); re-running a GP vintage twice
    is byte-identical.
 5. On a **label-shuffled / block-bootstrap** null, evolved-champion DSR sits at ≈ 0.5 across all node-size
-   bands after calibration; a passing DSR on real data is accompanied by a passing uncensored PBO.
+   bands after calibration — i.e. once deflated against the **calibrated `N* ≥ P`** (`max(distinct, N*)`),
+   **not** the raw `max(distinct, analytic-floor)` (which under-deflates the DSR to `> 0.7` on pure noise);
+   a passing DSR on real data is accompanied by a passing uncensored PBO.
 6. The lineage records the **distinct-canonical trial count including all rejects**; `RobustnessReport`
    surfaces it beside `variance_trials`; `effective_trials` never under-counts below `cells·gens·windows`.
 7. `expected_max_sharpe` returns a **finite** bar (≈8–13) at N up to `1e20` via the log-N path.

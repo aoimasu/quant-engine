@@ -120,6 +120,16 @@ pub struct CatalogueIdentity {
     /// Lowercase-hex SHA-256 over the **ordered** indicator ids (one per line). Any reorder / add /
     /// rename of an indicator changes this hash, so identity drift the version+width miss is caught.
     pub id_hash: String,
+    /// The **frozen GP formula pool** (QE-451 Phase 1b, design §6 vintage-identity row): the canonical
+    /// S-expression SHA-256 `formula_hash` of each `K ≤ 16` evolved tree sealed into this vintage, sorted
+    /// for determinism. **Empty by default** — with no pool sealed the field is *omitted* from the
+    /// serialised JSON (`skip_serializing_if`, mirroring the QE-444 alpha-loss precedent), so
+    /// [`CatalogueIdentity::current`] and every default vintage's `content_hash` are **byte-identical** to
+    /// the pre-QE-451-Phase-1b build (no golden moves). A sealed non-empty pool changes the identity, and
+    /// the load boundary ([`crate`]'s vintage `assert_schema`) asserts an **exact** match — a pool mismatch
+    /// is rejected exactly like a catalogue reorder.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub formula_pool: Vec<String>,
 }
 
 impl CatalogueIdentity {
@@ -130,7 +140,20 @@ impl CatalogueIdentity {
             catalogue_version: schema.version(),
             num_states: schema.num_states(),
             id_hash: Self::hash_ids(schema.ids()),
+            formula_pool: Vec::new(),
         }
+    }
+
+    /// This identity with a **frozen GP formula pool** attached (QE-451 Phase 1b): the `K ≤ 16` canonical
+    /// S-expression SHA-256 hashes, **sorted + deduplicated** for a deterministic identity. Opt-in — the
+    /// default catalogue never calls this, so no golden moves. A non-empty pool changes the identity (and
+    /// so any vintage sealed against it), which the load boundary then asserts exactly.
+    #[must_use]
+    pub fn with_formula_pool(mut self, mut formula_hashes: Vec<String>) -> Self {
+        formula_hashes.sort();
+        formula_hashes.dedup();
+        self.formula_pool = formula_hashes;
+        self
     }
 
     /// The identity of the catalogue built from `cfg`.
@@ -292,6 +315,52 @@ mod tests {
     use rust_decimal::Decimal;
 
     const MIN: i64 = 60_000;
+
+    #[test]
+    fn default_identity_omits_the_formula_pool_and_is_byte_identical() {
+        // QE-451 Phase 1b GOLDEN-SAFETY: with no pool sealed the `formula_pool` field is OMITTED from the
+        // serialised JSON (skip_serializing_if), so the default identity is byte-identical to the
+        // pre-Phase-1b build — no golden moves, no CATALOGUE_VERSION/VINTAGE_FORMAT_VERSION bump.
+        let json = serde_json::to_string(&CatalogueIdentity::current()).unwrap();
+        assert!(
+            !json.contains("formula_pool"),
+            "default identity must not serialise the pool field: {json}"
+        );
+        // And it round-trips (serde default fills the absent field with an empty pool).
+        let back: CatalogueIdentity = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, CatalogueIdentity::current());
+        assert!(back.formula_pool.is_empty());
+        // An OLD record (no pool key at all) still deserialises — forward/backward compatible.
+        let legacy = format!(
+            "{{\"catalogue_version\":{},\"num_states\":{},\"id_hash\":\"{}\"}}",
+            CatalogueIdentity::current().catalogue_version,
+            CatalogueIdentity::current().num_states,
+            CatalogueIdentity::current().id_hash,
+        );
+        assert_eq!(
+            serde_json::from_str::<CatalogueIdentity>(&legacy).unwrap(),
+            CatalogueIdentity::current()
+        );
+    }
+
+    #[test]
+    fn a_sealed_formula_pool_changes_the_identity_and_sorts_deterministically() {
+        let base = CatalogueIdentity::current();
+        let pooled =
+            base.clone()
+                .with_formula_pool(vec!["hash_b".into(), "hash_a".into(), "hash_b".into()]);
+        // A non-empty pool changes the identity (so any vintage sealed against it) — the load boundary
+        // then asserts an exact match.
+        assert_ne!(pooled, base);
+        // Sorted + deduplicated for a deterministic identity, and now it DOES serialise the pool.
+        assert_eq!(pooled.formula_pool, vec!["hash_a", "hash_b"]);
+        assert!(serde_json::to_string(&pooled)
+            .unwrap()
+            .contains("formula_pool"));
+        // Same hashes in any order ⇒ same identity (order-independent, dedup-stable).
+        let pooled2 = base.with_formula_pool(vec!["hash_a".into(), "hash_b".into()]);
+        assert_eq!(pooled, pooled2);
+    }
 
     fn series(n: usize) -> Vec<Sample> {
         (0..n)

@@ -16,7 +16,10 @@
 //! gates, cross-asset pooled fitness, freezing `K ≤ 16` into `CatalogueIdentity`, flow terminals.
 
 pub mod archive;
+pub mod deflation;
 pub mod descriptor;
+pub mod freeze;
+pub mod gates;
 pub mod variation;
 
 use std::collections::HashSet;
@@ -31,9 +34,19 @@ use serde::{Deserialize, Serialize};
 use crate::operator::{ApplicationOutcome, Operator, OperatorSelector};
 
 pub use archive::{quantised_correlation, ExprArchive, ExprElite, ExprInsert, DEDUP_THRESHOLD};
+pub use deflation::{
+    assess_gp_champion, calibrate_null_basis, formula_returns, gp_trial_basis,
+    market_forward_returns, mdl_penalised_fitness, mean_cross_asset_correlation, pooled_t_eff,
+    signal_series, uncensored_pbo, GpDeflationGate, GpDeflationReport,
+};
 pub use descriptor::{
     descriptor_for_tree, family_of_tree, grid_cells, ComplexityBand, ExprCell, COMPLEXITIES,
     EXPR_CELLS,
+};
+pub use freeze::{FreezeError, FrozenFormula, FrozenPool, MAX_POOL_SIZE};
+pub use gates::{
+    cost_stressed_net, evaluate_tradability, ic_screen_trees, inlined_capacity, turnover_frac,
+    TradabilityConfig, TradabilityVerdict, CAPACITY_FLOOR, MAX_TURNOVER_FRAC,
 };
 pub use variation::{explore, fresh_random, local_refine};
 
@@ -313,6 +326,72 @@ mod tests {
         assert_eq!(report.total_evaluations(), 8 * 24);
         assert!(report.distinct_evaluations() >= 1);
         assert!(report.distinct_evaluations() <= report.total_evaluations());
+    }
+
+    #[test]
+    fn a_dedup_rejected_offspring_still_counts_toward_the_trial_basis() {
+        // Isolate ONE reject (design §5 "rejects all count toward N"). `illuminate` runs
+        // `distinct.insert(hash)` + `total += 1` for EVERY offspring BEFORE the archive decides
+        // accept/reject, so a dedup-rejected offspring is still counted. Here two offspring share the same
+        // canonical form AND behavioural series: the first fills the cell, the second is DedupRejected —
+        // total = 2 (both counted), distinct = 1 (same canonical hash), and only one enters the archive.
+        let mut archive = ExprArchive::new();
+        let mut distinct: HashSet<String> = HashSet::new();
+        let mut total: u64 = 0;
+
+        let tree = ExprTree::repaired(Expr::Window(
+            WinOp::Rank,
+            boxed(Expr::Window(
+                WinOp::Mean,
+                boxed(Expr::Input(Field::Close)),
+                20,
+            )),
+            50,
+        ));
+        let series: Vec<Option<i64>> = (0..40).map(|i| Some((i % 5) as i64)).collect();
+
+        // Offer 1 — counted, then accepted into a fresh cell.
+        let hash1 = tree.canonical_hash();
+        distinct.insert(hash1.clone());
+        total += 1;
+        let out1 = archive.insert(ExprElite {
+            tree: tree.clone(),
+            fitness: 1.0,
+            hash: hash1,
+            series: series.clone(),
+        });
+        assert_eq!(out1, ExprInsert::NewCell);
+
+        // Offer 2 — counted BEFORE the archive rejects it as a behavioural duplicate in the same cell.
+        let hash2 = tree.canonical_hash();
+        distinct.insert(hash2.clone());
+        total += 1;
+        let out2 = archive.insert(ExprElite {
+            tree: tree.clone(),
+            fitness: 2.0,
+            hash: hash2,
+            series: series.clone(),
+        });
+
+        assert_eq!(
+            out2,
+            ExprInsert::DedupRejected,
+            "identical behavioural series in the same cell ⇒ dedup reject"
+        );
+        assert_eq!(
+            total, 2,
+            "the single dedup-rejected offspring still increments the total trial count"
+        );
+        assert_eq!(
+            distinct.len(),
+            1,
+            "identical canonical form ⇒ distinct stays 1 (both offers counted toward N)"
+        );
+        assert_eq!(
+            archive.total_elites(),
+            1,
+            "the rejected offspring did NOT enter the archive (it filters, it does not un-count)"
+        );
     }
 
     #[test]

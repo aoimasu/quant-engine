@@ -186,6 +186,103 @@ pub fn pairwise_corr_penalty(series: &[Vec<f64>], mode: CorrDeflation) -> CorrPe
     }
 }
 
+// ---- QE-451 Phase 1b: provenance-aware ensemble correlation floor + evolved-share cap (QE-450 §5) -----
+//
+// When an ensemble draws on **evolved** GP members, a large formula pool lets the search find
+// in-sample-decorrelated pairs in noise (design §5 QE-430 row). Two additions on top of the merged
+// deflated pairwise penalty ([`pairwise_corr_penalty`]) guard that:
+//   1. a **leave-one-PROVENANCE-out floor** — cluster members by lineage/provenance, collapse each cluster
+//      to its mean series, and take the deflated pairwise penalty over the cluster *representatives*. A
+//      lineage's mutually-decorrelated-by-noise members then count **once**, so intra-lineage phantom
+//      diversification cannot pull the penalty below the genuine cross-lineage correlation. The full-member
+//      penalty is floored by this value.
+//   2. a **cap on the evolved-formula share** — the fraction of ensemble members that are evolved.
+//
+// Pure `f64` on member return series + integer provenance labels — no `qe-wfo` dependency (the evolved
+// members cross into `qe-ensemble` as DATA, not a firewall-crossing code edge).
+
+/// The element-wise **mean series of each provenance cluster** (members grouped by their integer
+/// provenance/lineage label), returned in ascending label order for determinism. Each cluster's series is
+/// truncated to its shortest member. Clusters with no members are omitted. Empty input ⇒ empty.
+#[must_use]
+pub fn cluster_mean_series(series: &[Vec<f64>], provenance: &[usize]) -> Vec<Vec<f64>> {
+    use std::collections::BTreeMap;
+    let mut groups: BTreeMap<usize, Vec<&Vec<f64>>> = BTreeMap::new();
+    for (s, p) in series.iter().zip(provenance.iter()) {
+        groups.entry(*p).or_default().push(s);
+    }
+    groups
+        .into_values()
+        .filter_map(|members| {
+            let t = members.iter().map(|m| m.len()).min().unwrap_or(0);
+            if t == 0 {
+                return None;
+            }
+            let k = members.len() as f64;
+            let mean: Vec<f64> = (0..t)
+                .map(|i| members.iter().map(|m| m[i]).sum::<f64>() / k)
+                .collect();
+            Some(mean)
+        })
+        .collect()
+}
+
+/// The fraction of ensemble members that are **evolved** (design §5 QE-430 row: cap the evolved-formula
+/// share of any ensemble). `is_evolved[k]` marks member `k` as a GP-evolved formula (vs a hand catalogue
+/// indicator). Empty input ⇒ `0.0`.
+#[must_use]
+pub fn evolved_share(is_evolved: &[bool]) -> f64 {
+    if is_evolved.is_empty() {
+        return 0.0;
+    }
+    is_evolved.iter().filter(|e| **e).count() as f64 / is_evolved.len() as f64
+}
+
+/// The provenance-aware ensemble correlation diagnostics (QE-451 Phase 1b).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ProvenancePenalty {
+    /// The deflated pairwise correlation penalty over all members ([`pairwise_corr_penalty`]).
+    pub member_penalty: f64,
+    /// The **leave-one-provenance-out floor**: the deflated penalty over the per-lineage mean series.
+    pub provenance_floor: f64,
+    /// The binding penalty `max(member_penalty, provenance_floor)` — a lineage cannot decorrelate its way
+    /// below the genuine cross-lineage correlation.
+    pub binding: f64,
+    /// The evolved-formula share of the ensemble.
+    pub evolved_share: f64,
+}
+
+impl ProvenancePenalty {
+    /// Whether the evolved share is within `max_share` (design §5: cap the evolved-formula share).
+    #[must_use]
+    pub fn share_within(&self, max_share: f64) -> bool {
+        self.evolved_share <= max_share
+    }
+}
+
+/// Compute the provenance-aware correlation penalty (QE-451 Phase 1b): the deflated member penalty, the
+/// leave-one-provenance-out floor over per-lineage mean series, their binding max, and the evolved share.
+/// `provenance[k]` is member `k`'s lineage/cluster label; `is_evolved[k]` marks evolved members. Reuses
+/// the merged QE-430 [`pairwise_corr_penalty`] verbatim for both the member and the cluster-representative
+/// penalties.
+#[must_use]
+pub fn provenance_aware_penalty(
+    series: &[Vec<f64>],
+    provenance: &[usize],
+    is_evolved: &[bool],
+    mode: CorrDeflation,
+) -> ProvenancePenalty {
+    let member_penalty = pairwise_corr_penalty(series, mode).value;
+    let cluster_means = cluster_mean_series(series, provenance);
+    let provenance_floor = pairwise_corr_penalty(&cluster_means, mode).value;
+    ProvenancePenalty {
+        member_penalty,
+        provenance_floor,
+        binding: member_penalty.max(provenance_floor),
+        evolved_share: evolved_share(is_evolved),
+    }
+}
+
 /// CVaR / Expected Shortfall at level `alpha` (QE-115/D3): the mean of the **worst `⌈alpha·n⌉`**
 /// returns. Negative for a loss tail. Empty input ⇒ `{ 0.0, 0 }`.
 #[must_use]
@@ -432,6 +529,70 @@ mod tests {
 
     fn approx(a: f64, b: f64) {
         assert!((a - b).abs() < 1e-9, "{a} !~ {b}");
+    }
+
+    #[test]
+    fn provenance_floor_binds_when_a_lineage_fakes_diversification() {
+        // Build members where one evolved LINEAGE (provenance 1) has 4 mutually-decorrelated members that
+        // are EACH correlated with the catalogue member (provenance 0). The flat member penalty is diluted
+        // by the many low intra-lineage pairs, but collapsing the lineage to its MEAN series exposes the
+        // genuine cross-lineage correlation ⇒ the provenance floor binds ABOVE the member penalty.
+        let n = 400;
+        // A common driver the catalogue member and every evolved member share.
+        let driver: Vec<f64> = (0..n).map(|i| (i % 11) as f64 - 5.0).collect();
+        let catalogue: Vec<f64> = driver.clone();
+        // Each evolved member = driver + a large, member-specific orthogonal noise (so intra-lineage pairs
+        // are near-decorrelated, but each still shares the driver with the catalogue member).
+        let evolved: Vec<Vec<f64>> = (0..4)
+            .map(|k| {
+                (0..n)
+                    .map(|i| driver[i] + 6.0 * (((i * 7 + k * 101) % 13) as f64 - 6.0))
+                    .collect()
+            })
+            .collect();
+        let mut series = vec![catalogue];
+        series.extend(evolved);
+        let provenance = vec![0usize, 1, 1, 1, 1];
+        let is_evolved = vec![false, true, true, true, true];
+
+        let report =
+            provenance_aware_penalty(&series, &provenance, &is_evolved, CorrDeflation::None);
+        assert!(
+            report.provenance_floor > report.member_penalty,
+            "the lineage floor must bind above the diluted member penalty: floor {} !> member {}",
+            report.provenance_floor,
+            report.member_penalty
+        );
+        approx(report.binding, report.provenance_floor);
+        approx(report.evolved_share, 0.8);
+
+        // Leave-one-provenance-out: DROP the evolved lineage entirely ⇒ only the catalogue member remains
+        // ⇒ no pairs ⇒ the floor collapses to 0. The floor genuinely depends on the lineage clustering.
+        let dropped = provenance_aware_penalty(
+            &series[..1],
+            &provenance[..1],
+            &is_evolved[..1],
+            CorrDeflation::None,
+        );
+        assert_eq!(dropped.provenance_floor, 0.0);
+        assert!(dropped.provenance_floor < report.provenance_floor);
+
+        // Evolved-share cap: 0.8 exceeds a 0.5 cap, is within a 0.9 cap.
+        assert!(!report.share_within(0.5));
+        assert!(report.share_within(0.9));
+    }
+
+    #[test]
+    fn cluster_mean_collapses_lineages_deterministically() {
+        let series = vec![vec![1.0, 3.0], vec![3.0, 5.0], vec![10.0, 10.0]];
+        // Members 0,1 are lineage 7; member 2 is lineage 2. Output is in ascending label order (2 then 7).
+        let means = cluster_mean_series(&series, &[7, 7, 2]);
+        assert_eq!(means.len(), 2);
+        assert_eq!(means[0], vec![10.0, 10.0]); // lineage 2
+        assert_eq!(means[1], vec![2.0, 4.0]); // lineage 7 mean
+        assert!(cluster_mean_series(&[], &[]).is_empty());
+        approx(evolved_share(&[true, false, true, true]), 0.75);
+        approx(evolved_share(&[]), 0.0);
     }
 
     #[test]
