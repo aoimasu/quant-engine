@@ -118,6 +118,40 @@ impl RunStore {
         Ok(None)
     }
 
+    /// QE-456 vintage→run reverse-join — every run that **produced** the sealed vintage `vintage_id`.
+    ///
+    /// The vintage id is a content hash, so more than one run can seal a content-identical vintage; this
+    /// returns **all** producers (a run whose `meta.train.vintage == vintage_id`) rather than the first
+    /// match, sorted by a **deterministic tie-break**: ascending `created_ms`, then lexicographic run id.
+    /// The caller treats the first element as the primary producer. Read-only; recomputes nothing.
+    ///
+    /// # Errors
+    /// A filesystem/parse error reading `index.json` or a run's `meta.json`.
+    pub fn find_runs_by_vintage(&self, vintage_id: &str) -> io::Result<Vec<RunMeta>> {
+        let index = self.read_index()?;
+        let mut producers = Vec::new();
+        for entry in &index {
+            if let Some(meta) = self.read_meta(&entry.id)? {
+                let produced = meta
+                    .train
+                    .as_ref()
+                    .and_then(|t| t.vintage.as_deref())
+                    .map(|v| v == vintage_id)
+                    .unwrap_or(false);
+                if produced {
+                    producers.push(meta);
+                }
+            }
+        }
+        // Deterministic tie-break: earliest created_ms first, then lexicographic run id.
+        producers.sort_by(|a, b| {
+            a.created_ms
+                .cmp(&b.created_ms)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        Ok(producers)
+    }
+
     /// Read a run's `result.json` bytes.
     ///
     /// A thin wrapper over `fs::read(result_path)` so the run-store's blocking filesystem primitives all
@@ -232,6 +266,73 @@ mod tests {
         // Once written, the exact bytes round-trip.
         fs::write(store.result_path("res"), b"{\"ok\":true}").unwrap();
         assert_eq!(store.read_result("res").unwrap(), b"{\"ok\":true}");
+    }
+
+    #[test]
+    fn find_runs_by_vintage_matches_producers_in_deterministic_order() {
+        use crate::runs::model::TrainProgress;
+        let dir = tempfile::tempdir().unwrap();
+        let store = RunStore::new(dir.path().join("runs"));
+
+        // Helper: a `train` run whose sealed vintage is `vintage`, created at `created_ms`.
+        let train = |id: &str, vintage: &str, created_ms: u64| {
+            let mut meta = sample_meta(id);
+            meta.run_type = "train".to_owned();
+            meta.status = RunStatus::Succeeded;
+            meta.created_ms = created_ms;
+            meta.train = Some(TrainProgress {
+                vintage: Some(vintage.to_owned()),
+                ..TrainProgress::default()
+            });
+            meta
+        };
+
+        // Two producers of the SAME vintage (written out of order) + an unrelated producer + a run with
+        // no vintage at all.
+        for m in [
+            train("zzz", "v1", 2_000),
+            train("aaa", "v1", 1_000),
+            train("other", "v2", 500),
+        ] {
+            store.init_run(&m).unwrap();
+        }
+        store.init_run(&sample_meta("no-vintage")).unwrap(); // backtest, no train.vintage
+        store
+            .write_index(&[
+                IndexEntry {
+                    id: "zzz".to_owned(),
+                    run_type: "train".to_owned(),
+                    created_ms: 2_000,
+                    label: "t".to_owned(),
+                },
+                IndexEntry {
+                    id: "aaa".to_owned(),
+                    run_type: "train".to_owned(),
+                    created_ms: 1_000,
+                    label: "t".to_owned(),
+                },
+                IndexEntry {
+                    id: "other".to_owned(),
+                    run_type: "train".to_owned(),
+                    created_ms: 500,
+                    label: "t".to_owned(),
+                },
+                IndexEntry {
+                    id: "no-vintage".to_owned(),
+                    run_type: "backtest".to_owned(),
+                    created_ms: 100,
+                    label: "b".to_owned(),
+                },
+            ])
+            .unwrap();
+
+        let producers = store.find_runs_by_vintage("v1").unwrap();
+        let ids: Vec<&str> = producers.iter().map(|m| m.id.as_str()).collect();
+        // Earliest created_ms first, then lexicographic id — deterministic tie-break.
+        assert_eq!(ids, vec!["aaa", "zzz"]);
+
+        // An unknown vintage has no producers.
+        assert!(store.find_runs_by_vintage("nope").unwrap().is_empty());
     }
 
     #[test]
