@@ -1864,6 +1864,7 @@ dependencies = [
  "base64",
  "dotenvy",
  "hmac",
+ "native-tls",
  "qe-config",
  "qe-formula-pool",
  "qe-run-protocol",

@@ -370,7 +370,10 @@ async fn callback(
     let verifier = Arc::clone(&auth.verifier);
     let claims = match tokio::task::spawn_blocking(move || verifier.verify(&code)).await {
         Ok(Ok(claims)) => claims,
-        Ok(Err(_)) => return reject(StatusCode::UNAUTHORIZED, "could not verify Google identity"),
+        Ok(Err(e)) => {
+            tracing::warn!(error = %e, "Google identity verification failed");
+            return reject(StatusCode::UNAUTHORIZED, "could not verify Google identity");
+        }
         Err(_) => {
             return reject(
                 StatusCode::INTERNAL_SERVER_ERROR,

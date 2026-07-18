@@ -56,8 +56,18 @@ struct TokenInfo {
 
 impl IdTokenVerifier for GoogleOidcVerifier {
     fn verify(&self, code: &str) -> Result<GoogleClaims, VerifyError> {
+        // ureq 2.x auto-configures TLS only for its rustls (`tls`) feature; with the `native-tls`
+        // feature the bare `ureq::get/post` convenience agent has NO TLS backend ("no TLS backend is
+        // configured"). Build the native-tls connector explicitly and install it on an agent.
+        let tls = native_tls::TlsConnector::new()
+            .map_err(|e| VerifyError::Upstream(format!("tls init: {e}")))?;
+        let agent = ureq::builder()
+            .tls_connector(std::sync::Arc::new(tls))
+            .build();
+
         // 1) Exchange the authorization code for tokens.
-        let token_resp = ureq::post(&self.token_endpoint)
+        let token_resp = agent
+            .post(&self.token_endpoint)
             .send_form(&[
                 ("code", code),
                 ("client_id", &self.client_id),
@@ -76,7 +86,8 @@ impl IdTokenVerifier for GoogleOidcVerifier {
 
         // 2) Validate the ID token via tokeninfo (signature + expiry checked server-side). A 4xx here
         //    surfaces as an `Upstream` error ⇒ the caller treats it as "not signed in".
-        let info_resp = ureq::get(&self.tokeninfo_endpoint)
+        let info_resp = agent
+            .get(&self.tokeninfo_endpoint)
             .query("id_token", &id_token)
             .call()
             .map_err(|e| VerifyError::Upstream(format!("tokeninfo: {e}")))?
