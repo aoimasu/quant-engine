@@ -15,6 +15,12 @@ use qe_telemetry::{init as init_telemetry, TelemetryConfig};
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    // Dev ergonomics: load a local `.env` (if present) before ANY env resolution below, so its vars
+    // are visible to every `*::from_env()` call (server/auth/role/audit config). `.ok()` ignores the
+    // "file not found" case — a no-op when absent. Real process env takes precedence: dotenvy does NOT
+    // override already-set vars. See `.env.example` (copy to `.env`; `.env` is gitignored).
+    dotenvy::dotenv().ok();
+
     // Telemetry first so config/bind errors are structured-logged. A guard flushes on drop.
     let _telemetry = match init_telemetry(&TelemetryConfig::from_env()) {
         Ok(guard) => guard,

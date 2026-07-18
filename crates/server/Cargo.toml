@@ -76,6 +76,10 @@ ureq = { version = "2", default-features = false, features = ["native-tls"], opt
 # QE-413: `ServiceBuilder` composes the request-id + trace + propagate layers in a
 # well-defined outermost→innermost order on the `/api` router. Already in the lockfile.
 tower.workspace = true
+# Dev-ergonomics: load a local `.env` at startup so operators don't hand-export the admin-UI env vars
+# (see `.env.example`). `dotenvy` is the maintained MIT fork of `dotenv`; server-only. Real process env
+# always wins — dotenvy does NOT override already-set vars.
+dotenvy = "0.15"
 
 [dev-dependencies]
 tempfile.workspace = true

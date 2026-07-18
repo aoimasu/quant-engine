@@ -3,6 +3,10 @@
 Cargo.lock.bak
 .DS_Store
 
+# Local env files may hold real secrets — never commit them. `.env.example` is committed.
+.env
+.env.local
+
 # Frontend (web/) — Node toolchain
 web/node_modules/
 web/dist/
