@@ -32,6 +32,13 @@ qe-telemetry.workspace = true
 # repository the `/api/vintages` list reads.
 qe-storage.workspace = true
 qe-vintage.workspace = true
+# QE-456: the vintage-detail endpoint reslices the sealed `VintageContent` — `qe-signal` resolves genome
+# feature indices to catalogue indicator ids (`FeatureSchema`/`CatalogueIdentity`) and `qe-risk` types the
+# provenance sidecars (`SlippageCalibration`/`PortfolioSizer`/`CalibrationProfile`). Both are already
+# production-reachable via `qe-vintage` (which depends on them), so this adds no new reachable crate and
+# no new `qe-wfo`/`qe-ensemble`/`qe-runtime`/`qe-venue` edge — the firewall rule provably still covers it.
+qe-signal.workspace = true
+qe-risk.workspace = true
 # QE-452 Phase B: the frozen formula-pool artefact + its durable governance lifecycle. A pure serde leaf
 # (no `qe-runtime`/`qe-venue` edge — runtime never loads a pool), so this edge is firewall-legal and the
 # `qe-server` firewall rule provably covers it (crates/architecture/tests/firewall.rs).
@@ -91,6 +98,3 @@ tempfile.workspace = true
 # `VintageContent` and seals it via the real seal path after a `VINTAGE_FORMAT_VERSION` bump. Dev-only —
 # excluded from the production firewall graph (see `qe-architecture`).
 qe-determinism.workspace = true
-qe-risk.workspace = true
-qe-signal.workspace = true
-rust_decimal.workspace = true
