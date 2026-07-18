@@ -1,10 +1,35 @@
-//! White's Reality Check / Hansen's SPA (QE-131/D4 — White 2000, Hansen 2005).
+//! White's Reality Check / SPA-lower — a best-of-N data-snooping test (QE-131/D4, QE-448 — White 2000,
+//! Hansen 2005).
 //!
 //! Given `N` strategies' per-period performance *relative to a benchmark* (`excess[k][t]`), is the best
 //! one's edge real, or just the best of `N` draws from a zero-edge null? The test statistic is
 //! `V = maxₖ √T·d̄ₖ`; a **stationary bootstrap** (Politis–Romano) of the recentred series gives the null
 //! distribution, and the p-value is the share of bootstrap maxima that exceed `V`. A high p-value means
 //! the winner is indistinguishable from data-snooping.
+//!
+//! # What this is, and what it is NOT (QE-448)
+//!
+//! This recentres **every** one of the `k` models by its own full-sample mean `d̄ₖ` (see the
+//! `for k in 0..n` loop below, `resampled_mean - means[k]` — no per-model gate). That makes it:
+//!
+//! - **White's Reality Check** (White 2000) with raw means (`studentize=false`, the default), or
+//! - **Hansen's "SPA-lower"** bound with studentised means (`studentize=true`).
+//!
+//! It is the **conservative / under-powered** variant. Recentring *every* model — including strategies
+//! far below zero — lets those poor models contribute bootstrap fluctuation to the null max, inflating
+//! the null and **raising** the p-value (power loss). This is exactly the effect Hansen (2005)
+//! identified.
+//!
+//! It is **not** Hansen's *consistent* SPA. Hansen's defining contribution is **model-omission
+//! recentring** — recentre model `k` only when `d̄ₖ ≥ −(σₖ/√T)·√(2 log log T)`, dropping the too-poor
+//! models so they stop polluting the null, which **recovers power**. That `√(2 log log T)` threshold is
+//! deliberately absent here. (`studentize` is Hansen's *studentised statistic*, a separate refinement —
+//! not the model-omission step, and on its own it does not make this the consistent test.)
+//!
+//! **Follow-up (option b, QE-448):** implement the model-omission threshold for SPA-consistent to
+//! recover power. Deferred because it moves the computed p-value (the null shrinks), which — while it
+//! rides the sidecar / `RobustnessReport`, not `content_hash` — churns the gate/train fixtures and can
+//! flip G1 promotion, out of proportion to this P3 clarity fix.
 
 use qe_determinism::task_rng;
 use rand_core::RngCore;
@@ -18,7 +43,10 @@ pub struct SpaConfig {
     pub resamples: usize,
     /// Stationary-bootstrap average block length (geometric mean block; `q = 1/avg_block`).
     pub avg_block: f64,
-    /// Studentise each strategy's mean by its std (Hansen's SPA refinement) vs raw means (White's RC).
+    /// Studentise each strategy's mean by its std (`1/σₖ`, Hansen's studentised statistic) vs raw
+    /// means (`sₖ=1`, White's RC). NB (QE-448): studentising alone does **not** make this Hansen's
+    /// *consistent* SPA — both settings recentre **all** `k` models, i.e. White's RC (raw) / SPA-lower
+    /// (studentised). The power-recovering model-omission recentring is not applied either way.
     pub studentize: bool,
 }
 
@@ -38,7 +66,9 @@ impl SpaConfig {
 /// per-period performance minus the benchmark's), seeded deterministically by `seed` (QE-006).
 ///
 /// `p = #{ V*ᵦ ≥ V } / B` where `V = maxₖ √T·s·d̄ₖ`, `V*ᵦ = maxₖ √T·s·(d̄*ₖ − d̄ₖ)`, and `s = 1` (RC) or
-/// `1/σₖ` (SPA). Returns `1.0` for an empty/too-short input (no evidence against the null).
+/// `1/σₖ` (SPA-lower). **Every** model is recentred by its full-sample mean `d̄ₖ` (White's Reality
+/// Check / SPA-lower — the conservative variant; see the module doc for the omitted Hansen recentring).
+/// Returns `1.0` for an empty/too-short input (no evidence against the null).
 #[must_use]
 pub fn reality_check_pvalue(excess: &[Vec<f64>], cfg: &SpaConfig, seed: u64) -> f64 {
     let n = excess.len();
@@ -157,6 +187,43 @@ mod tests {
         assert_eq!(
             reality_check_pvalue(&excess, &cfg, 99),
             reality_check_pvalue(&excess, &cfg, 99)
+        );
+    }
+
+    #[test]
+    fn all_models_recentred_is_conservative_spa_lower() {
+        // QE-448 semantics guard: this test recentres EVERY model by its own mean (White's RC /
+        // SPA-lower), so an irrelevant high-variance zero-mean decoy still pollutes the null max and
+        // COSTS power — the p-value must not fall when the decoy is added (in practice it rises). Under
+        // Hansen's *consistent* SPA the decoy would be thresholded out and could not inflate the null.
+        let strong = ramp(0.02, 200); // genuine +2%/period edge
+        let mut base = vec![strong.clone()];
+        for k in 0..9 {
+            base.push(
+                ramp(0.0, 200)
+                    .iter()
+                    .map(|x| x + 0.0001 * k as f64)
+                    .collect(),
+            );
+        }
+        let cfg = SpaConfig::with_defaults();
+        let p_base = reality_check_pvalue(&base, &cfg, 123);
+
+        // A mean-≈0 but very high-variance decoy: (i%5 - 2) averages to 0 over full windows.
+        let decoy: Vec<f64> = (0..200).map(|i| 0.5 * ((i % 5) as f64 - 2.0)).collect();
+        let mut with_decoy = base.clone();
+        with_decoy.push(decoy);
+        let p_decoy = reality_check_pvalue(&with_decoy, &cfg, 123);
+
+        assert!(
+            p_decoy >= p_base,
+            "recentring all models must not gain power from an irrelevant decoy (SPA-lower): \
+             p_base={p_base}, p_decoy={p_decoy}"
+        );
+        assert!(
+            p_decoy > p_base,
+            "a high-variance zero-mean decoy should inflate the SPA-lower null and raise p: \
+             p_base={p_base}, p_decoy={p_decoy}"
         );
     }
 

@@ -7,7 +7,8 @@
 //! - [`dsr`] — the **Deflated Sharpe Ratio** with effective trials = archive cells × generations ×
 //!   windows.
 //! - [`pbo`] — **Probability of Backtest Overfitting** via Combinatorially Symmetric Cross-Validation.
-//! - [`spa`] — **White's Reality Check / Hansen's SPA** vs a best-of-N null.
+//! - [`spa`] — **White's Reality Check / SPA-lower** vs a best-of-N null (recentres all `k` models;
+//!   the conservative variant — it omits Hansen's power-recovering model-omission recentring, QE-448).
 //! - [`nulls`] — **BTC-HODL** and **turnover-matched random-entry** benchmark nulls.
 //! - [`ic`] — **per-indicator rank-IC / information-horizon screening** (QE-434): a catalogue-admission
 //!   pre-filter that classifies each factor Admit/Flag/Drop out-of-fold, filtering **compute** the
@@ -16,6 +17,25 @@
 //! It is downstream validation: pure statistics over return matrices + trial counts. It depends only on
 //! `qe-determinism` (reproducible bootstrap/null RNG, QE-006) — **no `qe-wfo`/`qe-ensemble`**, so it never
 //! touches the search⟂portfolio firewall.
+//!
+//! # What deflation corrects for — and what it cannot see (QE-448)
+//!
+//! DSR / PSR / PBO / SPA all correct for **SELECTION**: the multiple-testing / best-of-N inflation from
+//! searching a large quality-diversity archive. They are computed **on the return series they are
+//! given** and say nothing about whether that series is itself honest. They **cannot** remove per-trade
+//! optimistic bias:
+//!
+//! - **Transaction-cost bias** — under-charged slippage/impact inflates every trade uniformly. The DSR
+//!   is *absolute* (vs a noise ceiling), so a systematic cost error flows through **undeflated**.
+//!   Corrected upstream by net-of-cost truth (QE-403) and cost calibration (QE-431/QE-440), not here.
+//! - **Adverse-selection bias** — maker-fill markout; a rebate that loses to adverse selection reads as
+//!   free edge (QE-449).
+//! - **Survivorship bias** — backtesting on a today's-membership universe that silently dropped
+//!   delisted blow-ups. Corrected upstream by the **point-in-time universe** (QE-012), whose exact
+//!   roster + `[listed, delisted)` windows ride the vintage lineage SHA via `Config::content_hash`
+//!   (see `qe_determinism::Lineage`), so a vintage is traceable to a survivorship-safe universe.
+//!
+//! A clean DSR/PBO/SPA is evidence the *selection* was honest — never proof the *inputs* were.
 
 pub mod dsr;
 pub mod ic;
