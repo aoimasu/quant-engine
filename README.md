@@ -90,8 +90,15 @@ Notes for local dev:
 - Default bind is **`127.0.0.1:8080`** (`QE_SERVER_ADDR` to change). On loopback `QE_SESSION_SECRET`
   is optional (an ephemeral secret is generated); it is only required off-loopback (fail-closed).
 - Set your Google OAuth redirect URI to `http://127.0.0.1:8080/auth/callback` and add your email to
-  `QE_ADMIN_ALLOWED_EMAILS` (empty ⇒ nobody can sign in). `.env.example` also pre-points the read-side
-  market store at the committed sample store so read APIs work offline.
+  `QE_ADMIN_ALLOWED_EMAILS` (empty ⇒ nobody can sign in).
+- **Storage:** leave it at the defaults in `.env` — the server derives its store from qe-config and
+  pins the same config onto the CLI jobs it spawns, so both agree and it boots (read APIs are empty
+  until data is ingested). To read the committed **sample store** offline, use a config file (both
+  server and CLI read it): `cp config.example.toml config.toml` then set
+  `[storage].market_dir = "crates/cli/tests/fixtures/sample_store"`. Do **not** set a lone
+  `QE_STORAGE__MARKET_DIR` (with no config file, qe-config then requires the whole `[storage]` table),
+  and avoid the deprecated `QE_SERVER_MARKET_DIR` (it refuses boot when it diverges from the CLI's
+  store — QE-419).
 - To exercise the evolve/governance seal flow, also set `QE_ROLE_{OPERATORS,APPROVERS,ADMINS}` and a
   persistent `QE_AUDIT_SIGNING_KEY` (production sealing stays fail-closed by design either way).
 
