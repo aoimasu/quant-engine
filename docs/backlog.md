@@ -300,7 +300,6 @@ _All R1.c tickets delivered — see [`reviewed/`](mds/reviewed/)._
 
 | Ticket | Title | Depends on | Status |
 |--------|-------|------------|:------:|
-| [QE-449](./reviews/2026-07-16-maxdama-panel-review.md#qe-449) | Guard the unused maker rate against future adverse-selection blindness  *(panel #20, unanimous)* | QE-109 | — |
 
 ---
 
