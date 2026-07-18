@@ -23,6 +23,8 @@ pub enum LimitKind {
     LiquidationDistanceFloor,
     /// Maximum margin utilisation (fraction of available margin).
     MarginUtilisationCeiling,
+    /// Maximum participation as a fraction of rolling hourly ADV (`order_qty / ADV`) — QE-447.
+    MaxParticipation,
     /// Maximum per-vintage drawdown.
     DrawdownCap,
 }
@@ -51,7 +53,8 @@ impl LimitKind {
             LimitKind::MaxGrossExposure
             | LimitKind::MaxNetExposure
             | LimitKind::LiquidationDistanceFloor
-            | LimitKind::MarginUtilisationCeiling => LimitOutcome::Reject,
+            | LimitKind::MarginUtilisationCeiling
+            | LimitKind::MaxParticipation => LimitOutcome::Reject,
             LimitKind::DrawdownCap => LimitOutcome::Halt,
         }
     }
@@ -66,6 +69,7 @@ impl LimitKind {
             LimitKind::MaxNetExposure => "max_net_exposure",
             LimitKind::LiquidationDistanceFloor => "liquidation_distance_floor",
             LimitKind::MarginUtilisationCeiling => "margin_utilisation_ceiling",
+            LimitKind::MaxParticipation => "max_participation",
             LimitKind::DrawdownCap => "drawdown_cap",
         }
     }
@@ -164,6 +168,9 @@ pub struct RiskLimits {
     pub liquidation_distance_floor: Option<Fraction>,
     /// Maximum margin utilisation.
     pub margin_utilisation_ceiling: Option<Fraction>,
+    /// Maximum participation as a fraction of rolling hourly ADV (`order_qty / ADV`) — QE-447.
+    /// `None` (default) disables the guard: no order is ever rejected by the participation cap.
+    pub max_participation: Option<Fraction>,
     /// Maximum per-vintage drawdown.
     pub drawdown_cap: Option<Fraction>,
 }
@@ -220,6 +227,10 @@ mod tests {
         );
         assert_eq!(
             LimitKind::MarginUtilisationCeiling.default_outcome(),
+            LimitOutcome::Reject
+        );
+        assert_eq!(
+            LimitKind::MaxParticipation.default_outcome(),
             LimitOutcome::Reject
         );
         assert_eq!(LimitKind::DrawdownCap.default_outcome(), LimitOutcome::Halt);

@@ -6,8 +6,14 @@
 //! the governor reduces them to a [`PreTradeVerdict`] by **severity** — `Halt` > `Reject` > clamp/`Send`:
 //!
 //! - **Clamp** caps (`MaxNotional`, `MaxLeverage`) shrink the sendable magnitude to the tightest cap.
-//! - **Reject** caps (`MaxGross`, `MaxNet`, `LiquidationDistanceFloor`, `MarginUtilisationCeiling`) refuse the
-//!   order outright (send **no** new target — keep trading, position unchanged); a `Reject` outranks a clamp.
+//! - **Reject** caps (`MaxGross`, `MaxNet`, `LiquidationDistanceFloor`, `MarginUtilisationCeiling`,
+//!   `MaxParticipation`) refuse the order outright (send **no** new target — keep trading, position
+//!   unchanged); a `Reject` outranks a clamp.
+//!
+//! The QE-447 **%ADV participation guard** (`MaxParticipation`) is one of the Reject caps: it rejects a
+//! delta-close order whose participation `|order notional| / ADV` exceeds a configured fraction of the rolling
+//! hourly ADV supplied via [`PreTradeGovernor::with_adv`]. It defaults **off** (`RiskLimits.max_participation`
+//! is `None`); a configured cap with unknown/non-positive ADV and a live order fails **closed**.
 //! - **Halt** (contract-general; no pre-trade kind defaults to it) flattens-and-halts.
 //!
 //! The per-vintage `DrawdownCap` (→ `Halt`) is **not** a per-order pre-trade check — it is the QE-212 breaker
@@ -48,6 +54,11 @@ pub struct PreTradeGovernor {
     limits: RiskLimits,
     /// Venue maintenance-margin rate — needed by the liquidation-distance and margin-utilisation models.
     maintenance_margin_rate: Fraction,
+    /// Rolling hourly ADV in **dollars** of the traded instrument (QE-440 unit), used by the QE-447 %ADV
+    /// participation guard: participation `= |order notional| / ADV`. `None` means "ADV unknown at this
+    /// plan" — with a configured participation cap and a live order that is **fail-closed** (reject), the
+    /// same convention the liquidation/margin caps use for a degenerate required input.
+    adv: Option<Notional>,
 }
 
 /// Severity rank for reducing a set of outcomes (`Halt` most severe).
@@ -74,7 +85,20 @@ impl PreTradeGovernor {
         Self {
             limits,
             maintenance_margin_rate,
+            // Default: no ADV supplied. With the participation cap defaulting to `None` too (QE-447), the
+            // guard is fully inert unless *both* an ADV and a cap are configured — so existing call sites
+            // and goldens are unchanged.
+            adv: None,
         }
+    }
+
+    /// Supply the rolling hourly ADV (dollars, QE-440 unit) the QE-447 participation guard divides against.
+    /// A rolling ADV changes each hour, so it is set per plan cycle here rather than baked into `new`.
+    /// `None` leaves ADV unknown (fail-closed under a configured participation cap with a live order).
+    #[must_use]
+    pub fn with_adv(mut self, adv: Option<Notional>) -> Self {
+        self.adv = adv;
+        self
     }
 
     /// Check `target` against the configured caps given the current `capital` view, and decide.
@@ -171,6 +195,35 @@ impl PreTradeGovernor {
                     LimitKind::MarginUtilisationCeiling,
                     format!("no available margin ({avail}) with notional {mag}"),
                 ));
+            }
+        }
+        // QE-447: %ADV participation guard. Reject a delta-close order whose participation
+        // `|order notional| / ADV` exceeds the configured fraction of a rolling hourly ADV. A flat order
+        // (`mag == 0`) has zero participation and is always safe — no division is performed. When the cap is
+        // configured but ADV is unknown / non-positive / the division overflows with a live order, we
+        // **fail closed** (reject), matching the liquidation/margin caps' handling of a degenerate required
+        // input. `checked_div` keeps the order path panic-free (QE-268) — never the panicking `/`.
+        if let Some(cap) = self.limits.max_participation {
+            if mag > Decimal::ZERO {
+                match self.adv.map(Notional::get) {
+                    Some(adv) if adv > Decimal::ZERO => match mag.checked_div(adv) {
+                        Some(participation) if participation > cap.get() => {
+                            breaches.push(LimitBreach::with_default_outcome(
+                                LimitKind::MaxParticipation,
+                                format!("participation {participation} > cap {}", cap.get()),
+                            ));
+                        }
+                        Some(_) => {}
+                        None => breaches.push(LimitBreach::with_default_outcome(
+                            LimitKind::MaxParticipation,
+                            format!("participation undefined (notional {mag} / adv {adv})"),
+                        )),
+                    },
+                    _ => breaches.push(LimitBreach::with_default_outcome(
+                        LimitKind::MaxParticipation,
+                        format!("adv unknown/non-positive with notional {mag}"),
+                    )),
+                }
             }
         }
 
@@ -498,5 +551,106 @@ mod tests {
             assert_eq!(decision.verdict, PreTradeVerdict::Reject);
             assert!(breach_of(&decision, LimitKind::MarginUtilisationCeiling));
         }
+    }
+
+    /// A governor carrying only a participation cap and a rolling hourly ADV.
+    fn participation_gov(cap: &str, adv: Option<&str>) -> PreTradeGovernor {
+        PreTradeGovernor::new(
+            RiskLimits {
+                max_participation: Some(frac(cap)),
+                ..RiskLimits::default()
+            },
+            frac("0"),
+        )
+        .with_adv(adv.map(n))
+    }
+
+    /// AC (headline): a delta-close order exceeding the configured %ADV is **Rejected**, with the participation
+    /// value carried in the breach detail; a within-threshold order passes.
+    #[test]
+    fn over_participation_is_rejected_within_passes() {
+        // ADV 1_000_000; cap 1% → participation limit 10_000 notional.
+        let gov = participation_gov("0.01", Some("1000000"));
+
+        // 25_000 / 1_000_000 = 2.5% > 1% → reject.
+        let over = gov.check(target("25000"), capital("100000", "100000"));
+        assert_eq!(over.verdict, PreTradeVerdict::Reject);
+        assert!(breach_of(&over, LimitKind::MaxParticipation));
+        let detail = &over
+            .breaches
+            .iter()
+            .find(|b| b.kind == LimitKind::MaxParticipation)
+            .map(|b| b.detail.clone())
+            .unwrap_or_default();
+        assert!(
+            detail.contains("0.025"),
+            "breach detail must carry the participation 0.025, got: {detail}"
+        );
+
+        // 5_000 / 1_000_000 = 0.5% ≤ 1% → no participation breach, sent unchanged.
+        let within = gov.check(target("5000"), capital("100000", "100000"));
+        assert_eq!(within.verdict, PreTradeVerdict::Send(n("5000")));
+        assert!(!breach_of(&within, LimitKind::MaxParticipation));
+
+        // Sign is irrelevant — participation is on the magnitude; a short of the same size also breaches.
+        let short = gov.check(target("-25000"), capital("100000", "100000"));
+        assert_eq!(short.verdict, PreTradeVerdict::Reject);
+        assert!(breach_of(&short, LimitKind::MaxParticipation));
+    }
+
+    /// Default `None` participation cap = no guard: even a huge order with ADV present is never rejected by the
+    /// participation guard — current behaviour is unchanged unless the cap is configured.
+    #[test]
+    fn default_none_participation_is_no_guard() {
+        // No `max_participation` in the limits; ADV supplied but must be ignored (cap is the gate).
+        let gov = PreTradeGovernor::new(RiskLimits::default(), frac("0")).with_adv(Some(n("1")));
+        let decision = gov.check(target("1000000"), capital("100000", "100000"));
+        assert_eq!(decision.verdict, PreTradeVerdict::Send(n("1000000")));
+        assert!(!breach_of(&decision, LimitKind::MaxParticipation));
+        assert!(decision.breaches.is_empty());
+    }
+
+    /// Fail-safe (no panic, no divide-by-zero): a configured cap with unknown / zero / negative ADV and a live
+    /// order **fails closed** (reject); a flat order with unknown ADV passes (zero participation).
+    #[test]
+    fn participation_fail_safe_on_zero_or_unknown_adv() {
+        // (a) ADV unknown (None) with a live order → reject, no panic.
+        let unknown =
+            participation_gov("0.01", None).check(target("5000"), capital("100000", "100000"));
+        assert_eq!(unknown.verdict, PreTradeVerdict::Reject);
+        assert!(breach_of(&unknown, LimitKind::MaxParticipation));
+
+        // (b) ADV zero / negative with a live order → reject, no divide-by-zero.
+        for adv in ["0", "-1000"] {
+            let decision = participation_gov("0.01", Some(adv))
+                .check(target("5000"), capital("100000", "100000"));
+            assert_eq!(decision.verdict, PreTradeVerdict::Reject, "adv {adv}");
+            assert!(breach_of(&decision, LimitKind::MaxParticipation));
+        }
+
+        // (c) A flat order has zero participation → passes even with unknown ADV (no division performed).
+        let flat = participation_gov("0.01", None).check(target("0"), capital("100000", "100000"));
+        assert_eq!(flat.verdict, PreTradeVerdict::Send(Notional::ZERO));
+        assert!(!breach_of(&flat, LimitKind::MaxParticipation));
+    }
+
+    /// Policy parity with the sibling caps: the participation breach is a `Reject`, so it outranks a
+    /// co-occurring `MaxNotional` clamp (the order is rejected, not clamped-and-sent) — same reducer.
+    #[test]
+    fn participation_reject_outranks_clamp() {
+        let gov = PreTradeGovernor::new(
+            RiskLimits {
+                max_notional: Some(n("100000")),       // clamp
+                max_participation: Some(frac("0.01")), // reject
+                ..RiskLimits::default()
+            },
+            frac("0"),
+        )
+        .with_adv(Some(n("1000000")));
+        // 500_000 > max_notional 100_000 (clamp) AND 500_000 / 1_000_000 = 50% > 1% (reject).
+        let decision = gov.check(target("500000"), capital("100000", "100000"));
+        assert_eq!(decision.verdict, PreTradeVerdict::Reject);
+        assert!(breach_of(&decision, LimitKind::MaxNotional));
+        assert!(breach_of(&decision, LimitKind::MaxParticipation));
     }
 }
