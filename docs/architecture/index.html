@@ -32,12 +32,15 @@
       <p class="lede">A deterministic, deployment-agnostic quant engine: two decoupled pipelines
         (<strong>training</strong> → sealed vintage, and <strong>runtime</strong>) sharing one domain
         vocabulary, plus an authenticated admin UI (<code>qe-server</code> + React SPA) that triggers and
-        supervises the training-side CLI jobs. All state is paper/offline — no live order submission.</p>
+        supervises the training-side CLI jobs. A newer offline, default-off <strong>GP indicator-evolution</strong>
+        subsystem (<code>qe evolve</code> → a sealed <code>qe-formula-pool</code>) sits alongside training under an
+        <strong>RBAC + audit-log + <code>seal_allowed</code></strong> governance gate. All state is paper/offline —
+        no live order submission, and the live evolve→production-seal path is currently fail-closed by design.</p>
       <div class="meta-row">
         <span class="chip"><strong>Repo</strong>&nbsp; aoimasu/quant-engine</span>
-        <span class="chip"><strong>Generated</strong>&nbsp; 2026-07-05</span>
+        <span class="chip"><strong>Generated</strong>&nbsp; 2026-07-18</span>
         <span class="chip"><strong>Stack</strong>&nbsp; Rust 1.96 · axum · React 19 · LMDB</span>
-        <span class="chip"><strong>Crates</strong>&nbsp; 20 + web SPA</span>
+        <span class="chip"><strong>Crates</strong>&nbsp; 26 + web SPA</span>
       </div>
       <div class="callout">Diagrams are editable: the <code>.drawio</code> files under <code>diagrams/</code>
         open in diagrams.net and are the source of truth; the embedded <code>.svg</code> files are their
@@ -48,16 +51,20 @@
     <!-- 1 -->
     <section id="s1">
       <h2><span class="num">1</span>Architecture Summary</h2>
-      <p>A <strong>Rust Cargo workspace</strong> of 20 internal crates plus a <strong>Vite + React 19 +
+      <p>A <strong>Rust Cargo workspace</strong> of 26 internal crates plus a <strong>Vite + React 19 +
         TypeScript</strong> admin SPA. Deterministic work runs as CLI jobs (<code>qe-cli</code>); a small
         <code>axum</code> server (<code>qe-server</code>) wraps those jobs behind an authenticated HTTP API
-        and hosts the SPA.</p>
+        and hosts the SPA. A newer offline, default-off <strong>GP indicator-evolution</strong> subsystem
+        (<code>qe evolve</code> → sealed <code>qe-formula-pool</code>) is governed by an RBAC + audit-log +
+        server-authoritative <code>seal_allowed</code> production-seal path.</p>
       <div class="tablewrap"><table>
         <thead><tr><th>Area</th><th>Detected technology</th><th>Evidence</th><th>Confidence</th></tr></thead>
         <tbody>
           <tr><td>Language (engine)</td><td>Rust 2021, edition pinned 1.96</td><td><code>Cargo.toml</code>, <code>rust-toolchain.toml</code></td><td>High</td></tr>
-          <tr><td>Workspace</td><td>Cargo workspace, <code>crates/*</code> (20)</td><td><code>Cargo.toml</code></td><td>High</td></tr>
-          <tr><td>CLI</td><td><code>qe-cli</code> (binary <code>qe</code>): train / backtest / ingest</td><td><code>crates/cli/src/main.rs</code></td><td>High</td></tr>
+          <tr><td>Workspace</td><td>Cargo workspace, <code>crates/*</code> (26)</td><td><code>Cargo.toml</code></td><td>High</td></tr>
+          <tr><td>CLI</td><td><code>qe-cli</code> (binary <code>qe</code>): train / backtest / ingest / evolve</td><td><code>crates/cli/src/main.rs</code></td><td>High</td></tr>
+          <tr><td>GP indicator evolution</td><td>Offline, default-off symbolic regression (<code>qe evolve</code>) → sealed <code>qe-formula-pool</code></td><td><code>crates/wfo/src/gp/*</code>, <code>crates/formula-pool</code>, <code>crates/run-protocol</code></td><td>High</td></tr>
+          <tr><td>Pool governance / ops-safety</td><td>Per-request RBAC (<code>require_role</code>) + hash-chained+HMAC audit log + <code>seal_allowed</code></td><td><code>crates/server/src/{auth/mod,audit,pool_seal,pools}.rs</code></td><td>High</td></tr>
           <tr><td>Web/API server</td><td>axum 0.8 + tokio (multi-thread)</td><td><code>crates/server/src/lib.rs</code></td><td>High</td></tr>
           <tr><td>Static hosting</td><td>tower-http <code>ServeDir</code>/<code>ServeFile</code></td><td><code>crates/server/src/lib.rs</code></td><td>High</td></tr>
           <tr><td>Frontend</td><td>React 19 + TS 5.7, Vite 6</td><td><code>web/package.json</code>, <code>web/vite.config.ts</code></td><td>High</td></tr>
@@ -114,9 +121,11 @@
           <tr><td><code>crates/determinism</code></td><td>RNG, reproduction harness, lineage</td><td><code>src/{rng,harness,lineage}.rs</code></td></tr>
           <tr><td><code>crates/error</code> / <code>telemetry</code> / <code>clock</code></td><td>Error taxonomy + hot-path lint; tracing; clock-skew guard</td><td><code>src/lib.rs</code>, <code>skew.rs</code></td></tr>
           <tr><td><code>crates/storage</code></td><td>Embedded LMDB market + synthetic stores</td><td><code>src/{store,synthetic,key}.rs</code></td></tr>
-          <tr><td><code>crates/signal</code></td><td>Indicators, features, genome (train+runtime shared)</td><td><code>src/{genome,feature,indicator/*}.rs</code></td></tr>
-          <tr><td><code>crates/wfo</code></td><td>Walk-forward / MAP-Elites search (search side)</td><td><code>src/{mapelites,fitness,cv,friction}.rs</code></td></tr>
+          <tr><td><code>crates/signal</code></td><td>Indicators, features, genome (train+runtime shared)</td><td><code>src/{genome,feature,indicator/*}.rs</code>, <code>indicator/expr.rs</code> (GP FIR tree)</td></tr>
+          <tr><td><code>crates/wfo</code></td><td>Walk-forward / MAP-Elites search (search side) + the GP engine (<code>src/gp/</code>)</td><td><code>src/{mapelites,fitness,cv,friction}.rs</code>, <code>src/gp/{mod,archive,deflation,freeze,gates,variation}.rs</code></td></tr>
           <tr><td><code>crates/ensemble</code></td><td>Discrete-DE ensemble, stress, capacity (portfolio side)</td><td><code>src/{de,objective,stress,capacity}.rs</code></td></tr>
+          <tr><td><code>crates/formula-pool</code></td><td>Frozen-pool artefact leaf (K≤16 S-exprs + deflation + lineage); separate root; runtime never loads a pool</td><td><code>src/{lib,lifecycle,governance_record}.rs</code></td></tr>
+          <tr><td><code>crates/run-protocol</code></td><td>Leaf: <code>EvolveParams</code>/<code>ProgressLine</code>/<code>PROTOCOL_VERSION</code></td><td><code>src/lib.rs</code></td></tr>
           <tr><td><code>crates/validation</code> / <code>gate</code></td><td>DSR/PBO/SPA suite; G1 holdout-embargo gate</td><td><code>src/{dsr,pbo,spa}.rs</code></td></tr>
           <tr><td><code>crates/vintage</code> / <code>report</code></td><td>Sealed artefact format; validation evidence pack</td><td><code>src/lib.rs</code></td></tr>
           <tr><td><code>crates/ingest</code></td><td>Binance bulk-history download + fusion</td><td><code>src/{downloader,fuse,integrity}.rs</code></td></tr>
@@ -139,7 +148,8 @@
       <ul>
         <li><strong>Entry</strong> — <code>main.tsx</code> mounts <code>&lt;App/&gt;</code> in <code>StrictMode</code>; imports fonts + <code>global.css</code>. <code>index.html</code> sets <code>data-theme="dark"</code>.</li>
         <li><strong>Shell / nav</strong> — <code>app/App.tsx</code> holds auth <code>status</code> (from <code>fetchMe()</code>) + <code>active</code> screen; <code>design/AppShell.tsx</code> renders the sidebar and calls <code>onNav(id)</code>. A one-shot deep-link pushes a sealed vintage from the training monitor into the New-backtest flow.</li>
-        <li><strong>Screens</strong> — <code>backtest/</code> (List, New, Result), <code>training/</code> (List, New, Monitor), plus MarketData, Login, Placeholder (Strategies).</li>
+        <li><strong>Screens</strong> — <code>backtest/</code> (List, New, Result), <code>training/</code> (List, New, Monitor), the newer <code>evolve/</code> (EvolveArea, CampaignList, NewCampaign, CampaignMonitor, FormulaSexpr, PoolReview, PoolBrowser) mirroring <code>training/</code>, plus MarketData, Login, Placeholder (Strategies).</li>
+        <li><strong><code>evolve/</code> area</strong> — launches/monitors GP campaigns and drives the pool-governance gate; it honestly surfaces the server's fail-closed reality (a production seal is refused with 409 + named blockers, never faked). Evidence: <code>web/src/app/evolve/*</code>.</li>
         <li><strong>Design system</strong> — <code>design/index.ts</code> exports Button, Card, Badge, Callout, Input, Select, DataTable, Tag, Pnl, Tabs, Icon, AppShell. Styling via <code>:root</code> CSS design tokens (<code>styles/tokens/*.css</code>) + a runtime <code>injectCss()</code> for jsdom parity.</li>
         <li><strong>API layer</strong> — <code>api/session.ts</code> + <code>api/runs.ts</code> (typed <code>fetch</code>, <code>credentials: 'same-origin'</code>). Monitor screens <strong>poll <code>GET /api/runs/:id</code> every 2 s</strong> with bounded retry (<code>MAX_POLL_FAILURES = 4</code>), stopping on a terminal status.</li>
       </ul>
@@ -164,8 +174,14 @@
           <tr><td>GET</td><td><code>/api/runs/{id}/result</code></td><td><code>get_result</code> — runs/api.rs</td><td>Yes</td><td>RunManager</td><td>result.json / 409</td></tr>
           <tr><td>GET</td><td><code>/api/vintages</code></td><td><code>list_vintages</code> — read.rs</td><td>Yes</td><td>ReadState</td><td>Hash-verified list</td></tr>
           <tr><td>GET</td><td><code>/api/market-data/coverage</code></td><td><code>market_data_coverage</code> — read.rs</td><td>Yes</td><td>ReadState</td><td>LMDB coverage rows</td></tr>
+          <tr><td>GET</td><td><code>/api/formula-pools[/{id}]</code></td><td><code>list_pools</code>/<code>get_pool</code> — pools.rs</td><td>Session</td><td>PoolState</td><td>Sealed pool list / one pool</td></tr>
+          <tr><td>GET</td><td><code>/api/runs/{id}/archive</code></td><td><code>get_archive</code> — pools.rs</td><td>Session</td><td>PoolState</td><td>Evolve MAP-Elites archive</td></tr>
+          <tr><td>POST</td><td><code>/api/formula-pools/{id}/{approve,reject,revoke,seal}</code></td><td>pools.rs</td><td>Session + <code>require_role(Approver)</code></td><td>PoolState + <code>seal_allowed</code></td><td>Governed lifecycle; seal → 409 + named blockers if refused</td></tr>
+          <tr><td>POST</td><td><code>/api/runs/{id}/halt</code></td><td><code>halt</code> — pools.rs</td><td>Session + <code>require_role(Operator)</code></td><td>RunManager</td><td>Authz'd run abort</td></tr>
+          <tr><td>GET</td><td><code>/api/audit</code></td><td><code>get_audit</code> — audit.rs</td><td>Session + <code>require_role(Operator)</code></td><td>AuditLog</td><td>Replays + verifies the hash-chain; fail-closed if key unset</td></tr>
         </tbody>
       </table></div>
+      <p>All routes are session-gated by <code>require_session</code>. The <strong>governance</strong> routes (approve/reject/revoke/seal, halt, audit) are <strong>additionally</strong> behind a per-request <code>require_role</code> seam resolving the caller's role from env allowlists; the read routes need only a valid session.</p>
     </section>
 
     <!-- 7 -->
@@ -181,6 +197,8 @@
         <li><code>mint_session_cookie</code> signs <code>{email, exp}</code> (12 h) as <code>HttpOnly; Secure; SameSite=Lax</code>; <code>require_session</code> verifies it on every protected route.</li>
       </ol>
       <div class="callout">A missing <code>QE_SESSION_SECRET</code> falls back to a random ephemeral secret (sessions don't survive a restart) — the server still boots, fail-closed.</div>
+      <h3>RBAC / separation of duties (QE-452/454)</h3>
+      <p>On top of the session gate, governance routes enforce per-request RBAC. <code>require_role</code> resolves the session-derived email against three env allowlists — <code>QE_ROLE_OPERATORS</code>, <code>QE_ROLE_APPROVERS</code>, <code>QE_ROLE_ADMINS</code> — that are <strong>never</strong> carried in the cookie or body, so a role cannot be self-asserted. The production seal requires <strong>dual sign-off</strong>: two distinct approvers, each different from the launcher. Whether a pool may seal is decided by the server-authoritative <code>seal_allowed</code> predicate (§14), not by the caller. Evidence: <code>crates/server/src/auth/mod.rs</code>, <code>pool_seal.rs</code>, <code>crates/formula-pool/src/governance_record.rs</code>.</p>
     </section>
 
     <!-- 8 -->
@@ -195,6 +213,8 @@
         <li>Supervisor tails JSON-line progress, atomically updates <code>meta.json</code>; child writes <code>result.json</code>.</li>
         <li><code>BacktestResult</code> polls every 2 s; on <code>succeeded</code> fetches the result once and renders metrics, inline-SVG charts, heatmap, trades.</li>
       </ol>
+      <h3>The <code>evolve</code> flow — a second, parallel lifecycle</h3>
+      <p>A GP campaign (<code>type:"evolve"</code>) reuses the same create→supervise→poll machinery but produces a <em>pool</em>, not a vintage. An <strong>ephemeral evolve RUN</strong> (illuminate → GP-aware deflation/gates → K≤16 freeze) seals a <code>qe-formula-pool</code>; the terminal <code>done</code> line emits <code>pool:</code> and <strong>never <code>vintage:</code></strong>. That pool then has its own <strong>durable POOL lifecycle</strong> — <code>Draft → Approved → Sealed</code> (+ Rejected/Revoked) — persisted under <code>&lt;data_dir&gt;/governance</code>, not in the run. Guarded transitions reject every illegal edge; the production <code>seal</code> is gated by <code>require_role(Approver)</code>, dual sign-off, and the <code>seal_allowed</code> predicate (§14). Evidence: <code>crates/formula-pool/src/lifecycle.rs</code>, <code>crates/server/src/pools.rs</code>, <code>crates/run-protocol/src/lib.rs</code>.</p>
     </section>
 
     <!-- 9 -->
@@ -230,6 +250,10 @@
           <tr><td><code>QE_GOOGLE_REDIRECT_URI</code></td><td>Registered callback URI</td><td>required for login</td><td>crates/server/src/auth/mod.rs</td></tr>
           <tr><td><code>QE_SESSION_SECRET</code></td><td>HMAC session key — <em>secret, omitted</em> (random fallback)</td><td>recommended (prod)</td><td>crates/server/src/auth/mod.rs</td></tr>
           <tr><td><code>QE_ADMIN_ALLOWED_EMAILS</code></td><td>Comma-separated allowlist (fail-closed)</td><td>required</td><td>crates/server/src/auth/mod.rs</td></tr>
+          <tr><td><code>QE_ROLE_OPERATORS</code> / <code>QE_ROLE_APPROVERS</code> / <code>QE_ROLE_ADMINS</code></td><td>RBAC role allowlists (halt/audit; approve/seal; admin)</td><td>required for governance ops</td><td>crates/server/src/auth/mod.rs</td></tr>
+          <tr><td><code>QE_AUDIT_SIGNING_KEY</code></td><td>HMAC key for the audit log — <em>secret, omitted</em></td><td>required (fail-closed if unset)</td><td>crates/server/src/audit.rs</td></tr>
+          <tr><td><code>QE_SERVER_MAX_EVOLVE_CONCURRENCY</code></td><td>Evolve-run semaphore (default <code>1</code>)</td><td>optional</td><td>crates/server/src/{lib,runs/manager}.rs</td></tr>
+          <tr><td><code>QE_SERVER_MAX_RUN_SECS</code></td><td>Per-run wall-clock deadline (default <code>86400</code> ≈ 24h)</td><td>optional</td><td>crates/server/src/{lib,runs/manager}.rs</td></tr>
         </tbody>
       </table></div>
       <p>Per-environment separation (staging/production configs or deploy manifests) is <strong>not detected in repository</strong>.</p>
@@ -253,6 +277,7 @@
       <h2><span class="num">12</span>CI/CD and Observability</h2>
       <figure><div class="scroll"><img src="./diagrams/10-cicd-observability.svg" alt="CI/CD and observability diagram"></div>
         <figcaption><span>GitHub Actions gates + tracing-based observability.</span><a href="./diagrams/10-cicd-observability.drawio">10-cicd-observability.drawio</a></figcaption></figure>
+      <div class="callout warn"><strong>Program note (2026-07-18):</strong> CI and <code>main</code> branch protection were <strong>temporarily disabled</strong> during the QE-430..454 run; re-enabling both is a recorded repo-admin follow-up (§15). The workflow files below are unchanged and describe the intended (to-be-restored) pipeline. Evidence: <code>docs/current-state.html</code>.</div>
       <ul>
         <li><code>ci.yml</code> (Rust): <code>fmt</code>, <code>clippy -D warnings</code>, <code>test --locked</code> (runs the firewall + hot-path lint tests), <code>cargo-deny check</code>. Toolchain pinned by SHA.</li>
         <li><code>frontend.yml</code> (web, path-filtered): <code>npm ci → lint → build → test</code> (vitest) on Node 20.</li>
@@ -268,6 +293,7 @@
         <figcaption><span>No queue/cron/webhooks — in-process subprocess supervision.</span><a href="./diagrams/11-background-jobs.drawio">11-background-jobs.drawio</a></figcaption></figure>
       <ul>
         <li><strong>Worker pool</strong> — a tokio semaphore bounds concurrent subprocesses (<code>QE_SERVER_MAX_CONCURRENCY</code>, default 2); excess stay <code>queued</code>.</li>
+        <li><strong><code>qe evolve</code> job + supervision</strong> — the GP campaign (<code>type:"evolve"</code>) adds a <strong>per-run ~24h wall-clock deadline</strong> (<code>QE_SERVER_MAX_RUN_SECS</code>) via <code>tokio::time::timeout</code> reusing the abort → <code>kill_on_drop</code> path, and a <strong>dedicated evolve semaphore</strong> (<code>QE_SERVER_MAX_EVOLVE_CONCURRENCY</code>, default <code>1</code>) that serialises campaigns without starving backtests. An authz'd <code>POST /api/runs/{id}/halt</code> (<code>require_role(Operator)</code>) aborts a run early. Evidence: <code>crates/server/src/runs/manager.rs</code>.</li>
         <li><strong>Spawn</strong> — <code>CliJobSpawner</code> runs <code>qe-cli</code> with piped stdout/stderr and <code>kill_on_drop</code> (no runaway job on shutdown).</li>
         <li><strong>Supervision</strong> — tails JSON-line progress, atomically rewrites <code>meta.json</code>; records <code>succeeded</code>/<code>failed</code> + exit code + error tail.</li>
         <li><strong>Client</strong> — SPA polls <code>GET /api/runs/:id</code> every 2 s, stops on terminal (no server push). No retry/DLQ — a failed run is terminal.</li>
@@ -285,6 +311,10 @@
         <li><strong>AuthZ</strong> — fail-closed email allowlist + strict claim checks.</li>
         <li><strong>Secrets</strong> — env only; no committed secrets; missing session secret degrades to random ephemeral key.</li>
         <li><strong>QE-132 firewall</strong> — <code>tests/firewall.rs</code> fails CI on forbidden edges: <code>qe-wfo ⊬ {ensemble, runtime, venue}</code>, <code>qe-ensemble ⊬ {wfo, runtime, venue}</code>, <code>qe-server ⊬ {runtime, venue}</code> — the server can never link the live path.</li>
+        <li><strong>Pool governance is firewall-clean</strong> — deflation stats cross into <code>seal_allowed</code> as plain <strong>data</strong> (no crate edge); <code>qe-runtime</code>/<code>qe-venue</code> never depend on <code>qe-formula-pool</code> (the runtime never loads a pool).</li>
+        <li><strong>Tamper-evident audit log (QE-454)</strong> — <code>&lt;data_dir&gt;/audit/log.jsonl</code>, append-only, each entry bound into a <strong>hash chain</strong> (<code>entry_hash = SHA256(canonical ‖ prev)</code>) + <strong>HMAC</strong> under <code>QE_AUDIT_SIGNING_KEY</code>; <code>GET /api/audit</code> verifies the chain; <strong>fail-closed</strong> if the key is unset. Evidence: <code>crates/server/src/audit.rs</code>.</li>
+        <li><strong>Server-authoritative <code>seal_allowed</code> (QE-454)</strong> — the single choke point: an AND over {hash-verified pool, audit replay, compiled const} requiring the <strong>8 hard-blocks</strong> + <code>mode == production</code> + not-revoked + dual sign-off. Any failure ⇒ <code>409</code> + named blockers + an appended <code>Reject</code> audit entry. Evidence: <code>crates/server/src/pool_seal.rs</code>.</li>
+        <li><strong>3 structural barriers (QE-454)</strong> — (1) the compiled <code>DEFLATION_BASIS_VERSION</code> prerequisite bitset (<code>crates/validation/src/basis.rs</code>, launch-time <code>400</code>); (2) a separate research-artefacts root the production repository never scans (<code>crates/server/src/pools.rs</code>); (3) a fail-closed <code>assert_production_eligible</code> keyed on the hashed pool <code>mode</code> (<code>crates/formula-pool/src/lib.rs</code>). Production sealing is fail-closed today: per-formula <code>gate_evidence</code> for hard-blocks 5–8 isn't yet emitted by the evolve pipeline (§15).</li>
         <li><strong>No live order path</strong>; workspace lints <code>unsafe_code = deny</code> + <code>clippy::unwrap_used = deny</code> keep the order path panic-free.</li>
         <li><strong>Network</strong> — loopback bind by default; TLS/CORS/rate-limiting <strong>not detected</strong> in code (fronting proxy assumed).</li>
       </ul>
@@ -300,6 +330,8 @@
           <tr><td>Ephemeral session secret fallback</td><td><code>auth/mod.rs</code> <code>from_env</code></td><td>Refuse to boot on non-loopback bind + missing <code>QE_SESSION_SECRET</code></td><td><span class="pill high">High</span></td></tr>
           <tr><td><code>ingest</code> job is a scaffold only</td><td><code>crates/cli/src/main.rs</code></td><td>Track the "real ingestion is future work" seam; document sample-store reliance</td><td><span class="pill med">Medium</span></td></tr>
           <tr><td>No CD / deploy automation</td><td><code>.github/workflows/*</code></td><td>Add a release workflow once a target platform is chosen</td><td><span class="pill med">Medium</span></td></tr>
+          <tr><td>Live evolve→production-seal path is fail-closed (incomplete)</td><td><code>crates/server/src/pool_seal.rs</code> (HB5–8); <code>docs/mds/reviewed/qe-454-*.md</code></td><td>Wire per-formula <code>gate_evidence</code> into the evolve pipeline (deferred); the predicate is fully armed</td><td><span class="pill med">Medium</span></td></tr>
+          <tr><td>CI + <code>main</code> branch protection temporarily disabled</td><td><code>docs/current-state.html</code>; §12 program note</td><td>Re-enable CI and branch protection (repo-admin action)</td><td><span class="pill high">High</span></td></tr>
           <tr><td>No environment separation config</td><td>One <code>config.example.toml</code></td><td>Add per-profile overlays or a documented per-env matrix</td><td><span class="pill med">Medium</span></td></tr>
           <tr><td>Run status via polling only</td><td><code>web/src/api/runs.ts</code></td><td>Consider SSE/websocket if concurrent viewers grow (fine at current scale)</td><td><span class="pill low">Low</span></td></tr>
           <tr><td>LMDB single-open contract is a footgun</td><td><code>crates/storage/src/store.rs</code></td><td>Keep the <code>Arc</code> single-open discipline; add a debug double-open guard</td><td><span class="pill low">Low</span></td></tr>
@@ -309,7 +341,8 @@
     </section>
 
     <footer>
-      <p>Generated 2026-07-05 by the architecture-docs skill. Evidence-based; claims trace to files under
+      <p>Generated 2026-07-05, refreshed 2026-07-18 by the architecture-docs skill for the QE-430..454
+        GP-indicator-evolution program. Evidence-based; claims trace to files under
         <code>crates/</code>, <code>web/</code>, <code>.github/</code>, and root config. Areas without repository
         evidence are marked "not detected in repository". Diagram <code>.drawio</code> sources are editable in
         diagrams.net; SVGs are their exports.</p>

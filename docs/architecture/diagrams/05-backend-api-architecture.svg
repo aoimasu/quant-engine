@@ -1,24 +1,36 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 640" font-family="Helvetica, Arial, sans-serif" font-size="13">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 760" font-family="Helvetica, Arial, sans-serif" font-size="13">
 <defs><marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L8,3 L0,6 Z" fill="#5f6368"/></marker></defs>
-<rect x="0" y="0" width="980" height="640" fill="#ffffff"/>
+<rect x="0" y="0" width="980" height="760" fill="#ffffff"/>
 <text x="24" y="34" font-size="20" font-weight="700" fill="#202124">Backend / API Architecture (qe-server)</text>
-<text x="24" y="54" font-size="12" fill="#5f6368">Evidence: crates/server/src/lib.rs, auth/mod.rs, runs/api.rs, read.rs</text>
-<rect x="250" y="200" width="460" height="300" rx="10" fill="none" stroke="#9aa0a6" stroke-width="1.5" stroke-dasharray="6 4" opacity="0.9"/>
+<text x="24" y="54" font-size="12" fill="#5f6368">Evidence: crates/server/src/{lib,auth/mod,runs/api,read,pools,pool_seal,audit}.rs</text>
+<rect x="250" y="200" width="460" height="520" rx="10" fill="none" stroke="#9aa0a6" stroke-width="1.5" stroke-dasharray="6 4" opacity="0.9"/>
 <text x="262" y="220" font-size="12" font-weight="700" fill="#9aa0a6" letter-spacing="0.5">/API NAMESPACE</text>
-<rect x="740" y="200" width="210" height="300" rx="10" fill="none" stroke="#9aa0a6" stroke-width="1.5" stroke-dasharray="6 4" opacity="0.9"/>
+<rect x="740" y="200" width="210" height="520" rx="10" fill="none" stroke="#9aa0a6" stroke-width="1.5" stroke-dasharray="6 4" opacity="0.9"/>
 <text x="752" y="220" font-size="12" font-weight="700" fill="#9aa0a6" letter-spacing="0.5">STATE + WORKERS</text>
 <line x1="210" y1="147" x2="250" y2="140" stroke="#5f6368" stroke-width="1.6" marker-end="url(#arrow)"/>
 <line x1="370" y1="170" x2="370" y2="240" stroke="#5f6368" stroke-width="1.6" marker-end="url(#arrow)"/>
 <line x1="470" y1="285" x2="500" y2="275" stroke="#5f6368" stroke-width="1.6" marker-end="url(#arrow)"/>
 <rect x="466.0" y="270.0" width="38" height="18" rx="4" fill="#ffffff" stroke="#dadce0"/>
 <text x="485.0" y="283.0" font-size="11" fill="#3c4043" text-anchor="middle">gate</text>
-<line x1="680" y1="400" x2="765" y2="350" stroke="#5f6368" stroke-width="1.6" marker-end="url(#arrow)"/>
-<rect x="682.5" y="365.0" width="80" height="18" rx="4" fill="#ffffff" stroke="#dadce0"/>
-<text x="722.5" y="378.0" font-size="11" fill="#3c4043" text-anchor="middle">spawn/tail</text>
-<line x1="680" y1="440" x2="765" y2="430" stroke="#5f6368" stroke-width="1.6" marker-end="url(#arrow)"/>
-<rect x="703.5" y="425.0" width="38" height="18" rx="4" fill="#ffffff" stroke="#dadce0"/>
-<text x="722.5" y="438.0" font-size="11" fill="#3c4043" text-anchor="middle">read</text>
-<line x1="845" y1="380" x2="845" y2="490" stroke="#5f6368" stroke-width="1.6" marker-end="url(#arrow)"/>
+<line x1="590" y1="300" x2="590" y2="330" stroke="#5f6368" stroke-width="1.6" marker-end="url(#arrow)"/>
+<line x1="500" y1="258" x2="472" y2="382" stroke="#5f6368" stroke-width="1.6" marker-end="url(#arrow)"/>
+<rect x="452.0" y="306.0" width="52" height="18" rx="4" fill="#ffffff" stroke="#dadce0"/>
+<text x="478.0" y="319.0" font-size="11" fill="#3c4043" text-anchor="middle">role</text>
+<line x1="420" y1="424" x2="516" y2="538" stroke="#5f6368" stroke-width="1.6" marker-end="url(#arrow)"/>
+<line x1="680" y1="360" x2="765" y2="275" stroke="#5f6368" stroke-width="1.6" marker-end="url(#arrow)"/>
+<rect x="682.5" y="308.0" width="80" height="18" rx="4" fill="#ffffff" stroke="#dadce0"/>
+<text x="722.5" y="321.0" font-size="11" fill="#3c4043" text-anchor="middle">spawn/tail</text>
+<line x1="680" y1="470" x2="765" y2="385" stroke="#5f6368" stroke-width="1.6" marker-end="url(#arrow)"/>
+<rect x="703.5" y="418.0" width="38" height="18" rx="4" fill="#ffffff" stroke="#dadce0"/>
+<text x="722.5" y="431.0" font-size="11" fill="#3c4043" text-anchor="middle">read</text>
+<line x1="680" y1="570" x2="765" y2="460" stroke="#5f6368" stroke-width="1.6" marker-end="url(#arrow)"/>
+<rect x="676.0" y="500.0" width="94" height="18" rx="4" fill="#ffffff" stroke="#dadce0"/>
+<text x="723.0" y="513.0" font-size="11" fill="#3c4043" text-anchor="middle">seal/approve</text>
+<line x1="680" y1="640" x2="765" y2="534" stroke="#5f6368" stroke-width="1.6" marker-end="url(#arrow)"/>
+<rect x="694.0" y="580.0" width="58" height="18" rx="4" fill="#ffffff" stroke="#dadce0"/>
+<text x="723.0" y="593.0" font-size="11" fill="#3c4043" text-anchor="middle">append</text>
+<line x1="845" y1="290" x2="845" y2="300" stroke="#5f6368" stroke-width="1.6" marker-end="url(#arrow)"/>
+<line x1="845" y1="350" x2="845" y2="590" stroke="#5f6368" stroke-width="1.6" marker-end="url(#arrow)"/>
 <rect x="60" y="120" width="150" height="54" rx="7" fill="#e8f0fe" stroke="#3b6fd4" stroke-width="1.6"/>
 <text x="135.0" y="143.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">Browser request</text>
 <text x="135.0" y="159.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">cookie</text>
@@ -26,31 +38,51 @@
 <text x="370.0" y="136.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">axum Router</text>
 <text x="370.0" y="152.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">nest /api + fallback SPA</text>
 <rect x="280" y="240" width="190" height="84" rx="7" fill="#e6f4ea" stroke="#2f8f4e" stroke-width="1.6"/>
-<text x="375.0" y="278.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">public</text>
-<text x="375.0" y="294.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">/health
-/auth/login
-/auth/callback</text>
+<text x="375.0" y="266.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">public</text>
+<text x="375.0" y="284.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">/health</text>
+<text x="375.0" y="298.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">/auth/login</text>
+<text x="375.0" y="312.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">/auth/callback</text>
 <rect x="500" y="240" width="180" height="60" rx="7" fill="#fce8e6" stroke="#c5382b" stroke-width="1.6"/>
 <text x="590.0" y="266.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">require_session</text>
 <text x="590.0" y="282.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">middleware → 401</text>
-<rect x="500" y="330" width="180" height="150" rx="7" fill="#e6f4ea" stroke="#2f8f4e" stroke-width="1.6"/>
-<text x="590.0" y="401.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">protected</text>
-<text x="590.0" y="417.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">/me
-/runs (POST/GET)
-/runs/{id}
-/runs/{id}/result
-/vintages
-/market-data/coverage</text>
-<rect x="765" y="240" width="160" height="60" rx="7" fill="#e8eaed" stroke="#3c4043" stroke-width="1.6"/>
-<text x="845.0" y="266.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">RunManager</text>
-<text x="845.0" y="282.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">worker-pool semaphore</text>
-<rect x="765" y="320" width="160" height="60" rx="7" fill="#e8eaed" stroke="#3c4043" stroke-width="1.6"/>
-<text x="845.0" y="346.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">CliJobSpawner</text>
-<text x="845.0" y="362.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">qe-cli subprocess</text>
-<rect x="765" y="400" width="160" height="60" rx="7" fill="#fef7e0" stroke="#c58a1a" stroke-width="1.6"/>
-<text x="845.0" y="426.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">ReadState</text>
-<text x="845.0" y="442.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">vintages + MarketStore</text>
-<rect x="765" y="490" width="160" height="44" rx="7" fill="#f1f3f4" stroke="#5f6368" stroke-width="1.6"/>
-<text x="845.0" y="508.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">qe-cli (qe)</text>
-<text x="845.0" y="524.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">argv + JSON lines</text>
+<rect x="280" y="360" width="190" height="64" rx="7" fill="#fce8e6" stroke="#c5382b" stroke-width="1.6"/>
+<text x="375.0" y="386.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">require_role (RBAC)</text>
+<text x="375.0" y="402.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">operators/approvers/admins</text>
+<text x="375.0" y="415.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">from env allowlists</text>
+<rect x="500" y="330" width="180" height="190" rx="7" fill="#e6f4ea" stroke="#2f8f4e" stroke-width="1.6"/>
+<text x="590.0" y="352.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">protected (read)</text>
+<text x="590.0" y="372.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">/me</text>
+<text x="590.0" y="386.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">/runs (POST/GET)</text>
+<text x="590.0" y="400.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">/runs/{id}[/result]</text>
+<text x="590.0" y="414.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">/runs/{id}/archive</text>
+<text x="590.0" y="428.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">/vintages</text>
+<text x="590.0" y="442.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">/market-data/coverage</text>
+<text x="590.0" y="456.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">/formula-pools[/{id}]</text>
+<rect x="500" y="540" width="180" height="170" rx="7" fill="#fce8e6" stroke="#c5382b" stroke-width="1.6"/>
+<text x="590.0" y="562.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">governance</text>
+<text x="590.0" y="578.0" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#5f6368" text-anchor="middle">(+ require_role)</text>
+<text x="590.0" y="598.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">/formula-pools/{id}/</text>
+<text x="590.0" y="612.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">  approve·reject·revoke·seal</text>
+<text x="590.0" y="632.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">/runs/{id}/halt</text>
+<text x="590.0" y="652.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">/audit</text>
+<rect x="765" y="240" width="160" height="50" rx="7" fill="#e8eaed" stroke="#3c4043" stroke-width="1.6"/>
+<text x="845.0" y="261.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">RunManager</text>
+<text x="845.0" y="277.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">worker-pool semaphore</text>
+<rect x="765" y="300" width="160" height="50" rx="7" fill="#e8eaed" stroke="#3c4043" stroke-width="1.6"/>
+<text x="845.0" y="321.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">CliJobSpawner</text>
+<text x="845.0" y="337.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">qe-cli subprocess</text>
+<rect x="765" y="360" width="160" height="50" rx="7" fill="#fef7e0" stroke="#c58a1a" stroke-width="1.6"/>
+<text x="845.0" y="381.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">ReadState</text>
+<text x="845.0" y="397.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">vintages + MarketStore</text>
+<rect x="765" y="430" width="160" height="56" rx="7" fill="#fef7e0" stroke="#c58a1a" stroke-width="1.6"/>
+<text x="845.0" y="452.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">PoolState</text>
+<text x="845.0" y="468.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">pools + governance store</text>
+<text x="845.0" y="480.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">seal_allowed predicate</text>
+<rect x="765" y="506" width="160" height="56" rx="7" fill="#fce8e6" stroke="#c5382b" stroke-width="1.6"/>
+<text x="845.0" y="528.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">AuditLog</text>
+<text x="845.0" y="544.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">hash-chain + HMAC</text>
+<text x="845.0" y="556.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">audit/log.jsonl</text>
+<rect x="765" y="590" width="160" height="44" rx="7" fill="#f1f3f4" stroke="#5f6368" stroke-width="1.6"/>
+<text x="845.0" y="608.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">qe-cli (qe)</text>
+<text x="845.0" y="624.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">argv + JSON lines</text>
 </svg>

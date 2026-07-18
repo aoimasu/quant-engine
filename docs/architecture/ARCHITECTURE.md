@@ -2,10 +2,10 @@
 
 **Project:** quant-engine
 **Repository:** `aoimasu/quant-engine` (from `Cargo.toml` `workspace.package.repository`)
-**Generated:** 2026-07-05
+**Generated:** 2026-07-18 (refreshed for the QE-430..454 GP-indicator-evolution program; original 2026-07-05)
 **Scope:** Whole repository — the Rust Cargo workspace (`crates/*`), the admin server (`qe-server`), and the React admin SPA (`web/`).
 
-A deterministic, deployment-agnostic quant engine. Two decoupled pipelines — **training** (search → ensemble → validation → G1 gate → sealed *vintage*) and **runtime** (bootstrap → live/paper evaluation → risk → venue) — share one domain vocabulary. An **admin UI** (`qe-server` + React SPA) is a *second composition root* that triggers and supervises the training-side CLI jobs and serves an authenticated browser app. All state is paper/offline; there is no live order submission wired in this repository.
+A deterministic, deployment-agnostic quant engine. Two decoupled pipelines — **training** (search → ensemble → validation → G1 gate → sealed *vintage*) and **runtime** (bootstrap → live/paper evaluation → risk → venue) — share one domain vocabulary. An **admin UI** (`qe-server` + React SPA) is a *second composition root* that triggers and supervises the training-side CLI jobs and serves an authenticated browser app. A newer, **offline default-off GP indicator-evolution subsystem** (`qe evolve` → a sealed `qe-formula-pool` artefact) sits alongside training, governed by an **RBAC + audit-log + server-authoritative `seal_allowed`** production-seal path. All state is paper/offline; there is no live order submission wired in this repository, and the live evolve→production-seal path is currently **fail-closed by design** (§15).
 
 > **Diagram sources:** every diagram below is editable. The `.drawio` files under `diagrams/` open in [diagrams.net](https://app.diagrams.net) and are the source of truth; the `.svg` files are the rendered exports embedded here and in `index.html`.
 >
@@ -15,13 +15,15 @@ A deterministic, deployment-agnostic quant engine. Two decoupled pipelines — *
 
 ## 1. Architecture Summary
 
-quant-engine is a **Rust Cargo workspace** of 20 internal crates plus a **Vite + React 19 + TypeScript** admin SPA. The deterministic work runs as CLI jobs (`qe-cli`); a small `axum` server (`qe-server`) wraps those jobs behind an authenticated HTTP API and hosts the SPA.
+quant-engine is a **Rust Cargo workspace** of 26 internal crates plus a **Vite + React 19 + TypeScript** admin SPA. The deterministic work runs as CLI jobs (`qe-cli`); a small `axum` server (`qe-server`) wraps those jobs behind an authenticated HTTP API and hosts the SPA.
 
 | Area | Detected technology | Evidence | Confidence |
 |---|---|---|---|
 | Language (engine) | Rust 2021, edition pinned `1.96` | `Cargo.toml`, `rust-toolchain.toml` | High |
-| Workspace | Cargo workspace, `crates/*` (20 crates) | `Cargo.toml` `members = ["crates/*"]` | High |
-| CLI | `qe-cli` (binary `qe`): `train` / `backtest` / `ingest` | `crates/cli/src/main.rs`, `README.md` | High |
+| Workspace | Cargo workspace, `crates/*` (26 crates) | `Cargo.toml` `members = ["crates/*"]` | High |
+| CLI | `qe-cli` (binary `qe`): `train` / `backtest` / `ingest` / `evolve` | `crates/cli/src/main.rs`, `README.md` | High |
+| GP indicator evolution | Offline, default-off symbolic-regression stage (`qe evolve`) → sealed `qe-formula-pool` | `crates/wfo/src/gp/*`, `crates/formula-pool`, `crates/run-protocol` | High |
+| Pool governance / ops-safety | Per-request RBAC (`require_role`) + hash-chained+HMAC audit log + server-authoritative `seal_allowed` | `crates/server/src/{auth/mod,audit,pool_seal,pools}.rs` | High |
 | Web/API server | `axum` 0.8 + `tokio` (multi-thread) | `Cargo.toml`, `crates/server/src/lib.rs` | High |
 | Static hosting | `tower-http` `ServeDir`/`ServeFile` | `crates/server/src/lib.rs` | High |
 | Frontend | React 19 + TypeScript 5.7, Vite 6 | `web/package.json`, `web/vite.config.ts` | High |
@@ -86,9 +88,11 @@ The **data layer** is local and file/LMDB-based: `MarketStore` + `SyntheticStore
 | `crates/telemetry` | Structured `tracing` + correlation fields | `src/lib.rs` | `HOT_PATH_TARGET` |
 | `crates/clock` | Clock-skew / time-sync guard | `src/skew.rs` | Halts on excess skew |
 | `crates/storage` | Embedded LMDB market + synthetic stores | `src/{store,synthetic,key,coverage}.rs` | Versioned schema |
-| `crates/signal` | Indicators, features, genome, regime (train+runtime shared) | `src/{genome,feature,indicator/*}.rs` | `Genome::decide` shared logic |
-| `crates/wfo` | Walk-forward / MAP-Elites search, backtest realism | `src/{mapelites,walkforward,fitness,cv,friction}.rs` | Search side of firewall |
+| `crates/signal` | Indicators, features, genome, regime (train+runtime shared) | `src/{genome,feature,indicator/*}.rs`, `src/indicator/expr.rs` | `Genome::decide` shared logic; `expr.rs` = the Expr/Kernel FIR-tree indicator the GP engine evolves |
+| `crates/wfo` | Walk-forward / MAP-Elites search, backtest realism, **and the GP engine (`src/gp/`)** | `src/{mapelites,walkforward,fitness,cv,friction}.rs`, `src/gp/{mod,archive,deflation,descriptor,freeze,gates,variation}.rs` | Search side of firewall; `gp/` = Expr/Kernel FIR tree interpreter, `Elite<ExprTree>` MAP-Elites archive, GP-aware deflation + tradability gates + K≤16 freeze |
 | `crates/ensemble` | Discrete-DE ensemble, stress, capacity | `src/{de,objective,stress,capacity}.rs` | Portfolio side of firewall |
+| `crates/formula-pool` | Frozen-pool artefact leaf: K≤16 canonical S-exprs + deflation summary + review lineage | `src/{lib,lifecycle,governance_record}.rs` | Separate directory root; reuses Vintage seal/verify/load SHA-256 discipline; **runtime never loads a pool** |
+| `crates/run-protocol` | Leaf carrying the run-spec + progress protocol | `src/lib.rs` (`EvolveParams`, `EvolveMode`, `ProgressLine`, `PROTOCOL_VERSION`) | Shared CLI↔server contract for `evolve` runs |
 | `crates/validation` | DSR / PBO / SPA / null benchmarks | `src/{dsr,pbo,spa,nulls}.rs` | Data-snooping suite |
 | `crates/gate` | G1 holdout-embargo over-fit gate | `src/lib.rs` | `evaluate_g1` |
 | `crates/vintage` | Sealed vintage artefact format | `src/lib.rs` | Content-hash pinned |
@@ -101,8 +105,8 @@ The **data layer** is local and file/LMDB-based: `MarketStore` + `SyntheticStore
 | `crates/cli` | Composition root #1: `qe` binary | `src/main.rs`, `src/jobs/*` | train/backtest/ingest |
 | `crates/server` | Composition root #2: admin API + SPA host | `src/{lib,main}.rs`, `src/{auth,runs,read}` | axum + tokio |
 | `web/` | React admin SPA | `src/{app,design,api,styles}` | Vite build → `web/dist` |
-| `docs/architecture` | Design ADRs (`qe-XXX-*.md`) + this package | `qe-001…qe-268` | Evidence trail |
-| `docs/mds/reviewed` | Per-ticket reviewed specs | `qe-*.md` | — |
+| `docs/architecture` | Design ADRs (`qe-XXX-*.md`) + this package | `qe-001…qe-268`, `qe-450-gp-indicator-evolution-design.md` | Evidence trail; QE-450 is the GP design of record |
+| `docs/mds/reviewed` | Per-ticket reviewed specs | `qe-*.md` (incl. `qe-451..454-*`) | Authoritative "what shipped + verified" |
 
 Root files: `Cargo.toml` / `Cargo.lock` (workspace), `Dockerfile`, `config.example.toml`, `deny.toml` (`cargo-deny`), `clippy.toml`, `rust-toolchain.toml`.
 
@@ -117,7 +121,8 @@ The SPA is **state-driven with no router and no state library** — confirmed ab
 
 - **Entry** — `web/src/main.tsx` mounts `<App/>` in `StrictMode` via `createRoot`; imports `./styles/fonts` and `./styles/global.css`. `web/index.html` sets `data-theme="dark"` and `#root`.
 - **App shell / navigation** — `web/src/app/App.tsx` holds an auth `status` (`loading | unauth | auth`, driven by `fetchMe()`) and an `active` screen id. `web/src/design/AppShell.tsx` renders the sidebar; `onNav(id)` switches screens. A one-shot `backtestVintage` deep-link lets the training monitor push a sealed vintage into the New-backtest flow.
-- **Screen areas** (each a nested view-state machine): `backtest/` (`BacktestsList`, `NewBacktest`, `BacktestResult`), `training/` (`TrainingList`, `NewTraining`, `TrainingMonitor`), plus `MarketData`, `Login`, and `Placeholder` (used for the not-yet-built Strategies screen).
+- **Screen areas** (each a nested view-state machine): `backtest/` (`BacktestsList`, `NewBacktest`, `BacktestResult`), `training/` (`TrainingList`, `NewTraining`, `TrainingMonitor`), the newer `evolve/` (`EvolveArea`, `CampaignList`, `NewCampaign`, `CampaignMonitor`, `FormulaSexpr`, `PoolReview`, `PoolBrowser`) mirroring `training/`, plus `MarketData`, `Login`, and `Placeholder` (used for the not-yet-built Strategies screen).
+- **`evolve/` area** — `web/src/app/evolve/` launches and monitors GP campaigns (`NewCampaign` → `CampaignMonitor`, `FormulaSexpr` rendering evolved S-expressions) and drives the pool-governance gate (`PoolReview`, `PoolBrowser`). It honestly surfaces the server's fail-closed reality: a production seal is refused (409 + named blockers), never faked. Evidence: `web/src/app/evolve/*`.
 - **Design system** — `web/src/design/index.ts` exports primitives: `Button`, `Card`, `Badge`, `Callout`, `Input`, `Select`, `DataTable`, `Tag`, `Pnl`, `Tabs`, `Icon` (icons from `lucide-react`), `AppShell`. Styling uses `:root` CSS custom-property **design tokens** (`web/src/styles/tokens/*.css`) plus a runtime `injectCss()` (`web/src/design/injectCss.ts`) so ported class rules render identically in the built app and in jsdom tests.
 - **API layer** — `web/src/api/session.ts` (`fetchMe`, `startLogin`, `logout`, `detectRejection`) and `web/src/api/runs.ts` (typed `fetch` client, `credentials: 'same-origin'`). Both monitor screens **poll `GET /api/runs/:id` every 2000 ms** with bounded retry (`MAX_POLL_FAILURES = 4`), stopping on a terminal status.
 
@@ -142,8 +147,19 @@ The SPA is **state-driven with no router and no state library** — confirmed ab
 | GET | `/api/runs/{id}/result` | `get_result` — `runs/api.rs` | Yes | `RunManager` | `result.json` / `409` if not ready |
 | GET | `/api/vintages` | `list_vintages` — `read.rs` | Yes | `ReadState` | Sealed-vintage list (hash-verified) |
 | GET | `/api/market-data/coverage` | `market_data_coverage` — `read.rs` | Yes | `ReadState` | LMDB coverage rows |
+| GET | `/api/formula-pools` | `list_pools` — `pools.rs` | Yes (session) | `PoolState` | Sealed formula-pool list (hash-verified) |
+| GET | `/api/formula-pools/{id}` | `get_pool` — `pools.rs` | Yes (session) | `PoolState` | One pool / `404` |
+| GET | `/api/runs/{id}/archive` | `get_archive` — `pools.rs` | Yes (session) | `PoolState` | Evolve MAP-Elites archive (`EvolveArchive`) |
+| POST | `/api/formula-pools/{id}/approve` | `approve` — `pools.rs` | Yes + `require_role(Approver)` | `PoolState` | Dual sign-off step (two distinct approvers ≠ launcher) |
+| POST | `/api/formula-pools/{id}/reject` | `reject` — `pools.rs` | Yes + `require_role(Approver)` | `PoolState` | Guarded lifecycle transition |
+| POST | `/api/formula-pools/{id}/revoke` | `revoke` — `pools.rs` | Yes + `require_role(Approver)` | `PoolState` | Post-seal revocation |
+| POST | `/api/formula-pools/{id}/seal` | `seal` — `pools.rs` | Yes + `require_role(Approver)` | `PoolState` + `seal_allowed` | Production seal; `409` + named blockers if the predicate fails |
+| POST | `/api/runs/{id}/halt` | `halt` — `pools.rs` | Yes + `require_role(Operator)` | `RunManager` | Authz'd run halt (reuses the abort→kill path) |
+| GET | `/api/audit` | `get_audit` — `audit.rs` | Yes + `require_role(Operator)` | `AuditLog` | Replays + verifies the hash-chain; fail-closed if key unset |
 
-Handlers extract sub-state (`Arc<RunManager>`, `Arc<AuthContext>`, `Arc<ReadState>`) projected from `AppState` via `FromRef`. Unknown `/api/*` paths return a reserved-namespace `404` (never the SPA shell). Blocking work (LMDB scans, vintage load, token verify) runs inside `tokio::task::spawn_blocking`.
+Handlers extract sub-state (`Arc<RunManager>`, `Arc<AuthContext>`, `Arc<ReadState>`, `PoolState`, `RoleConfig`) projected from `AppState` via `FromRef`. Unknown `/api/*` paths return a reserved-namespace `404` (never the SPA shell). Blocking work (LMDB scans, vintage/pool load, token verify) runs inside `tokio::task::spawn_blocking`.
+
+All the routes above are session-gated by `require_session` (the `protected_routes` subtree). The **governance** routes (`approve`/`reject`/`revoke`/`seal`, `runs/{id}/halt`, `audit`) are **additionally** behind a per-request `require_role` seam that resolves the caller's role from env allowlists — the read routes need only a valid session. Evidence: `crates/server/src/{lib,pools,audit}.rs`, `crates/server/src/auth/mod.rs` (`require_role`).
 
 ---
 
@@ -162,6 +178,8 @@ Google OAuth **authorization-code** flow with an **email allowlist** and an **HM
 
 A missing `QE_SESSION_SECRET` falls back to a **random ephemeral** secret (sessions don't survive a restart) so the server still boots — a fail-closed default.
 
+**RBAC / separation of duties (QE-452/454).** On top of the session gate, the governance routes enforce per-request role-based access control. `require_role` (`crates/server/src/auth/mod.rs`) resolves the session-derived email against three env allowlists — `QE_ROLE_OPERATORS`, `QE_ROLE_APPROVERS`, `QE_ROLE_ADMINS` — that are **never** carried in the cookie or request body, so a role cannot be self-asserted by a client. The production seal path requires **dual sign-off**: two *distinct* approvers, each different from the launcher. Whether a pool may seal is decided by the server-authoritative `seal_allowed` predicate (§14), not by the caller. Evidence: `crates/server/src/auth/mod.rs`, `crates/server/src/pool_seal.rs`, `crates/formula-pool/src/governance_record.rs`.
+
 ---
 
 ## 8. Core Runtime Request Flow
@@ -176,6 +194,8 @@ Core user action: **trigger and monitor a backtest** (`web/src/app/backtest`, `c
 3. The run enters the bounded worker pool: `queued → running` when a slot frees. `CliJobSpawner` spawns `qe-cli backtest … --run-dir <dir> --json` with stdout/stderr piped and `kill_on_drop`.
 4. The supervisor tails the child's JSON-line progress and **atomically** updates `meta.json`; the child writes `result.json` (the §8.1 contract) on success.
 5. `BacktestResult` **polls `GET /api/runs/:id` every 2 s**; on `succeeded` it fetches `GET /api/runs/:id/result` once and renders metrics, inline-SVG equity/drawdown charts, a monthly-returns heatmap, and a trades table. On failure it surfaces the captured error tail. `409` is returned if the result isn't ready.
+
+**The `evolve` flow — a second, parallel lifecycle.** The GP campaign (`type:"evolve"`) reuses the same create→supervise→poll machinery but produces a *pool*, not a vintage, and adds a **two-lifecycle model**. An **ephemeral evolve RUN** (illuminate → GP-aware deflation/gates → K≤16 freeze) seals a `qe-formula-pool` artefact; the terminal `done` line emits `pool:` and **never `vintage:`** (a sealed pool never auto-mints a vintage). That pool then has its own **durable POOL lifecycle** — `Draft → Approved → Sealed` (+ `Rejected`/`Revoked`) — persisted under `<data_dir>/governance`, *not* in the run. Guarded transitions reject every illegal edge; the production `seal` step is gated by `require_role(Approver)`, dual sign-off, and the `seal_allowed` predicate (§14). Evidence: `crates/formula-pool/src/lifecycle.rs`, `crates/server/src/pools.rs`, `crates/run-protocol/src/lib.rs`.
 
 ---
 
@@ -228,6 +248,12 @@ Values are placeholders only — **no real secrets are read or shown**. Engine c
 | `QE_GOOGLE_REDIRECT_URI` / `QE_OAUTH_REDIRECT_URI` | Registered callback URI | configured | configured | configured | required for login | `crates/server/src/auth/mod.rs` |
 | `QE_SESSION_SECRET` | HMAC session-signing key | secret, omitted (random fallback) | secret, omitted | **secret, required** | recommended (prod) | `crates/server/src/auth/mod.rs` |
 | `QE_ADMIN_ALLOWED_EMAILS` | Comma-separated allowlist | configured | configured | configured | required (fail-closed) | `crates/server/src/auth/mod.rs` |
+| `QE_ROLE_OPERATORS` | Comma-separated email allowlist for the Operator role (halt / audit read) | configured | configured | configured | required for governance ops | `crates/server/src/auth/mod.rs` |
+| `QE_ROLE_APPROVERS` | Email allowlist for the Approver role (approve/reject/revoke/seal) | configured | configured | configured | required for governance ops | `crates/server/src/auth/mod.rs` |
+| `QE_ROLE_ADMINS` | Email allowlist for the Admin role | configured | configured | configured | optional | `crates/server/src/auth/mod.rs` |
+| `QE_AUDIT_SIGNING_KEY` | HMAC key for the tamper-evident audit log | secret, omitted | secret, omitted | **secret, required** | required (fail-closed if unset) | `crates/server/src/audit.rs` |
+| `QE_SERVER_MAX_EVOLVE_CONCURRENCY` | Evolve-run semaphore (serialises campaigns; default `1`) | default `1` | configured | configured | optional | `crates/server/src/{lib,runs/manager}.rs` |
+| `QE_SERVER_MAX_RUN_SECS` | Per-run wall-clock deadline (default `86400` = ~24h) | default `86400` | configured | configured | optional | `crates/server/src/{lib,runs/manager}.rs` |
 
 Staging/production **environment separation is not represented in the repository** — there are no per-environment config files or deploy manifests. Values above reflect how the single 12-factor config would be parameterised; treat the staging/production columns as `configured in environment`, not detected.
 
@@ -254,6 +280,8 @@ No cloud infrastructure-as-code (Terraform / CDK / Pulumi / Kubernetes / Helm) a
 ![CI/CD and Observability](./diagrams/10-cicd-observability.svg)
 *Editable source: [`diagrams/10-cicd-observability.drawio`](./diagrams/10-cicd-observability.drawio)*
 
+> **Program note (2026-07-18):** CI and `main` branch protection were **temporarily disabled** during the QE-430..454 run; re-enabling both is a recorded repo-admin follow-up (§15). The workflow files below are unchanged and describe the intended (and to-be-restored) pipeline. Evidence: `docs/current-state.html` (deferred follow-ups).
+
 **CI** — GitHub Actions, on push to `main` and all PRs:
 
 - `.github/workflows/ci.yml` (Rust): four jobs — `fmt` (`cargo fmt --all --check`), `clippy` (`--workspace --all-targets --locked -D warnings`), `test` (`cargo test --workspace --locked`, which also runs the `qe-architecture` **firewall** test and the `qe-error` hot-path clippy lint), and `deny` (`cargo-deny check`). Toolchain pinned to `1.96.0` by commit SHA for supply-chain determinism.
@@ -273,6 +301,7 @@ No cloud infrastructure-as-code (Terraform / CDK / Pulumi / Kubernetes / Helm) a
 There is **no message queue, cron scheduler, or webhook handler**. Long-running work is handled by **in-process subprocess supervision** in `qe-server`. Evidence: `crates/server/src/runs/{manager,spawn,store}.rs`.
 
 - **Worker pool** — a `tokio` semaphore bounds concurrently-running subprocesses (`QE_SERVER_MAX_CONCURRENCY`, default 2); excess runs stay `queued`.
+- **`qe evolve` job + evolve supervision** — the GP campaign is a `type:"evolve"` run supervised like the others, with two extra controls (`crates/server/src/runs/manager.rs`): a **per-run wall-clock deadline** (default ~24h, `QE_SERVER_MAX_RUN_SECS`) enforced via `tokio::time::timeout` that reuses the existing abort → `kill_on_drop` path, and a **dedicated evolve semaphore** (`QE_SERVER_MAX_EVOLVE_CONCURRENCY`, default `1`) that serialises campaigns without starving backtests. An authz'd **`POST /api/runs/{id}/halt`** (`require_role(Operator)`) lets an operator abort a run early.
 - **Spawn** — `CliJobSpawner` runs `qe-cli backtest`/`train … --run-dir <dir> --json` with stdout/stderr piped and `kill_on_drop` (a dropped supervisor reaps the child, so no runaway job leaks on shutdown).
 - **Supervision** — the server tails the child's JSON-line progress and **atomically** updates `meta.json` (temp file + `rename`); on exit it records `succeeded`/`failed` with the exit code and an error tail. Artefacts (`result.json`, `stdout.log`) land in the run dir.
 - **Client polling** — the SPA polls `GET /api/runs/:id` every 2 s and stops on a terminal status (there is no server push / websocket for progress).
@@ -291,6 +320,10 @@ Retry/dead-letter semantics: not applicable — a failed run is terminal and sur
 - **AuthZ** — an **email allowlist** (`QE_ADMIN_ALLOWED_EMAILS`), **fail-closed** (empty ⇒ nobody), plus strict ID-token claim checks (`aud`/`iss`/`exp`/`email_verified`).
 - **Secret handling** — OAuth creds and `QE_SESSION_SECRET` come from the environment only; `README.md` and config keep no committed secrets; a missing session secret degrades to a random ephemeral key rather than a weak constant.
 - **Architectural isolation (QE-132 firewall)** — `crates/architecture/tests/firewall.rs` builds the real crate-dependency graph and **fails CI** if a forbidden edge exists: `qe-wfo ⊬ {ensemble, runtime, venue}`, `qe-ensemble ⊬ {wfo, runtime, venue}`, and `qe-server ⊬ {runtime, venue}`. This encodes `search ⟂ portfolio ⟂ live` and guarantees the admin server can never link the live-trading path.
+- **Pool governance is firewall-clean** — the GP subsystem respects the QE-132 firewall: the evolved formulas' deflation statistics cross into `seal_allowed` as plain **data** (no crate edge), and `qe-runtime`/`qe-venue` never depend on `qe-formula-pool` (the runtime never loads a pool). `qe-wfo/src/gp/` still cannot reach `runtime`/`venue`. Evidence: `crates/architecture/tests/firewall.rs`, `crates/formula-pool/Cargo.toml`.
+- **Tamper-evident audit log (QE-454)** — `<data_dir>/audit/log.jsonl` (a sibling of `runs/`) is an append-only JSONL log where each entry is bound into a **hash chain** (`entry_hash = SHA256(canonical_json ‖ prev)`) **and** signed with **HMAC** under a persistent `QE_AUDIT_SIGNING_KEY`. `GET /api/audit` replays and verifies the chain; the log is **fail-closed** — governance actions refuse to proceed if the signing key is unset. Evidence: `crates/server/src/audit.rs`.
+- **Server-authoritative `seal_allowed` predicate (QE-454)** — the single choke point deciding whether a frozen pool may seal to production (`crates/server/src/pool_seal.rs`). It is a pure AND over {hash-verified pool, audit replay, compiled const} requiring the **eight §13.5 hard-blocks** (blocks 1–4 read the pool's `DeflationSummary`: gp-aware, non-degenerate `E[maxSharpe]`, uncensored PBO under threshold, DSR floor; blocks 5–8 read per-formula `gate_evidence`), **plus** `mode == production`, the const satisfied, not-revoked, and dual sign-off. Any failure ⇒ `409` with **named** blockers + an appended `Reject` audit entry.
+- **Three structural barriers (QE-454)** — (1) the compiled `DEFLATION_BASIS_VERSION` prerequisite bitset in `qe-validation` (`crates/validation/src/basis.rs`), checked at launch (a diverging/tampered client is blocked with a `400`); (2) a **separate research-artefacts root** (`<artifacts_dir>/research/pools`) that the production `VintageRepository`/pool repository never scans (`crates/server/src/pools.rs`); (3) a fail-closed `assert_production_eligible` keyed on the hashed pool `mode` (`crates/formula-pool/src/lib.rs`) so a `Sandbox`/`Research` pool can never be flipped to production without breaking its hash. **Production sealing is fail-closed**: today the per-formula `gate_evidence` for hard-blocks 5–8 is not yet emitted by the evolve pipeline, so a live-evolve-produced production pool cannot seal — the safe direction by design (§15).
 - **No live order path** — all runs are paper/offline; live venue/ingest code is behind the default-off `http` feature.
 - **Panic-freedom / memory safety** — workspace lints `unsafe_code = "deny"` and `clippy::unwrap_used = "deny"` (with a hot-path lint in `qe-error`) keep the production/order path panic-free.
 - **Network exposure** — the server binds loopback by default; TLS/CORS/rate-limiting are **not detected** in repository code (a fronting proxy is assumed for a real deploy — see risks).
@@ -307,6 +340,8 @@ Data protection: money is exact fixed-point decimal (`crates/domain/src/money.rs
 | Ephemeral session secret fallback | `crates/server/src/auth/mod.rs` (`from_env`) | In prod without `QE_SESSION_SECRET`, every restart invalidates sessions; silent misconfig | Fail hard (refuse to boot) when a non-loopback bind is combined with a missing `QE_SESSION_SECRET` | High |
 | `ingest` job is a scaffold only | `crates/cli/src/main.rs` (`run_ingest_command` errors) | The documented `ingest` command cannot populate the store without the `http` feature + unimplemented decoders | Track the "real ingestion is future work" seam; gate docs so operators know backtests rely on the committed sample store | Medium |
 | No CD / deploy automation | `.github/workflows/*` (no deploy job) | Releases are manual; drift between built image and running deploy | Add a release workflow (image build/publish) once a target platform is chosen | Medium |
+| Live evolve→production-seal path is fail-closed (incomplete) | `crates/server/src/pool_seal.rs` (HB5–8 read per-formula `gate_evidence`); `docs/mds/reviewed/qe-454-*.md` | A live-evolve-produced production pool cannot seal today; only sandbox/research illumination works end-to-end | Wire per-formula `gate_evidence` into the evolve pipeline to satisfy HB5–8 (deferred follow-up); the predicate is fully armed | Medium |
+| CI + `main` branch protection temporarily disabled | `docs/current-state.html` (deferred follow-ups); §12 program note | Merges bypass the fmt/clippy/test/deny + firewall gates while disabled; regressions could land unguarded | Re-enable CI and branch protection (repo-admin action, not a code change) | High |
 | Run status via polling only | `web/src/api/runs.ts`, `crates/server/src/runs` | Every monitor re-requests every 2 s; no push; scales poorly with many concurrent viewers | Consider SSE/websocket for progress if viewer count grows; current scale (admin tool) is fine | Low |
 | No environment separation config | Repo has one `config.example.toml`, no per-env manifests | Staging/prod parity relies on ad-hoc env; easy to misconfigure | Add per-profile overlay files or a documented env matrix per environment | Medium |
 | LMDB single-open contract is a footgun | `crates/storage/src/store.rs` (open-once caveat) | Opening the same store path twice in-process is UB; a future feature could reintroduce it | Keep the `Arc<MarketStore>` single-open discipline; add a debug-time guard against double-open | Low |
@@ -317,6 +352,8 @@ Data protection: money is exact fixed-point decimal (`crates/domain/src/money.rs
 ### Evidence index (primary sources)
 
 `Cargo.toml`, `rust-toolchain.toml`, `Dockerfile`, `config.example.toml`, `README.md`, `.github/workflows/{ci,frontend}.yml`,
-`crates/cli/src/main.rs`, `crates/server/src/{lib,main}.rs`, `crates/server/src/auth/{mod,session}.rs`, `crates/server/src/runs/{api,model,manager,store,spawn}.rs`, `crates/server/src/read.rs`,
+`crates/cli/src/main.rs`, `crates/server/src/{lib,main}.rs`, `crates/server/src/auth/{mod,session}.rs`, `crates/server/src/runs/{api,model,manager,store,spawn}.rs`, `crates/server/src/{read,pools,pool_seal,audit,config}.rs`,
 `crates/config/src/schema.rs`, `crates/storage/src/{lib,store,records}.rs`, `crates/vintage/src/lib.rs`, `crates/domain/src/lib.rs`, `crates/architecture/{src/lib.rs,tests/firewall.rs}`, `crates/telemetry/src/lib.rs`, `crates/error/src/lib.rs`,
-`web/package.json`, `web/vite.config.ts`, `web/src/main.tsx`, `web/src/app/App.tsx`, `web/src/design/*`, `web/src/api/{session,runs}.ts`.
+`crates/wfo/src/gp/{mod,archive,deflation,descriptor,freeze,gates,variation}.rs`, `crates/formula-pool/src/{lib,lifecycle,governance_record}.rs`, `crates/run-protocol/src/lib.rs`, `crates/signal/src/indicator/expr.rs`, `crates/validation/src/basis.rs`,
+`web/package.json`, `web/vite.config.ts`, `web/src/main.tsx`, `web/src/app/App.tsx`, `web/src/app/evolve/*`, `web/src/design/*`, `web/src/api/{session,runs}.ts`,
+`docs/current-state.html`, `docs/architecture/qe-450-gp-indicator-evolution-design.md`, `docs/mds/reviewed/qe-45{1,2,3,4}-*.md`.

@@ -2,7 +2,7 @@
   <diagram name="Security Boundaries &amp; Data Protection" id="diagram-1">
     <mxGraphModel dx="980" dy="600" grid="1" gridSize="10" guides="1" tooltips="1"
         connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="980"
-        pageHeight="600" math="0" shadow="0">
+        pageHeight="760" math="0" shadow="0">
       <root>
 <mxCell id="0"/>
 <mxCell id="1" parent="0"/>
@@ -21,6 +21,11 @@
 <mxCell id="nolive" value="no live order path&#10;paper/offline only" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8eaed;strokeColor=#3c4043;fontColor=#202124;fontFamily=Helvetica;fontSize=12;" vertex="1" parent="1"><mxGeometry x="710" y="240" width="200" height="60" as="geometry"/></mxCell>
 <mxCell id="det" value="deterministic vintages&#10;content hash · lineage&#10;reproducible" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fef7e0;strokeColor=#c58a1a;fontColor=#202124;fontFamily=Helvetica;fontSize=12;" vertex="1" parent="1"><mxGeometry x="710" y="330" width="200" height="74" as="geometry"/></mxCell>
 <mxCell id="loop" value="loopback bind default&#10;127.0.0.1:8080" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f1f3f4;strokeColor=#5f6368;fontColor=#202124;fontFamily=Helvetica;fontSize=12;" vertex="1" parent="1"><mxGeometry x="710" y="430" width="200" height="54" as="geometry"/></mxCell>
+<mxCell id="pg" value="POOL GOVERNANCE &amp; PRODUCTION-SEAL SAFETY (QE-454) — data-only crossing, firewall-clean" style="rounded=1;dashed=1;html=1;fillColor=none;strokeColor=#8b3fd4;verticalAlign=top;fontColor=#8b3fd4;fontStyle=1;fontSize=11;" vertex="1" parent="1"><mxGeometry x="40" y="590" width="900" height="150" as="geometry"/></mxCell>
+<mxCell id="pg1" value="tamper-evident audit log&#10;hash-chain + HMAC&#10;QE_AUDIT_SIGNING_KEY · fail-closed" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fce8e6;strokeColor=#c5382b;fontColor=#202124;fontFamily=Helvetica;fontSize=12;" vertex="1" parent="1"><mxGeometry x="60" y="635" width="200" height="74" as="geometry"/></mxCell>
+<mxCell id="pg2" value="seal_allowed predicate&#10;8 hard-blocks + dual sign-off&#10;mode==production · not revoked" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fce8e6;strokeColor=#c5382b;fontColor=#202124;fontFamily=Helvetica;fontSize=12;" vertex="1" parent="1"><mxGeometry x="280" y="635" width="210" height="74" as="geometry"/></mxCell>
+<mxCell id="pg3" value="3 structural barriers&#10;DEFLATION_BASIS_VERSION const&#10;research root · assert_production_eligible" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fef7e0;strokeColor=#c58a1a;fontColor=#202124;fontFamily=Helvetica;fontSize=12;" vertex="1" parent="1"><mxGeometry x="510" y="635" width="220" height="74" as="geometry"/></mxCell>
+<mxCell id="pg4" value="sandbox ⟂ production&#10;research pool root never scanned&#10;prod seal fail-closed today" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8eaed;strokeColor=#3c4043;fontColor=#202124;fontFamily=Helvetica;fontSize=12;" vertex="1" parent="1"><mxGeometry x="750" y="635" width="170" height="74" as="geometry"/></mxCell>
 <mxCell id="n5" value="HTTPS" style="endArrow=classic;html=1;strokeColor=#5f6368;fontSize=10;labelBackgroundColor=#ffffff;" edge="1" parent="1"><mxGeometry relative="1" as="geometry"><mxPoint x="270" y="160" as="sourcePoint"/><mxPoint x="360" y="160" as="targetPoint"/></mxGeometry></mxCell>
 <mxCell id="n6" value="verify" style="endArrow=classic;html=1;strokeColor=#5f6368;fontSize=10;labelBackgroundColor=#ffffff;" edge="1" parent="1"><mxGeometry relative="1" as="geometry"><mxPoint x="270" y="250" as="sourcePoint"/><mxPoint x="360" y="245" as="targetPoint"/></mxGeometry></mxCell>
 <mxCell id="n7" value="" style="endArrow=classic;html=1;strokeColor=#5f6368;fontSize=10;labelBackgroundColor=#ffffff;" edge="1" parent="1"><mxGeometry relative="1" as="geometry"><mxPoint x="620" y="160" as="sourcePoint"/><mxPoint x="710" y="170" as="targetPoint"/></mxGeometry></mxCell>
