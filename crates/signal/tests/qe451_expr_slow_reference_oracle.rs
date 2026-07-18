@@ -73,14 +73,18 @@ fn rand_binop(rng: &mut Rng) -> BinOp {
 }
 
 fn rand_winop(rng: &mut Rng) -> WinOp {
-    match rng.below(7) {
+    // Covers all nine window ops, including the QE-451 Phase 1a normalising roots `Rank`/`Zscore`, so the
+    // 256-tree independent-recompute corpus exercises them at every window position (root and interior).
+    match rng.below(9) {
         0 => WinOp::Mean,
         1 => WinOp::Max,
         2 => WinOp::Min,
         3 => WinOp::Std,
         4 => WinOp::MeanAbsDev,
         5 => WinOp::Delta,
-        _ => WinOp::Lag,
+        6 => WinOp::Lag,
+        7 => WinOp::Rank,
+        _ => WinOp::Zscore,
     }
 }
 
@@ -220,6 +224,29 @@ fn aggregate(op: WinOp, vals: &[Decimal]) -> Option<Decimal> {
         }
         WinOp::Delta => Some(*vals.last()? - *vals.first()?),
         WinOp::Lag => vals.first().copied(),
+        WinOp::Rank => {
+            // Fraction of window values strictly below the current (newest) value, in [0, 1).
+            let current = *vals.last()?;
+            let below = vals.iter().filter(|&&v| v < current).count();
+            Some(Decimal::from(below) / n)
+        }
+        WinOp::Zscore => {
+            // (current − mean) / std_pop, clipped to [−4, 4]; std == 0 ⇒ 0.
+            let current = *vals.last()?;
+            let mean = vals.iter().copied().sum::<Decimal>() / n;
+            let var = vals
+                .iter()
+                .map(|&v| (v - mean) * (v - mean))
+                .sum::<Decimal>()
+                / n;
+            let std = var.sqrt()?;
+            if std.is_zero() {
+                Some(Decimal::ZERO)
+            } else {
+                let clip = Decimal::from(4);
+                Some(((current - mean) / std).clamp(-clip, clip))
+            }
+        }
     }
 }
 
@@ -268,9 +295,23 @@ fn reference_stream(expr: &Expr, samples: &[Sample], bug: Bug) -> Vec<Option<Dec
         .collect()
 }
 
+/// Whether `expr` contains a window node using `op` anywhere in the tree.
+fn contains_winop(expr: &Expr, op: WinOp) -> bool {
+    match expr {
+        Expr::Input(_) | Expr::Const(_) => false,
+        Expr::Unary(_, c) => contains_winop(c, op),
+        Expr::Binary(_, a, b) => contains_winop(a, op) || contains_winop(b, op),
+        Expr::Window(w, c, _) => *w == op || contains_winop(c, op),
+    }
+}
+
 #[test]
 fn expr_interpreter_matches_slow_reference_over_seeded_random_trees() {
     let mut non_vacuous = 0u64;
+    // Prove the corpus genuinely exercises the QE-451 normalising roots: count cases that both CONTAIN
+    // the op and WARM UP (so the reference's Rank/Zscore aggregate arms actually run against streaming).
+    let mut rank_warm = 0u64;
+    let mut zscore_warm = 0u64;
     for i in 0..CASES {
         let mut rng = Rng(derive(MASTER_SEED, i));
         let expr = gen(&mut rng, 3);
@@ -283,14 +324,31 @@ fn expr_interpreter_matches_slow_reference_over_seeded_random_trees() {
             streaming, reference,
             "case {i}: streaming interpreter != independent reference for {expr:?}"
         );
-        if streaming.iter().any(Option::is_some) {
+        let warm = streaming.iter().any(Option::is_some);
+        if warm {
             non_vacuous += 1;
+            if contains_winop(&expr, WinOp::Rank) {
+                rank_warm += 1;
+            }
+            if contains_winop(&expr, WinOp::Zscore) {
+                zscore_warm += 1;
+            }
         }
     }
     // The corpus must actually warm up trees — an all-None corpus would pass vacuously.
     assert!(
         non_vacuous > CASES / 2,
         "corpus too weak: only {non_vacuous}/{CASES} cases produced any value"
+    );
+    // The normalising roots must be present AND warm in the cross-checked corpus — otherwise the
+    // reference's Rank/Zscore arms would be dead code and this oracle would not cover them.
+    assert!(
+        rank_warm > 0,
+        "corpus never exercised a warm Rank node — oracle would not cover it"
+    );
+    assert!(
+        zscore_warm > 0,
+        "corpus never exercised a warm Zscore node — oracle would not cover it"
     );
 }
 
