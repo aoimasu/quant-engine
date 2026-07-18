@@ -37,12 +37,31 @@ cargo run -p qe-cli -- backtest --vintage <vintage-id> \
 # → /tmp/run/result.json (metrics, equity/drawdown curves, monthly heatmap, trades)
 ```
 
-**Ingest** — populate the LMDB market store (real Binance decoders live behind the default-off
-`http` feature; the committed sample store lets backtests run fully offline):
+**Ingest** — populate the LMDB market store. Real ingestion needs the Binance decoders behind the
+default-off (unimplemented) `http` feature, so a plain `qe ingest` errors; the committed sample store
+lets backtests run fully offline:
 
 ```sh
 cargo run -p qe-cli -- ingest --config config.example.toml --start … --end … --resolution 1h
 ```
+
+For **offline / local dev**, `--synthetic` populates the store from a **deterministic offline
+generator** instead — no network, no `http` feature. It generates valid OHLCV bars (a seeded geometric
+random walk; `rust_decimal`, never `f64`) for every instrument in the config universe
+(`BTCUSDT`/`ETHUSDT`/…), seeded from `determinism.seed` so the same config + window + resolution always
+reproduces identical bars. A full year of 1h bars per instrument is plenty of data for a real backtest
+run:
+
+```sh
+# 2 instruments × 8760 1h bars each = a year of data, written to storage.market_dir
+cargo run -p qe-cli -- ingest --config config.example.toml \
+    --start 2021-01-01 --end 2022-01-01 --resolution 1h --synthetic
+```
+
+The data is **GENERATED, NOT real market data**, and is loudly labelled so no store can be mistaken for
+real prices: a `--synthetic` run prints a `WARNING:` to stderr and stamps `"synthetic":true` on the
+terminal `{"t":"done",…}` line. Without `--synthetic`, `qe ingest` behaves exactly as before (the real
+ingest error).
 
 **Evolve** — run the offline GP indicator search and seal a **formula pool** (default-off / research-first):
 

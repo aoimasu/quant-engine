@@ -155,6 +155,14 @@ pub enum ProgressLine {
         /// QE-452) omits this and deserializes to `None`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pool: Option<String>,
+        /// Loud marker that this terminal outcome produced **GENERATED / synthetic** data, not real
+        /// market data (`qe ingest --synthetic`). **Absent-by-default** (`skip_serializing_if`): every
+        /// existing terminal (backtest/train/evolve, and a real ingest) emits `false`, so its
+        /// `{"t":"done",…}` wire is byte-identical to pre-synthetic — the [`PROTOCOL_VERSION`] is
+        /// unchanged. When `true`, downstream tooling and humans can never mistake the store for real
+        /// prices.
+        #[serde(default, skip_serializing_if = "is_false")]
+        synthetic: bool,
     },
     /// Terminal failure.
     Error {
@@ -189,6 +197,35 @@ pub fn emit_done(w: &mut impl Write, result: &str) -> io::Result<()> {
             protocol_version: PROTOCOL_VERSION,
             vintage: None,
             pool: None,
+            synthetic: false,
+        },
+    )
+}
+
+/// `#[serde(skip_serializing_if)]` predicate for the absent-by-default `synthetic` marker: a `false`
+/// flag is omitted, so every non-synthetic terminal line's wire is byte-identical to pre-synthetic.
+#[allow(clippy::trivially_copy_pass_by_ref)] // serde requires the `&bool` predicate signature
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+/// Write the terminal `done` line for the `ingest` job, stamped with the current [`PROTOCOL_VERSION`].
+///
+/// `synthetic = true` sets the absent-by-default `synthetic` marker (`qe ingest --synthetic`), so the
+/// terminal line loudly records that the store holds **GENERATED**, not real, market data. A real
+/// ingest passes `false` and its wire is byte-identical to a backtest `done` line.
+///
+/// # Errors
+/// Propagates any write / serialisation failure.
+pub fn emit_ingest_done(w: &mut impl Write, result: &str, synthetic: bool) -> io::Result<()> {
+    write_line(
+        w,
+        &ProgressLine::Done {
+            result: result.to_owned(),
+            protocol_version: PROTOCOL_VERSION,
+            vintage: None,
+            pool: None,
+            synthetic,
         },
     )
 }
@@ -206,6 +243,7 @@ pub fn emit_train_done(w: &mut impl Write, result: &str, vintage: &str) -> io::R
             protocol_version: PROTOCOL_VERSION,
             vintage: Some(vintage.to_owned()),
             pool: None,
+            synthetic: false,
         },
     )
 }
@@ -224,6 +262,7 @@ pub fn emit_evolve_done(w: &mut impl Write, result: &str, pool: &str) -> io::Res
             protocol_version: PROTOCOL_VERSION,
             vintage: None,
             pool: Some(pool.to_owned()),
+            synthetic: false,
         },
     )
 }
