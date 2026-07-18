@@ -4,6 +4,7 @@ import { Login } from './Login';
 import { Placeholder } from './Placeholder';
 import { BacktestsArea } from './backtest/BacktestsArea';
 import { TrainingArea } from './training/TrainingArea';
+import { EvolveArea } from './evolve/EvolveArea';
 import { MarketData } from './MarketData';
 import { fetchMe, logout, detectRejection, type Me } from '../api/session';
 import { onUnauthorized } from '../api/authEvents';
@@ -15,6 +16,7 @@ type Status = 'loading' | 'unauth' | 'auth';
 const SCREEN_TITLES: Record<string, string> = {
   strategies: 'Strategies',
   training: 'Training',
+  evolve: 'Indicator evolution',
   backtest: 'Backtests',
   data: 'Market data',
 };
@@ -121,6 +123,8 @@ export function App() {
           />
         ) : active === 'training' ? (
           <TrainingArea onBacktestVintage={openBacktestForVintage} />
+        ) : active === 'evolve' ? (
+          <EvolveArea />
         ) : (
           <BacktestsArea initialVintage={backtestVintage} />
         )}
