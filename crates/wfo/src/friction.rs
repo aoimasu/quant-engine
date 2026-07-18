@@ -14,14 +14,37 @@ use qe_risk::SlippageCalibration;
 /// Whether a fill took or made liquidity (selects the fee rate).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Liquidity {
-    /// Crossed the spread (taker).
+    /// Crossed the spread (taker). **The only role any current code path selects** — the engine is a
+    /// pure taker (no `post_only`/`OrderType`/limit-order machinery in `edge` or `hedger`).
     Taker,
-    /// Rested and was hit (maker).
+    /// Rested and was hit (maker). **Unused on the fill path today** — see the [`FeeSchedule`]
+    /// adverse-selection invariant before ever selecting this role.
     Maker,
 }
 
 /// Taker/maker fee rates as fractions of notional. Default = Binance USDT-M **VIP0**
 /// (taker `0.05%`, maker `0.02%`); a tier is just a different schedule.
+///
+/// # ⚠️ Adverse-selection invariant (QE-449, maxdama §7.6) — the maker rate is a **latent trap**
+///
+/// The engine is a confirmed **pure taker** today: no `post_only`/`OrderType`/limit-order machinery
+/// exists in `edge` or `hedger`, and the backtest/selection path charges [`Liquidity::Taker`]
+/// unconditionally (`backtest.rs` `apply_fill`). The `maker` rate below therefore prices **no fill**
+/// — it reads as a *free rebate*, and that is the trap.
+///
+/// **The `maker` rate MUST NOT be used to fill orders without a paired adverse-selection markout.**
+/// A resting (maker) fill is systematically *selected against*: it executes precisely when the market
+/// is about to move through the resting price, so conditional on a fill the short-horizon mark drift
+/// is **adverse in expectation**. If `post_only`/maker fills are ever added to harvest the
+/// maker/taker gap, they **MUST** be accompanied by a modelled expected fill-conditional adverse
+/// drift (the QE-444 [`SlippageModel::alpha_loss`] directional term is the natural home). Collecting
+/// the spread/rebate *without* charging that adverse markout **overstates PnL and inflates a Sharpe
+/// that DSR cannot deflate** — the bias is systematic (per-fill), not selection noise, so the
+/// absolute-vs-noise-ceiling DSR/PBO/SPA apparatus passes it through undeflated.
+///
+/// The `maker_rate_is_never_charged_on_the_backtest_path` test guards this: it asserts the current
+/// fill path only ever charges the **taker** rate, so a future change that starts selecting
+/// [`Liquidity::Maker`] is forced to trip it and consciously address the markout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FeeSchedule {
     /// Taker rate (fraction of notional).
@@ -459,6 +482,44 @@ mod tests {
     fn maker_is_cheaper_than_taker() {
         let f = FeeSchedule::default();
         assert!(f.fee(d("100"), Liquidity::Maker) < f.fee(d("100"), Liquidity::Taker));
+    }
+
+    #[test]
+    fn maker_rate_is_never_charged_on_the_backtest_path() {
+        // QE-449 latent-trap guard (maxdama §7.6). The engine is a pure taker today: the fill path
+        // (backtest.rs `apply_fill`, and the `simulate` fixtures here) charges `Liquidity::Taker`
+        // unconditionally, and no code path selects `Liquidity::Maker` (grep-confirmed: only the enum
+        // arm + `maker_is_cheaper_than_taker` reference it). This test asserts the fees on the current
+        // path are the **taker** fees and never the maker fees — so any future maker-rebate change that
+        // starts routing `Liquidity::Maker` fills is forced to trip this guard and consciously add the
+        // paired adverse-selection markout (see the `FeeSchedule` invariant).
+        let events = vec![buy("1", "100"), sell("1", "100")];
+        let cfg = FrictionConfig::default();
+        let pnl = simulate(&events, &cfg);
+
+        // Two taker fills of notional 100 ⇒ fees = 2 · (100 · taker).
+        let taker_fees = d("2") * (d("100") * cfg.fees.taker);
+        let maker_fees = d("2") * (d("100") * cfg.fees.maker);
+        assert_eq!(
+            pnl.fees, taker_fees,
+            "backtest path must charge the taker rate"
+        );
+        assert_ne!(
+            pnl.fees, maker_fees,
+            "guard is non-vacuous: maker and taker rates differ"
+        );
+
+        // And the fixtures themselves only ever carry the taker role — mirroring the backtest ledger,
+        // which hardcodes `Liquidity::Taker` in `apply_fill`.
+        for ev in &events {
+            if let Event::Fill(f) = ev {
+                assert_eq!(
+                    f.liquidity,
+                    Liquidity::Taker,
+                    "no current fill selects Liquidity::Maker"
+                );
+            }
+        }
     }
 
     #[test]
