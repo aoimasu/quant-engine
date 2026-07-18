@@ -44,6 +44,17 @@ cargo run -p qe-cli -- backtest --vintage <vintage-id> \
 cargo run -p qe-cli -- ingest --config config.example.toml --start … --end … --resolution 1h
 ```
 
+**Evolve** — run the offline GP indicator search and seal a **formula pool** (default-off / research-first):
+
+```sh
+cargo run -p qe-cli -- evolve --run-dir /tmp/evolve --json
+# → data/artifacts/{research|…}/pools/<pool-id>  (K≤16 canonical S-expressions + deflation summary)
+```
+
+`Done` emits a `pool:` id (**never a vintage**), and a sealed pool never auto-mints a vintage. Sealing a pool
+to **production** is governed server-side — RBAC + a server-authoritative `seal_allowed` predicate + a
+tamper-evident audit log — and stays fail-closed until per-formula `gate_evidence` is wired into the pipeline.
+
 Print the version:
 
 ```sh
@@ -104,8 +115,8 @@ State is written to the mounted `/app/data` volume; no platform-specific assumpt
 
 ## Workspace
 
-A Cargo workspace under `crates/*` (domain, config, storage, determinism, …, plus `server`) and a
-React SPA under `web/`. Run the gates:
+A Cargo workspace under `crates/*` (domain, config, storage, determinism, …, plus `server`,
+`qe-formula-pool`, and `qe-run-protocol`) and a React SPA under `web/`. Run the gates:
 
 ```sh
 # Rust

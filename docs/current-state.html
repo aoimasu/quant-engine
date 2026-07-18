@@ -87,12 +87,14 @@
   <h1>quant-engine — Current State &amp; Maintainer's Guide</h1>
   <p class="lead">A deterministic, information-firewalled crypto-perp quant trading platform in Rust.</p>
   <p class="muted">Entry point for developers maintaining the repo and for users evaluating it for investment.
-  Everything below was verified against the codebase, not assumed. Generated 2026-07-03 · reflects Phase&nbsp;2 (through G2) and <strong>Phase&nbsp;PreP3 complete</strong>.</p>
+  Everything below was verified against the codebase, not assumed. Generated 2026-07-03, refreshed 2026-07-18 ·
+  reflects Phase&nbsp;2 (through G2), <strong>Phase&nbsp;PreP3 complete</strong>, and the now-complete
+  <strong>QE-430..454 program</strong> (quant-methodology hardening + the GP indicator-evolution subsystem).</p>
 
   <!-- ============================================================= -->
   <h2 class="section" id="tldr">1 · TL;DR</h2>
   <div class="card">
-    <p><strong>What this is.</strong> A 21-crate Cargo workspace (plus a <code>web/</code> React SPA) that builds a full pipeline for discovering,
+    <p><strong>What this is.</strong> A 26-crate Cargo workspace (plus a <code>web/</code> React SPA) that builds a full pipeline for discovering,
     validating, and (eventually) live-trading systematic strategies on USDⓈ-M perpetual futures
     (dev universe: <code>BTCUSDT</code>, <code>ETHUSDT</code>). The design is organised around two hard rules
     enforced in CI: <em>everything is deterministic &amp; reproducible from a recorded vintage hash</em>, and
@@ -112,6 +114,21 @@
     trigger, monitor, and review runs in a browser. Everything is still <strong>paper/offline</strong>: there is
     no live order submission anywhere (the order path terminates in a kill-gated simulator; live HTTP/wss sit
     behind a default-off <code>http</code> feature).</p>
+    <p><strong>What's new since PreP3.</strong> The completed <strong>QE-430..454</strong> program landed the 20
+    Max-Dama quant-methodology hardening recommendations (QE-430..449) and a new <strong>GP indicator-evolution
+    subsystem</strong> (QE-451/452/453/454): an offline, default-off symbolic-regression stage (<code>qe evolve</code>)
+    that illuminates a pool of evolved indicator formulas, and a <strong>governed production-seal path</strong>
+    (RBAC + a server-authoritative <code>seal_allowed</code> predicate + a tamper-evident audit log) that decides
+    whether a pool may ever reach production. It is <strong>default-off and golden-safe</strong> — no
+    <code>CATALOGUE_VERSION</code>/<code>VINTAGE_FORMAT_VERSION</code> moved.</p>
+  </div>
+  <div class="callout warn">
+    <p style="margin:0"><strong>The GP engine + governance are shipped and armed, but the live
+    evolve→production-seal path is intentionally FAIL-CLOSED.</strong> Everything is built, tested, and merged, but
+    a live-evolve-produced pool <em>cannot</em> seal to production today: the seal predicate's per-formula
+    <code>gate_evidence</code> hard-blocks fire until that evidence is wired into the evolve pipeline (a deferred
+    follow-up, §8). This is the safe direction by design, not a defect — sandbox/research illumination and inspection
+    work end-to-end now.</p>
   </div>
 
   <!-- ============================================================= -->
@@ -146,6 +163,15 @@
       admin UI's Market-data view uses.</td>
     </tr>
     <tr>
+      <td class="mono">qe-cli evolve<br>&nbsp;&nbsp;--run-dir … --json</td>
+      <td>Runs the <strong>offline GP indicator search</strong> (QE-451 engine: Expr-tree illumination →
+      GP-aware deflation + tradability gates → freeze K≤16) and <strong>seals a content-hashed
+      <code>qe-formula-pool</code> artefact</strong> — K≤16 canonical S-expressions + a deflation summary + review
+      lineage — under <code>data/artifacts/{research|…}/pools/</code>. Emits JSON-line progress; <code>Done</code>
+      emits <code>pool:</code> and <strong>never <code>vintage:</code></strong>. Default-off / research-first; the
+      pool is offline data only (the runtime never loads it).</td>
+    </tr>
+    <tr>
       <td class="mono">qe-server</td>
       <td>axum + tokio backend (a second composition root — reuses the training/shared crates, <strong>never
       <code>qe-runtime</code></strong>). Google-OAuth login gated by <code>QE_ADMIN_ALLOWED_EMAILS</code> +
@@ -159,7 +185,18 @@
   an authenticated browser UI: Login, Backtests (list / new / result with live progress + the full result
   contract), a Training monitor (generations, archive-coverage grid, CV folds, best-so-far → G1 verdict → link
   to the sealed vintage's backtest), and read-only Market-data coverage. Trade/Risk surfaces are present but
-  disabled (Phase 3).</p>
+  disabled (Phase 3). A new <strong><code>evolve/</code></strong> area (NewCampaign / CampaignMonitor /
+  FormulaSexpr / PoolReview / PoolBrowser) launches and monitors GP campaigns and drives the pool-governance gate —
+  it honestly surfaces the server's fail-closed reality (a production seal is refused, never faked).</p>
+
+  <p>Two capabilities landed with the <strong>QE-430..454</strong> program. First, a
+  <strong>GP indicator-evolution subsystem</strong> (offline, default-off): the <code>qe evolve</code> job
+  illuminates a pool of evolved indicator formulas and seals it as a <code>qe-formula-pool</code> artefact,
+  separate from the training vintage. Second, a <strong>governed production-seal path</strong>: per-request RBAC,
+  a tamper-evident audit log, dual sign-off, and a server-authoritative <code>seal_allowed</code> predicate
+  (8 hard-blocks + 3 structural barriers) decide whether a pool may reach production. The engine and governance
+  are shipped and armed — but, as noted above, the live evolve→production-seal path is intentionally fail-closed
+  until per-formula <code>gate_evidence</code> is wired into the evolve pipeline (§8).</p>
 
   <h3>The full runtime loop exists as tested libraries (Phase&nbsp;2, through G2)</h3>
   <p class="muted">Beyond the runnable jobs above, the entire live/paper runtime is built and tested but is
@@ -175,8 +212,9 @@
     <li>Real-time <strong>reconciliation divergence alarm</strong> and the <strong>G2 shadow/dry-run gate</strong>:
       would-be orders reconciled vs the simulator, nothing submitted</li>
   </ul>
-  <p class="muted">Test baseline: <strong>668 Rust tests</strong> (+2 ignored) across the workspace, plus
-  <strong>40 frontend tests</strong> (Vitest/RTL), all green; firewall + decoupling guards green. There is still
+  <p class="muted">Test baseline (after QE-430..454): <strong>1046 Rust tests</strong> (+2 ignored) across the
+  workspace, plus <strong>75 frontend tests</strong> (Vitest/RTL), all green; firewall + decoupling guards green.
+  There is still
   <strong>no live order submission anywhere</strong> — the order path terminates in a kill-gated paper simulator.</p>
 
   <!-- ============================================================= -->
@@ -197,7 +235,11 @@ cargo run -p qe-cli -- backtest --vintage &lt;id&gt; --start 2021-01-01 --end 20
     --resolution 1h --run-dir /tmp/run --json
 
 # populate the LMDB market store (real network decoders behind the default-off `http` feature)
-cargo run -p qe-cli -- ingest --config config.example.toml --start … --end … --resolution 1h</code></pre>
+cargo run -p qe-cli -- ingest --config config.example.toml --start … --end … --resolution 1h
+
+# run the offline GP indicator search → seals a K≤16 formula pool (default-off; Done emits pool:, never vintage:)
+cargo run -p qe-cli -- evolve --run-dir /tmp/evolve --json
+#   → data/artifacts/{research|…}/pools/&lt;id&gt;  (canonical S-exprs + deflation summary + review lineage)</code></pre>
 
   <h3>Run the admin UI (server + SPA)</h3>
   <pre><code># 1) build the SPA
@@ -252,7 +294,7 @@ QE_GOOGLE_CLIENT_ID=… QE_GOOGLE_CLIENT_SECRET=… QE_GOOGLE_REDIRECT_URI=… Q
 
   <!-- ============================================================= -->
   <h2 class="section" id="arch">4 · Architecture</h2>
-  <p>The workspace is 21 crates (+ a <code>web/</code> SPA). The organising idea is a <strong>shared spine</strong>
+  <p>The workspace is 26 crates (+ a <code>web/</code> SPA). The organising idea is a <strong>shared spine</strong>
   (<code>qe-domain</code> + <code>qe-signal</code>) that both the offline <em>training</em> world and the online
   <em>runtime</em> world depend on — and <em>nothing else</em> crosses between them. That separation is not a
   convention; it is checked by tests (see §6).</p>
@@ -276,6 +318,13 @@ QE_GOOGLE_CLIENT_ID=… QE_GOOGLE_CLIENT_SECRET=… QE_GOOGLE_REDIRECT_URI=… Q
       <td>Ingest/fusion; the walk-forward QD search (<code>wfo</code>); the discrete-DE portfolio builder
       (<code>ensemble</code>); the sealed, content-hashed <strong>vintage artefact</strong> that is the
       hand-off to runtime.</td></tr>
+    <tr><td><strong>GP indicator<br>evolution</strong><br>(offline, default-off)</td>
+      <td class="mono">formula-pool · run-protocol<br>wfo/gp/*</td>
+      <td>The GP engine lives in <code>qe-wfo/src/gp/</code> (Expr/Kernel FIR tree interpreter, an
+      <code>Elite&lt;ExprTree&gt;</code> MAP-Elites archive, GP-aware deflation + tradability gates + K≤16 freeze);
+      <code>qe-formula-pool</code> is a pure leaf holding the sealed pool artefact (separate from
+      <code>qe-vintage</code>); <code>qe-run-protocol</code> is the leaf that carries the <code>evolve</code>
+      run-spec + progress protocol.</td></tr>
     <tr><td><strong>Runtime</strong></td>
       <td class="mono">venue · runtime</td>
       <td><code>venue</code> = REST/wss connectivity; <code>runtime</code> = live kline source, factor join,
@@ -381,6 +430,63 @@ QE_GOOGLE_CLIENT_ID=… QE_GOOGLE_CLIENT_SECRET=… QE_GOOGLE_REDIRECT_URI=… Q
     <li><code>qe-cli</code> depends on both worlds; it is the only place they meet, and it is the intended place.</li>
   </ul>
 
+  <h3>The GP indicator-evolution subsystem <span class="pill done">QE-451/452/453/454</span></h3>
+  <p>Layered on the training side and its own server/SPA surface, all default-off and firewall-clean:</p>
+  <div class="grid2">
+    <div class="card">
+      <h4>Engine &amp; artefact</h4>
+      <ul style="margin:0;padding-left:18px">
+        <li><strong>GP engine</strong> — <code>qe-wfo/src/gp/</code>: an Expr/Kernel <strong>FIR tree
+          interpreter</strong> (Decimal-only, batch == streaming by construction), an
+          <code>Elite&lt;ExprTree&gt;</code> <strong>MAP-Elites archive</strong>, GP-aware deflation
+          (uncensored PBO primary, DSR necessary-not-sufficient) + tradability gates (IC / cost-stress /
+          turnover / capacity) + a <strong>K≤16 freeze</strong>.</li>
+        <li><strong><code>qe-formula-pool</code></strong> — a new pure leaf crate, <em>separate</em> from
+          <code>qe-vintage</code>: K≤16 canonical S-expr strings + a deflation summary + review lineage. It
+          reuses the Vintage <strong>seal/verify/load SHA-256 discipline verbatim</strong> (load never returns an
+          unverified pool), under a <strong>separate directory root</strong>. The <strong>runtime never loads a
+          pool</strong>.</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h4>Server surface &amp; SPA</h4>
+      <ul style="margin:0;padding-left:18px">
+        <li><strong>Read routes</strong> — <code>GET /api/formula-pools[/{id}]</code>,
+          <code>GET /api/runs/{id}/archive</code>.</li>
+        <li><strong>Governance routes</strong> — <code>POST /api/formula-pools/{id}/{approve,reject,revoke,seal}</code>,
+          <code>POST /api/runs/{id}/halt</code>, <code>GET /api/audit</code>.</li>
+        <li><strong>SPA</strong> — <code>web/src/app/evolve/</code>: NewCampaign · CampaignMonitor ·
+          FormulaSexpr · PoolReview · PoolBrowser.</li>
+      </ul>
+    </div>
+  </div>
+  <div class="card">
+    <h4>Ops-safety / governance layer <span class="tag">QE-454</span></h4>
+    <p style="margin-top:0">The seal path is a real safety control, enforced server-side:</p>
+    <ul style="margin:0;padding-left:18px">
+      <li><strong>Per-request RBAC</strong> — <code>require_role</code> resolved per request from env allowlists
+        (<code>QE_ROLE_OPERATORS/APPROVERS/ADMINS</code>) keyed by the session-derived email, never from
+        cookie/body.</li>
+      <li><strong>Tamper-evident audit log</strong> — hash-chained (<code>entry_hash = SHA256(canonical‖prev)</code>)
+        + HMAC under <code>QE_AUDIT_SIGNING_KEY</code>; <code>GET /api/audit</code> verifies the chain; fail-closed
+        if the key is unset.</li>
+      <li><strong><code>GovernanceRecord</code></strong> — a separate content-addressed leaf <em>outside</em>
+        <code>VintageContent</code> (vintage byte-identity preserved); <strong>dual sign-off</strong> = two distinct
+        approvers ≠ launcher.</li>
+      <li><strong>Server-authoritative <code>seal_allowed</code></strong> — the single choke point: an AND over
+        {hash-verified pool, audit replay, compiled const} requiring the <strong>8 §13.5 hard-blocks</strong> +
+        <code>mode == production</code> + not-revoked + dual sign-off; any failure ⇒ 409 + named blockers + an
+        appended <code>Reject</code> audit entry.</li>
+      <li><strong>3 structural barriers</strong> — the compiled <code>DEFLATION_BASIS_VERSION</code> prereq bitset
+        (barrier 1, launch-time 400), a research pool root the production <code>VintageRepository</code> never
+        scans (barrier 2), and a fail-closed <code>assert_production_eligible</code> keyed on the hashed
+        <code>mode</code> (barrier 3).</li>
+      <li><strong>Run supervision</strong> — a ≈24h deadline (reuses the QE-407 kill path) + a dedicated evolve
+        semaphore (<code>QE_SERVER_MAX_EVOLVE_CONCURRENCY</code>) serialising campaigns without starving
+        backtests.</li>
+    </ul>
+  </div>
+
   <!-- ============================================================= -->
   <h2 class="section" id="dataflow">5 · Data flow (end-to-end intent)</h2>
   <p>The spec numbers the pipeline ①→⑦ on the training side and ③/④ on the runtime side. The
@@ -445,6 +551,21 @@ QE_GOOGLE_CLIENT_ID=… QE_GOOGLE_CLIENT_SECRET=… QE_GOOGLE_REDIRECT_URI=… Q
     </g>
   </svg>
   <div class="figcap">The vintage artefact (⑦) bridges training and runtime: it passes the <strong>G1</strong> gate, then the runtime bootstraps from it and runs the live loop toward the <strong>G2</strong> dry-run gate. No orders are sent before G2.</div>
+  </div>
+
+  <h3>The GP evolve path — a second, parallel lifecycle</h3>
+  <p>The <code>evolve</code> flow adds a <strong>two-lifecycle model</strong> that is deliberately distinct from
+  train→vintage. An <strong>ephemeral evolve RUN</strong> (illuminate → deflation/gates → freeze) produces a
+  sealed pool; that pool then has its own <strong>durable POOL lifecycle</strong>, tracked and governed
+  separately from the run:</p>
+  <div class="card">
+    <p class="mono" style="margin:0">Draft&nbsp;→&nbsp;Approved&nbsp;→&nbsp;Sealed&nbsp;&nbsp;
+    <span class="muted">(+ Rejected / Revoked)</span></p>
+    <p style="margin-bottom:0">Guarded transitions reject every illegal edge; the lifecycle state is persisted
+    <em>alongside the pool artefact</em> (under <code>&lt;data_dir&gt;/governance</code>), <strong>not</strong> in
+    the run. Crucially, a <strong>sealed pool does NOT auto-mint a vintage</strong> — the evolve lifecycle and the
+    train→vintage lifecycle never cross that way. <code>Done</code> from an evolve run emits <code>pool:</code>,
+    never <code>vintage:</code>.</p>
   </div>
 
   <!-- ============================================================= -->
@@ -515,6 +636,13 @@ QE_GOOGLE_CLIENT_ID=… QE_GOOGLE_CLIENT_SECRET=… QE_GOOGLE_REDIRECT_URI=… Q
     fail, and the right move is to push the shared type down into the spine (exactly what QE-207 did with the
     genome).
   </div>
+  <div class="callout ok">
+    <strong>The GP subsystem respects both firewalls.</strong> The pool/governance boundary is firewall-clean:
+    the evolved formulas' deflation statistics cross into the <code>seal_allowed</code> predicate as plain
+    <strong>DATA</strong> (no crate edge), and <code>qe-runtime</code>/<code>qe-venue</code> never depend on
+    <code>qe-formula-pool</code> — the runtime never loads a pool. The search⟂portfolio firewall
+    (<span class="tag">QE-132</span>) is unchanged: <code>qe-wfo/src/gp/</code> still cannot reach runtime or venue.
+  </div>
 
   <!-- ============================================================= -->
   <h2 class="section" id="milestones">7 · Milestones &amp; roadmap</h2>
@@ -527,6 +655,24 @@ QE_GOOGLE_CLIENT_ID=… QE_GOOGLE_CLIENT_SECRET=… QE_GOOGLE_REDIRECT_URI=… Q
     <tr><td><strong>PreP3</strong></td><td>Admin UI for training &amp; backtesting</td><td>Trigger / monitor / review backtest &amp; training runs from an authenticated browser UI (built before live).</td><td><span class="pill done">complete · 11/11 (QE-251–261)</span></td></tr>
     <tr><td><strong>P3</strong></td><td>Live, attribution &amp; ops</td><td><span class="pill gate">G3</span> independent go/no-go sign-off; staged capital ramp under enforced caps.</td><td><span class="pill todo">not started · 0/11</span></td></tr>
   </table>
+
+  <h3>QE-430..454 program — quant hardening + GP indicator evolution <span class="pill done">delivered 2026-07-18</span></h3>
+  <p>A cross-cutting review/hardening band that runs alongside the phases (it does <em>not</em> move the P0–P3
+  gates). <strong>24 tickets across 28 PRs</strong>, all merged to <code>main</code>:</p>
+  <ul>
+    <li><strong>QE-430..449 — 20 Max-Dama recommendations.</strong> The full ranked set from the 2026-07-16
+      quant-methodology panel review, ticketed and delivered (deflation-basis, IC pre-screen, MDL rent,
+      cost/turnover/capacity calibration, correlation penalties, and the rest). See
+      <code>docs/mds/reviewed/</code> (qe-430..449).</li>
+    <li><strong>QE-451/452/453/454 — the GP indicator-evolution program</strong> (design of record: QE-450):
+      the GP engine + K≤16 formula-pool freeze (QE-451, Phases 0/1a/1b), the <code>evolve</code> run kind +
+      <code>qe-formula-pool</code> artefact + server routes + pool lifecycle (QE-452, Phases A/B), the
+      <code>evolve/</code> SPA area (QE-453), and the RBAC + audit + <code>seal_allowed</code> governance layer
+      (QE-454, Phases A/B).</li>
+  </ul>
+  <p><strong>Default-off / golden-safe throughout:</strong> no <code>CATALOGUE_VERSION</code> or
+  <code>VINTAGE_FORMAT_VERSION</code> moved; the default (empty-pool) vintage stays byte-identical. The live
+  evolve→production-seal path remains fail-closed by design (§8).</p>
 
   <h3>Phase 0 — Foundations <span class="pill done">complete</span></h3>
   <p class="muted">Workspace topology, layered config, logging, error model, CI, the determinism harness, shared
@@ -648,6 +794,29 @@ QE_GOOGLE_CLIENT_ID=… QE_GOOGLE_CLIENT_SECRET=… QE_GOOGLE_REDIRECT_URI=… Q
   (<code>.github/workflows/frontend.yml</code> "build &amp; test") a <strong>required</strong> status check on
   <code>main</code>, so the SPA build is protected like the Rust gates.</p>
 
+  <h3>QE-430..454 deferred follow-ups <span class="pill wip">post-program</span></h3>
+  <p>Explicit, recorded deferrals from the completed program — none is a defect; each is the safe direction:</p>
+  <table>
+    <tr><th>Item</th><th>What &amp; why</th><th>Status</th></tr>
+    <tr><td><strong>Complete the live seal path</strong></td>
+      <td>Wire per-formula <code>gate_evidence</code> into the evolve pipeline so a live-evolve-produced
+        production pool can satisfy the <code>seal_allowed</code> HB5–8 hard-blocks. Until then the live
+        evolve→production-seal path is <strong>fail-closed by design</strong> (the predicate is fully armed; the
+        evidence simply isn't emitted yet).</td>
+      <td><span class="pill gate">the last mile</span></td></tr>
+    <tr><td><strong>Live-wiring cohort</strong></td>
+      <td>Several QE-43x/44x recs landed as <em>opt-in capability</em>, not yet on the live path:
+        <span class="tag">QE-433</span> Kelly sizer, <span class="tag">QE-435</span> cost model,
+        <span class="tag">QE-442</span> graded sizing, <span class="tag">QE-443</span> seed-weighting-into-scoring,
+        <span class="tag">QE-444</span> alpha_loss markout, <span class="tag">QE-446</span> StrategyRepository,
+        <span class="tag">QE-447</span> ADV feed.</td>
+      <td><span class="pill todo">P2</span></td></tr>
+    <tr><td><strong>Re-enable CI + branch protection</strong></td>
+      <td>CI and <code>main</code> branch protection were temporarily disabled during this run; re-enable both
+        (this is a repo-admin action, not a code change).</td>
+      <td><span class="pill todo">repo-admin</span></td></tr>
+  </table>
+
   <h3>Then — Phase 3: live, attribution &amp; ops <span class="pill todo">not started · QE-301–311</span></h3>
   <p>The Strategy Allocation Journal, reconciliation against venue trade history, attribution outputs, the operator
   cockpit (observability + authenticated manual controls), monitoring/alerting SLAs, incident runbooks, and
@@ -679,11 +848,13 @@ QE_GOOGLE_CLIENT_ID=… QE_GOOGLE_CLIENT_SECRET=… QE_GOOGLE_REDIRECT_URI=… Q
   </div>
 
   <div class="foot">
-    Generated from the repository on 2026-07-03. Source of truth: <code>docs/backlog.md</code> (roadmap),
-    <code>docs/mds/reviewed/</code> (completed-ticket records, QE-001→QE-261), <code>crates/*/Cargo.toml</code>
-    (dependency graph), <code>crates/cli/src/</code> + <code>crates/server/src/</code> + <code>web/</code>
-    (runnable surface). Test baseline: 668 Rust tests (+2 ignored) + 40 frontend tests, green; firewall +
-    decoupling guards green. Re-verify against the code before relying on any single claim.
+    Generated from the repository on 2026-07-03, refreshed 2026-07-18 for the completed QE-430..454 program.
+    Source of truth: <code>docs/backlog.md</code> (roadmap), <code>docs/mds/reviewed/</code> (completed-ticket
+    records, QE-001→QE-261 and QE-430→QE-454), <code>docs/architecture/qe-450-gp-indicator-evolution-design.md</code>
+    (GP spec of record), <code>crates/*/Cargo.toml</code> (dependency graph), <code>crates/cli/src/</code> +
+    <code>crates/server/src/</code> + <code>crates/formula-pool/</code> + <code>crates/wfo/src/gp/</code> +
+    <code>web/</code> (runnable surface). Test baseline: 1046 Rust tests (+2 ignored) + 75 frontend tests, green;
+    firewall + decoupling guards green. Re-verify against the code before relying on any single claim.
   </div>
 </main>
 </div>
