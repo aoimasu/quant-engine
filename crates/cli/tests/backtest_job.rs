@@ -204,6 +204,9 @@ fn write_sample_vintage(dir: &Path) {
             "fixture-commit",
             vec![42],
         ),
+        seal_evidence: qe_vintage::SealEvidence::default(),
+        holdout_series: qe_vintage::HoldoutReturnSeries::default(),
+        provenance: qe_vintage::ResearchProvenance::default(),
     };
     let vintage = Vintage::seal(content).unwrap();
     VintageRepository::new(dir).write(&vintage).unwrap();
