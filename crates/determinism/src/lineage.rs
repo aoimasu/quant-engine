@@ -4,6 +4,17 @@
 //! reproduced months later. A [`Lineage`] binds the four inputs that fully determine a stage's
 //! output: the config content hash (QE-002), the input-data snapshot id, the code commit, and the
 //! RNG seeds. Its [`Lineage::id`] is a stable hash usable as a primary key — i.e. *resolvable*.
+//!
+//! # Universe provenance is captured (QE-448)
+//!
+//! A vintage must be traceable to a **survivorship-safe, point-in-time universe** (QE-012). It already
+//! is: [`Lineage::from_config`] folds in [`qe_config::Config::content_hash`], which SHA-256s the
+//! **entire** `Config` — including both the flat `instruments` roster **and** the point-in-time
+//! `universe` (each member's instrument id plus its `[listed, delisted)` window). So the exact roster
+//! *and* every listing/delisting date live inside `config_hash`, hence inside [`Lineage::id`]. Change
+//! the roster, a listing date, or a delisting date and the vintage's resolvable id changes — a vintage
+//! is bound to the specific survivorship-safe universe it was trained on. No separate universe field is
+//! needed on the lineage record (see `universe_membership_changes_the_lineage_id`).
 
 use qe_config::{Config, ConfigError};
 use serde::{Deserialize, Serialize};
@@ -161,6 +172,42 @@ mod tests {
         let cfg = Config::from_toml_str("").expect("defaults are valid");
         let lin = Lineage::from_config(&cfg, "snap", "commit", vec![cfg.determinism.seed]).unwrap();
         assert_eq!(lin.config_hash, cfg.content_hash().unwrap());
+    }
+
+    #[test]
+    fn universe_membership_changes_the_lineage_id() {
+        // QE-448: the point-in-time / survivorship-safe universe (QE-012) is captured in the vintage
+        // lineage SHA via `Config::content_hash`. Two configs differing ONLY in a `[[universe]]`
+        // delisting date must produce different lineage ids — so a vintage is bound to the exact
+        // survivorship-safe roster it was trained on.
+        let base = "\
+[[universe]]
+instrument = \"BTCUSDT\"
+listed = \"2019-09-08\"
+
+[[universe]]
+instrument = \"LUNAUSDT\"
+listed = \"2020-01-01\"
+delisted = \"2022-05-13\"
+";
+        // Same roster, but LUNA's delisting date moved — a different survivorship window.
+        let moved = base.replace("2022-05-13", "2022-06-13");
+
+        let cfg_a = Config::from_toml_str(base).expect("valid universe config");
+        let cfg_b = Config::from_toml_str(&moved).expect("valid universe config");
+
+        let lin_a = Lineage::from_config(&cfg_a, "snap", "commit", vec![7]).unwrap();
+        let lin_b = Lineage::from_config(&cfg_b, "snap", "commit", vec![7]).unwrap();
+
+        assert_ne!(
+            lin_a.config_hash, lin_b.config_hash,
+            "a moved delisting date must change config_hash (universe rides the lineage)"
+        );
+        assert_ne!(
+            lin_a.id().unwrap(),
+            lin_b.id().unwrap(),
+            "a moved delisting date must change the resolvable lineage id"
+        );
     }
 
     #[test]
