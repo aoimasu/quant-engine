@@ -16,6 +16,11 @@ mod roll;
 mod flow;
 mod price;
 
+/// QE-451 Phase 0 — the `Expr`/`Kernel` tree-interpreter seam proof (default-off; nothing in the
+/// default pipeline references it). See the module docs and
+/// `docs/architecture/qe-451-phase0-expr-seam-design.md`.
+pub mod expr;
+
 pub use quant::{QState, Quantiser};
 
 use rust_decimal::Decimal;
