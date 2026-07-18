@@ -1,10 +1,10 @@
 import { useEffect, useState } from 'react';
 import { AppShell } from '../design';
 import { Login } from './Login';
-import { Placeholder } from './Placeholder';
 import { BacktestsArea } from './backtest/BacktestsArea';
 import { TrainingArea } from './training/TrainingArea';
 import { EvolveArea } from './evolve/EvolveArea';
+import { StrategiesArea } from './strategies/StrategiesArea';
 import { MarketData } from './MarketData';
 import { fetchMe, logout, detectRejection, type Me } from '../api/session';
 import { onUnauthorized } from '../api/authEvents';
@@ -115,12 +115,7 @@ export function App() {
         {active === 'data' ? (
           <MarketData />
         ) : active === 'strategies' ? (
-          <Placeholder
-            icon="git-branch"
-            title="Strategies"
-            description="Sealed vintages and the evolved genomes within them. The strategies browser is on the way."
-            ticket="a later ticket"
-          />
+          <StrategiesArea />
         ) : active === 'training' ? (
           <TrainingArea onBacktestVintage={openBacktestForVintage} />
         ) : active === 'evolve' ? (

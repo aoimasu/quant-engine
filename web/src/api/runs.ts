@@ -245,6 +245,111 @@ export interface VintageListItem {
   summary: VintageSummary;
 }
 
+/**
+ * The data provenance of the bars a vintage was trained / validated on (QE-467). Kept in lockstep with
+ * `qe_vintage::DataProvenance` (`#[serde(rename_all = "lowercase")]`). `mixed` is a labelled real+synthetic
+ * blend — **never** softened to `real` in the UI.
+ */
+export type DataProvenance = 'real' | 'synthetic' | 'mixed';
+
+/** One referenced indicator of a chromosome, resolved through the sealed catalogue identity (QE-456). */
+export interface IndicatorRef {
+  /** The genome's raw feature index. */
+  feature: number;
+  /** The resolved catalogue indicator id; absent for an evolved-formula reference. */
+  id?: string;
+  /** `catalogue` for a base-catalogue indicator, `evolved` for a sealed evolved-pool formula. */
+  source: 'catalogue' | 'evolved';
+}
+
+/** One chromosome's composition entry — its referenced indicators and its aligned ensemble weight. */
+export interface ChromosomeComposition {
+  index: number;
+  weight: number;
+  indicators: IndicatorRef[];
+}
+
+/**
+ * The persisted **seal evidence** (QE-467) rendered **verbatim** — the inspector never recomputes a gate.
+ * Mirrors `qe_vintage::SealEvidence`. The `min{1×,2×}` cost-stress net, realised turnover and `capacity_usd`
+ * are the net-of-cost / tradability lead; DSR/PBO/SPA/N/IC/FDR are the honest deflation basis. Optional
+ * fields are absent on the normal (non-evolve/non-IC-screen) train path.
+ */
+export interface SealEvidence {
+  dsr: number;
+  pbo: number;
+  spa_pvalue: number;
+  n_trials: number;
+  realised_turnover: number;
+  capacity_usd: number;
+  cost_stress_net_min?: number;
+  uncensored_pbo?: number;
+  ic?: number;
+  fdr?: number;
+}
+
+/** An inclusive-exclusive labelled range (`qe_vintage::TimeRange`). */
+export interface TimeRange {
+  start: string;
+  end: string;
+}
+
+/** The frozen holdout split the gate consulted (`qe_vintage::HoldoutSplit`). Ranges are `None` until QE-460. */
+export interface HoldoutSplit {
+  holdout_range?: TimeRange;
+  train_range?: TimeRange;
+  embargo_bars: number;
+}
+
+/** One regime's share of the holdout window (`qe_vintage::RegimeShare`, QE-125). */
+export interface RegimeShare {
+  regime: string;
+  bars: number;
+}
+
+/** The steer delta the search recorded (`qe_vintage::SteerDelta`, QE-458); absent for an unsteered vintage. */
+export interface SteerDelta {
+  indicator_subset_hash: string;
+  generations: number;
+  population: number;
+  windows: number;
+  folds: number;
+}
+
+/** A run that produced this vintage — the QE-456 reverse-join projection. */
+export interface ProducingRun {
+  run_id: string;
+  run_type: string;
+  status: RunStatus;
+  created_ms: number;
+}
+
+/**
+ * `GET /api/vintages/{id}` (QE-456) — the full sealed-vintage detail the Vintage Inspector consumes.
+ * One-to-one with the server `VintageDetail` DTO (`crates/server/src/read.rs`). Every gate/deflation number
+ * is **read** (rendered verbatim); the inspector recomputes nothing. `sidecars` is the sealed provenance
+ * bundle (slippage/sizer/calibration/catalogue + optional worst-case loss); only `worst_case_loss` is
+ * surfaced today, so it is typed loosely.
+ */
+export interface VintageDetail {
+  id: string;
+  label: string;
+  content_hash: string;
+  format_version: number;
+  data_provenance: DataProvenance;
+  composition: ChromosomeComposition[];
+  seal_evidence: SealEvidence;
+  holdout_series_handle: string;
+  holdout_series_len: number;
+  holdout_split: HoldoutSplit;
+  regime_composition: RegimeShare[];
+  consultation_count: number;
+  steer_delta?: SteerDelta;
+  sidecars: { worst_case_loss?: number | null } & Record<string, unknown>;
+  producing_runs: ProducingRun[];
+  primary_run?: string;
+}
+
 /** One market-data coverage row from `GET /api/market-data/coverage` (QE-257). */
 export interface CoverageRow {
   symbol: string;
@@ -397,6 +502,11 @@ export function getRunResult(id: string): Promise<BacktestResult> {
 /** List the sealed vintages available to backtest. */
 export function listVintages(): Promise<VintageListItem[]> {
   return getJson<VintageListItem[]>('/api/vintages');
+}
+
+/** Read one sealed vintage's full inspection detail (QE-456) — composition, gate evidence, provenance. */
+export function getVintage(id: string): Promise<VintageDetail> {
+  return getJson<VintageDetail>(`/api/vintages/${encodeURIComponent(id)}`);
 }
 
 /** Read-only market-data coverage (symbols × ranges present in the store). */
