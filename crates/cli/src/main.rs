@@ -8,11 +8,15 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use qe_cli::jobs::backtest::{run_backtest, BacktestParams};
+use qe_cli::jobs::datetime::parse_ymd_to_millis;
+use qe_cli::jobs::ingest::{run_ingest, IngestParams, SyntheticSource};
 use qe_cli::jobs::{
-    emit_done, emit_error, emit_evolve_done, emit_progress, emit_train_done, ProgressLine,
+    emit_done, emit_error, emit_evolve_done, emit_ingest_done, emit_progress, emit_train_done,
+    ProgressLine,
 };
 use qe_cli::{parse_args, run_evolve, run_train, Command, EvolveOptions, TrainOptions};
 use qe_config::{Config, Profile};
+use qe_domain::Resolution;
 use qe_run_protocol::EvolveMode;
 use qe_telemetry::{init as init_telemetry, OutputStream, TelemetryConfig, TelemetryGuard};
 
@@ -169,7 +173,8 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             start,
             end,
             resolution,
-        } => run_ingest_command(&config, &start, &end, &resolution),
+            synthetic,
+        } => run_ingest_command(&config, &start, &end, &resolution, synthetic),
     }
 }
 
@@ -456,34 +461,143 @@ fn describe(line: &ProgressLine) -> String {
 
 /// Dispatch `Command::Ingest`: stream a terminal JSON-line outcome on stdout and set the exit code.
 ///
-/// Real market-data decoders live behind the default-off `http` feature (out of scope for QE-253):
-/// this binary ships the fully-wired command plus the in-memory-tested [`run_ingest`] job
-/// (`qe_cli::jobs::ingest`), but no live `HistoricalSource`, so it reports the missing source as a
-/// terminal `{"t":"error"}` line and exits non-zero. Constructing a real source under `http` and
-/// calling `run_ingest` here is the future-work seam.
+/// Two modes:
+/// * **default** (no `--synthetic`): real market-data decoders live behind the default-off `http`
+///   feature, so with no live `HistoricalSource` this reports the missing source as a terminal
+///   `{"t":"error"}` line and exits non-zero — unchanged from before the flag.
+/// * **`--synthetic`**: populate the store from a deterministic **OFFLINE synthetic** generator
+///   ([`SyntheticSource`]) over the config universe + window, reusing the in-memory-tested
+///   [`run_ingest`] job. The data is **GENERATED, NOT real market data**, so the run is loudly
+///   labelled: a stderr warning plus a `"synthetic":true` marker in the terminal `done` line.
 fn run_ingest_command(
-    _config: &Path,
+    config: &Path,
     start: &str,
     end: &str,
     resolution: &str,
+    synthetic: bool,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
     // QE-413: a top-level stage span so a CLI run emits structured telemetry (to stderr).
-    let _span = tracing::info_span!("cli.ingest", resolution = %resolution).entered();
+    let _span = tracing::info_span!("cli.ingest", resolution = %resolution, synthetic).entered();
     tracing::info!(start = %start, end = %end, "ingest command started");
+
+    if synthetic {
+        return run_synthetic_ingest(config, start, end, resolution);
+    }
 
     let detail = format!("window {start}..{end} at {resolution}");
     #[cfg(feature = "http")]
     let msg = format!(
         "ingest ({detail}): the `http` market-data decoders are not yet implemented \
-         — QE-253 ships the scaffold + in-memory-tested run_ingest; real ingestion is future work"
+         — QE-253 ships the scaffold + in-memory-tested run_ingest; real ingestion is future work \
+         (use `--synthetic` for a deterministic offline dev store)"
     );
     #[cfg(not(feature = "http"))]
     let msg = format!(
         "ingest ({detail}): real market-data ingestion requires the `http` feature \
-         (out of scope for QE-253 — run_ingest is exercised with an in-memory source in tests)"
+         (out of scope for QE-253 — run_ingest is exercised with an in-memory source in tests); \
+         use `--synthetic` for a deterministic offline dev store"
     );
     let mut out = io::stdout().lock();
     emit_error(&mut out, &msg)?;
     out.flush()?;
     Ok(ExitCode::FAILURE)
+}
+
+/// Outcome summary of a synthetic ingest — for the human stderr report only.
+struct SyntheticSummary {
+    store_path: PathBuf,
+    instruments: usize,
+    bars: usize,
+}
+
+/// Run the offline synthetic ingest: emit the loud warning, populate the store, and stream the terminal
+/// line. Errors are surfaced as a terminal `{"t":"error"}` line + non-zero exit (protocol-consistent
+/// with the real path), never a panic.
+fn run_synthetic_ingest(
+    config: &Path,
+    start: &str,
+    end: &str,
+    resolution: &str,
+) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    // A loud, honest, impossible-to-miss warning BEFORE any work — this store is not real data.
+    eprintln!(
+        "WARNING: `qe ingest --synthetic` generates DETERMINISTIC SYNTHETIC market data. \
+         The resulting store holds GENERATED bars, NOT real market prices — never treat it as real."
+    );
+
+    match generate_synthetic_store(config, start, end, resolution) {
+        Ok(summary) => {
+            // Terminal JSON-line outcome carries the loud `"synthetic":true` marker.
+            let mut out = io::stdout().lock();
+            emit_ingest_done(&mut out, "synthetic-store", true)?;
+            out.flush()?;
+            eprintln!(
+                "synthetic: populated {} with {} instrument(s), {} bar(s) total — \
+                 SYNTHETIC DATA (not real market prices)",
+                summary.store_path.display(),
+                summary.instruments,
+                summary.bars,
+            );
+            Ok(ExitCode::SUCCESS)
+        }
+        Err(e) => {
+            let mut out = io::stdout().lock();
+            let _ = emit_error(&mut out, &e.to_string());
+            let _ = out.flush();
+            eprintln!("error: {e}");
+            Ok(ExitCode::FAILURE)
+        }
+    }
+}
+
+/// Build the [`SyntheticSource`] for each config-universe instrument over the `[start, end)` window at
+/// `resolution` and drive the tested [`run_ingest`] job to persist its bars into the config store.
+///
+/// The generator is seeded from `config.determinism.seed`, decorrelated per instrument by its index, so
+/// the same config + window + resolution always reproduces identical bars.
+fn generate_synthetic_store(
+    config: &Path,
+    start: &str,
+    end: &str,
+    resolution: &str,
+) -> Result<SyntheticSummary, Box<dyn std::error::Error>> {
+    let cfg = Config::load(Profile::RuntimeSim, config)?;
+
+    let res: Resolution = resolution.parse().map_err(|_| {
+        format!("invalid --resolution `{resolution}` (expected 1m/5m/15m/1h/4h/1d)")
+    })?;
+    let start_ms = parse_ymd_to_millis(start)
+        .ok_or_else(|| format!("invalid --start `{start}` (expected YYYY-MM-DD)"))?;
+    let end_ms = parse_ymd_to_millis(end)
+        .ok_or_else(|| format!("invalid --end `{end}` (expected YYYY-MM-DD)"))?;
+    if end_ms <= start_ms {
+        return Err(
+            format!("empty window: --start {start} must be strictly before --end {end}").into(),
+        );
+    }
+
+    let store_path = PathBuf::from(&cfg.storage.market_dir);
+    let mut total_bars = 0usize;
+    for (idx, symbol) in cfg.instruments.iter().enumerate() {
+        let mut source =
+            SyntheticSource::new(res, start_ms, end_ms, cfg.determinism.seed, idx as u64);
+        let bars = source.bar_count();
+        let params = IngestParams {
+            store_path: store_path.clone(),
+            map_size: qe_storage::DEFAULT_MAP_SIZE,
+            instrument: symbol.clone(),
+        };
+        let mut progress = |pct: u8, stage: &str, msg: &str| {
+            eprintln!("[{pct:>3}%] {symbol} (synthetic) {stage}: {msg}");
+        };
+        run_ingest(&params, &mut source, &mut progress)?;
+        total_bars += bars;
+        eprintln!("synthetic: {symbol}: generated {bars} {resolution} bar(s)");
+    }
+
+    Ok(SyntheticSummary {
+        store_path,
+        instruments: cfg.instruments.len(),
+        bars: total_bars,
+    })
 }

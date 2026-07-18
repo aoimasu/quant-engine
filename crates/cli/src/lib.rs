@@ -351,6 +351,12 @@ pub enum Command {
         end: String,
         /// Bar resolution to ingest (`1h`, `5m`, …).
         resolution: String,
+        /// Generate a deterministic **OFFLINE synthetic** store instead of a real ingest (opt-in;
+        /// default `false`). Without it, `qe ingest` still errors (real ingest needs the unimplemented
+        /// `http` decoders). With it, a seeded generator populates the store from the config universe +
+        /// window — clearly labelled **GENERATED, NOT real market data** (stderr warning +
+        /// `"synthetic":true` in the terminal `done` line).
+        synthetic: bool,
     },
 }
 
@@ -540,12 +546,16 @@ where
             let mut start = String::new();
             let mut end = String::new();
             let mut resolution = String::new();
+            let mut synthetic = false;
             while let Some(flag) = it.next() {
                 match flag.as_str() {
                     "--config" => config = PathBuf::from(value(&mut it, "--config")?),
                     "--start" => start = value(&mut it, "--start")?,
                     "--end" => end = value(&mut it, "--end")?,
                     "--resolution" => resolution = value(&mut it, "--resolution")?,
+                    // Opt-in offline synthetic generation (boolean; no value). Default off ⇒ the real
+                    // ingest error is unchanged.
+                    "--synthetic" => synthetic = true,
                     other => return Err(CliError::Usage(format!("unknown flag `{other}`"))),
                 }
             }
@@ -554,6 +564,7 @@ where
                 start,
                 end,
                 resolution,
+                synthetic,
             })
         }
         other => Err(CliError::Usage(format!("unknown command `{other}`"))),
@@ -828,6 +839,8 @@ mod tests {
                 start: "2021-01-01".into(),
                 end: "2021-02-01".into(),
                 resolution: "1h".into(),
+                // `--synthetic` is opt-in: absent ⇒ false (behaviour unchanged from before the flag).
+                synthetic: false,
             }
         );
         // Bare `ingest` defaults the config path and leaves the window empty.
@@ -838,6 +851,35 @@ mod tests {
                 start: String::new(),
                 end: String::new(),
                 resolution: String::new(),
+                synthetic: false,
+            }
+        );
+    }
+
+    #[test]
+    fn ingest_parses_synthetic_flag() {
+        // `--synthetic` is a boolean toggle (no value) and flips the opt-in flag to true.
+        let cmd = parse_args([
+            "ingest",
+            "--config",
+            "my.toml",
+            "--start",
+            "2021-01-01",
+            "--end",
+            "2022-01-01",
+            "--resolution",
+            "1h",
+            "--synthetic",
+        ])
+        .unwrap();
+        assert_eq!(
+            cmd,
+            Command::Ingest {
+                config: PathBuf::from("my.toml"),
+                start: "2021-01-01".into(),
+                end: "2022-01-01".into(),
+                resolution: "1h".into(),
+                synthetic: true,
             }
         );
     }

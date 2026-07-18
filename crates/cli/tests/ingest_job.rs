@@ -9,7 +9,7 @@
 
 use std::path::{Path, PathBuf};
 
-use qe_cli::jobs::ingest::{coverage, run_ingest, CoverageRow, IngestParams};
+use qe_cli::jobs::ingest::{coverage, run_ingest, CoverageRow, IngestParams, SyntheticSource};
 use qe_domain::{Bar, InstrumentId, Price, Qty, Resolution, Timestamp};
 use qe_runtime::{BootstrapError, HistoricalSource, HistoricalWindow};
 use qe_storage::MarketStore;
@@ -170,6 +170,127 @@ fn ingest_populates_store_from_in_memory_source() {
         )
         .unwrap();
     assert_eq!(premium.len(), 1);
+}
+
+// ---------------------------------------------------------------------------------------------------
+// Offline synthetic generator (`qe ingest --synthetic`) — SyntheticSource drives the same `run_ingest`.
+// ---------------------------------------------------------------------------------------------------
+
+/// A deterministic seed for the synthetic tests (stands in for `config.determinism.seed`).
+const SYNTH_SEED: u64 = 42;
+
+/// Generate the bars for one instrument index over `n` 1h bars from `START_MS`, without any store.
+fn synthetic_bars(index: u64, n: i64) -> Vec<Bar> {
+    let end = START_MS + n * HOUR_MS; // exclusive ⇒ exactly `n` bars
+    let mut source = SyntheticSource::new(Resolution::H1, START_MS, end, SYNTH_SEED, index);
+    assert_eq!(
+        source.bar_count(),
+        n as usize,
+        "bar_count must match the window"
+    );
+    source.fetch().unwrap().bars
+}
+
+#[test]
+fn synthetic_ingest_populates_fresh_store_with_expected_coverage() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store_path = tmp.path().join("store");
+    let n: i64 = 72;
+    let end = START_MS + n * HOUR_MS;
+
+    // Two instruments, exactly as `run_ingest_command` loops the config universe.
+    for (idx, symbol) in ["BTCUSDT", "ETHUSDT"].iter().enumerate() {
+        let mut source =
+            SyntheticSource::new(Resolution::H1, START_MS, end, SYNTH_SEED, idx as u64);
+        let params = IngestParams {
+            store_path: store_path.clone(),
+            map_size: FIXTURE_MAP_SIZE,
+            instrument: (*symbol).to_owned(),
+        };
+        run_ingest(&params, &mut source, &mut |_, _, _| {}).unwrap();
+    }
+
+    let store = MarketStore::open(&store_path, FIXTURE_MAP_SIZE).unwrap();
+    let rows = coverage(
+        &store,
+        &[
+            InstrumentId::new("BTCUSDT").unwrap(),
+            InstrumentId::new("ETHUSDT").unwrap(),
+        ],
+    )
+    .unwrap();
+
+    // One coverage row per instrument, each spanning the whole window with exactly `n` bars.
+    assert_eq!(
+        rows,
+        vec![
+            CoverageRow {
+                symbol: "BTCUSDT".to_owned(),
+                resolution: "1h".to_owned(),
+                from: START_MS,
+                to: START_MS + (n - 1) * HOUR_MS,
+                bars: n as usize,
+            },
+            CoverageRow {
+                symbol: "ETHUSDT".to_owned(),
+                resolution: "1h".to_owned(),
+                from: START_MS,
+                to: START_MS + (n - 1) * HOUR_MS,
+                bars: n as usize,
+            },
+        ]
+    );
+}
+
+#[test]
+fn synthetic_bars_are_valid_ohlc_and_chained() {
+    let n: i64 = 240;
+    let bars = synthetic_bars(0, n);
+    assert_eq!(bars.len(), n as usize);
+
+    for (i, b) in bars.iter().enumerate() {
+        // OHLC invariant: high brackets the top, low brackets the bottom.
+        assert!(
+            b.high() >= b.open() && b.high() >= b.close(),
+            "high below body at {i}"
+        );
+        assert!(
+            b.low() <= b.open() && b.low() <= b.close(),
+            "low above body at {i}"
+        );
+        assert!(b.high() >= b.low(), "high < low at {i}");
+        // Strictly positive prices and volume — nothing degenerate reaches the store.
+        assert!(b.low().get() > Decimal::ZERO, "non-positive low at {i}");
+        assert!(
+            b.volume().get() > Decimal::ZERO,
+            "non-positive volume at {i}"
+        );
+        // Timestamps step by the resolution from START_MS.
+        assert_eq!(
+            b.open_time(),
+            Timestamp::from_millis(START_MS + i as i64 * HOUR_MS)
+        );
+        // Each bar opens at the prior bar's close (a continuous walk).
+        if i > 0 {
+            assert_eq!(b.open(), bars[i - 1].close(), "open != prior close at {i}");
+        }
+    }
+}
+
+#[test]
+fn synthetic_bars_reproduce_for_same_seed_and_decorrelate_across_instruments() {
+    // Same (seed, index, window, resolution) ⇒ byte-identical bar VALUES.
+    assert_eq!(
+        synthetic_bars(0, 48),
+        synthetic_bars(0, 48),
+        "same seed must reproduce identical bars"
+    );
+    // Distinct instrument indices draw decorrelated streams ⇒ different bars.
+    assert_ne!(
+        synthetic_bars(0, 48),
+        synthetic_bars(1, 48),
+        "different instrument index must diverge"
+    );
 }
 
 #[test]

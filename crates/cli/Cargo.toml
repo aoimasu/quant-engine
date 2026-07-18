@@ -47,6 +47,9 @@ qe-formula-pool.workspace = true
 # (re-exported from `jobs`), so the server parses exactly what this binary emits.
 qe-run-protocol.workspace = true
 rust_decimal.workspace = true
+# QE synthetic-ingest: the `RngCore::next_u64` trait to draw from the deterministic `DetRng`
+# (`qe-determinism`) when generating offline synthetic bars. A tiny trait crate already in the tree.
+rand_core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

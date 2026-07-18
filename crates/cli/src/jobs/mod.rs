@@ -20,7 +20,8 @@ use thiserror::Error;
 /// `qe_cli::jobs::{ProgressLine, emit_progress, emit_done, emit_train_done, emit_error}` import paths
 /// are unchanged. See that crate for the single source of truth (progress lines + `PROTOCOL_VERSION`).
 pub use qe_run_protocol::{
-    emit_done, emit_error, emit_evolve_done, emit_progress, emit_train_done, ProgressLine,
+    emit_done, emit_error, emit_evolve_done, emit_ingest_done, emit_progress, emit_train_done,
+    ProgressLine,
 };
 
 /// A backtest/ingest job failure. Distinct from [`crate::CliError`] (arg parsing / config): these are

@@ -8,8 +8,8 @@
 //! field rename in either crate would change this type and fail a case below.
 
 use qe_run_protocol::{
-    emit_done, emit_error, emit_evolve_done, emit_progress, emit_train_done, ProgressLine,
-    PROTOCOL_VERSION,
+    emit_done, emit_error, emit_evolve_done, emit_ingest_done, emit_progress, emit_train_done,
+    ProgressLine, PROTOCOL_VERSION,
 };
 
 /// Round-trip a value against its exact wire string: value → JSON == wire, and wire → value == value.
@@ -91,6 +91,7 @@ fn done_and_error_wire_are_frozen() {
             protocol_version: PROTOCOL_VERSION,
             vintage: None,
             pool: None,
+            synthetic: false,
         },
         r#"{"t":"done","result":"result.json","protocol_version":2}"#,
     );
@@ -101,6 +102,7 @@ fn done_and_error_wire_are_frozen() {
             protocol_version: PROTOCOL_VERSION,
             vintage: Some("vintage-abc123".to_owned()),
             pool: None,
+            synthetic: false,
         },
         r#"{"t":"done","result":"result.json","protocol_version":2,"vintage":"vintage-abc123"}"#,
     );
@@ -111,8 +113,21 @@ fn done_and_error_wire_are_frozen() {
             protocol_version: PROTOCOL_VERSION,
             vintage: None,
             pool: Some("pool-abc123".to_owned()),
+            synthetic: false,
         },
         r#"{"t":"done","result":"result.json","protocol_version":2,"pool":"pool-abc123"}"#,
+    );
+    // Synthetic ingest form (QE synthetic-ingest) — the loud `synthetic:true` marker; the only place
+    // the field appears on the wire (absent-by-default everywhere else keeps PROTOCOL_VERSION at 2).
+    assert_wire(
+        &ProgressLine::Done {
+            result: "synthetic-store".to_owned(),
+            protocol_version: PROTOCOL_VERSION,
+            vintage: None,
+            pool: None,
+            synthetic: true,
+        },
+        r#"{"t":"done","result":"synthetic-store","protocol_version":2,"synthetic":true}"#,
     );
     assert_wire(
         &ProgressLine::Error {
@@ -192,6 +207,10 @@ fn emit_helpers_match_the_frozen_wire() {
     emit_done(&mut buf, "result.json").unwrap();
     emit_train_done(&mut buf, "result.json", "vintage-abc123").unwrap();
     emit_evolve_done(&mut buf, "result.json", "pool-abc123").unwrap();
+    // A real ingest emits `synthetic:false` → the marker is omitted, so the wire is byte-identical to
+    // a backtest `done`; a synthetic ingest emits the loud `synthetic:true` marker.
+    emit_ingest_done(&mut buf, "result.json", false).unwrap();
+    emit_ingest_done(&mut buf, "synthetic-store", true).unwrap();
     emit_error(&mut buf, "boom").unwrap();
     let out = String::from_utf8(buf).unwrap();
     let lines: Vec<&str> = out.lines().collect();
@@ -202,6 +221,8 @@ fn emit_helpers_match_the_frozen_wire() {
             r#"{"t":"done","result":"result.json","protocol_version":2}"#,
             r#"{"t":"done","result":"result.json","protocol_version":2,"vintage":"vintage-abc123"}"#,
             r#"{"t":"done","result":"result.json","protocol_version":2,"pool":"pool-abc123"}"#,
+            r#"{"t":"done","result":"result.json","protocol_version":2}"#,
+            r#"{"t":"done","result":"synthetic-store","protocol_version":2,"synthetic":true}"#,
             r#"{"t":"error","msg":"boom"}"#,
         ]
     );

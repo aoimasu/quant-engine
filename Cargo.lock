@@ -1649,6 +1649,7 @@ dependencies = [
  "qe-venue",
  "qe-vintage",
  "qe-wfo",
+ "rand_core 0.9.5",
  "rust_decimal",
  "serde",
  "serde_json",
