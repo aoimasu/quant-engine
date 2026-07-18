@@ -130,6 +130,7 @@ fn roles_with_approver() -> RoleConfig {
     RoleConfig {
         operators: vec![TEST_EMAIL.to_owned()],
         approvers: vec![TEST_EMAIL.to_owned()],
+        ..RoleConfig::default()
     }
 }
 

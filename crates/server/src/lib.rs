@@ -29,12 +29,14 @@ use tower_http::services::{ServeDir, ServeFile};
 use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
 
+pub mod audit;
 pub mod auth;
 pub mod config;
 pub mod pools;
 pub mod read;
 pub mod runs;
 
+pub use audit::{AuditAction, AuditEntry, AuditLog, ChainStatus, SignoffState};
 pub use auth::{
     mint_session_cookie, AuthConfig, AuthContext, AuthedEmail, GoogleClaims, IdTokenVerifier,
     RoleConfig, VerifyError, SESSION_COOKIE_NAME,
@@ -61,9 +63,11 @@ pub struct AppState {
     pub read: Arc<ReadState>,
     /// QE-452 Phase B: the formula-pool artefact roots + the durable governance lifecycle store.
     pub pools: Arc<PoolState>,
-    /// QE-452 Phase B: the `require_role` seam's allowlists (operators/approvers). QE-454 replaces the
-    /// seam with authoritative RBAC.
+    /// QE-452 Phase B / QE-454 Phase A: the authoritative `require_role` allowlists (operators/approvers/
+    /// admins), resolved per-request server-side (never from the cookie).
     pub roles: Arc<RoleConfig>,
+    /// QE-454 Phase A: the tamper-evident audit log (`<data_dir>/audit/log.jsonl`).
+    pub audit: Arc<AuditLog>,
 }
 
 impl AppState {
@@ -78,6 +82,7 @@ impl AppState {
             read,
             pools: Arc::new(PoolState::disabled()),
             roles: Arc::new(RoleConfig::default()),
+            audit: Arc::new(AuditLog::disabled()),
         }
     }
 
@@ -92,6 +97,13 @@ impl AppState {
     #[must_use]
     pub fn with_roles(mut self, roles: Arc<RoleConfig>) -> Self {
         self.roles = roles;
+        self
+    }
+
+    /// Attach the QE-454 Phase A tamper-evident audit log.
+    #[must_use]
+    pub fn with_audit(mut self, audit: Arc<AuditLog>) -> Self {
+        self.audit = audit;
         self
     }
 }
@@ -123,6 +135,12 @@ impl FromRef<AppState> for Arc<PoolState> {
 impl FromRef<AppState> for Arc<RoleConfig> {
     fn from_ref(state: &AppState) -> Self {
         Arc::clone(&state.roles)
+    }
+}
+
+impl FromRef<AppState> for Arc<AuditLog> {
+    fn from_ref(state: &AppState) -> Self {
+        Arc::clone(&state.audit)
     }
 }
 

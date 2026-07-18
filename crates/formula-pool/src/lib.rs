@@ -26,8 +26,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+pub mod governance_record;
 pub mod lifecycle;
 
+pub use governance_record::{GovernanceRecord, RevocationRecord, Revocations};
 pub use lifecycle::{
     LifecycleError, PoolGovernance, PoolGovernanceStore, PoolLifecycleState, PoolTransition,
     TransitionRecord,
@@ -361,7 +363,7 @@ pub enum PoolError {
 }
 
 /// Lowercase-hex encoding of a byte slice.
-fn hex(bytes: &[u8]) -> String {
+pub(crate) fn hex(bytes: &[u8]) -> String {
     use std::fmt::Write as _;
     let mut s = String::with_capacity(bytes.len() * 2);
     for b in bytes {
