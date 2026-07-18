@@ -19,10 +19,12 @@ use qe_formula_pool::{
     DeflationSummary, FormulaPool, FormulaPoolContent, FormulaPoolRepository, PoolFormula,
     PoolLineage, PoolMode, MAX_POOL_SIZE, POOL_FORMAT_VERSION,
 };
-use qe_run_protocol::EvolveMode;
+use qe_run_protocol::{ArchiveCell, ArchiveTrialBasis, EvolveArchive, EvolveMode};
 use qe_signal::indicator::expr::ExprTree;
 use qe_signal::indicator::Sample;
-use qe_wfo::gp::{assess_gp_champion, formula_returns, illuminate, FrozenPool, IlluminationParams};
+use qe_wfo::gp::{
+    assess_gp_champion, formula_returns, illuminate, FrozenPool, IlluminationParams, EXPR_CELLS,
+};
 use rust_decimal::prelude::FromPrimitive;
 use rust_decimal::Decimal;
 use serde::Serialize;
@@ -130,6 +132,10 @@ pub struct EvolveOutcome {
     pub content_hash: String,
     /// The result sidecar (written to `<run-dir>/result.json` by `main`).
     pub result: EvolveResultDoc,
+    /// The MAP-Elites archive snapshot (written to `<run-dir>/archive.json` by `main`) — the heatmap +
+    /// trial-basis the `GET /api/runs/{id}/archive` route (QE-452 Phase B) serves to the QE-453 SPA.
+    /// Deterministic for a fixed seed; not a hashed artefact.
+    pub archive: EvolveArchive,
 }
 
 /// Run the evolve pipeline, streaming structured [`ProgressLine`]s through `emit`.
@@ -293,11 +299,46 @@ pub fn run_evolve_job(
         pool_size: frozen.len(),
     };
 
+    // ---- archive snapshot (heatmap cells + trial-basis) for GET /api/runs/{id}/archive ------------
+    // Deterministic: `occupied_cells()` iterates in sorted-cell order, so the heatmap is stable for a
+    // fixed seed. Purely diagnostic (not hashed) — the authoritative deflation lives in the sealed pool.
+    let cells: Vec<ArchiveCell> = report
+        .archive
+        .occupied_cells()
+        .filter_map(|cell| report.archive.best_in(cell).map(|elite| (cell, elite)))
+        .map(|(cell, elite)| ArchiveCell {
+            family: format!("{:?}", cell.family),
+            timescale: format!("{:?}", cell.timescale),
+            complexity: format!("{:?}", cell.complexity),
+            node_count: elite.tree.node_count(),
+            best_fitness: elite.fitness.is_finite().then_some(elite.fitness),
+        })
+        .collect();
+    let archive = EvolveArchive {
+        pool_id: pool_id.clone(),
+        mode: params.mode.as_str().to_owned(),
+        generations: il_params.generations,
+        offspring: il_params.offspring_per_generation,
+        cells,
+        trial_basis: ArchiveTrialBasis {
+            distinct_evaluations: deflation.distinct_evaluations,
+            n_trials: deflation.n_trials as u64,
+            analytic_floor: deflation.analytic_floor as u64,
+            expected_max_sharpe: deflation
+                .expected_max_sharpe
+                .is_finite()
+                .then_some(deflation.expected_max_sharpe),
+            occupied_cells,
+            total_cells: EXPR_CELLS,
+        },
+    };
+
     Ok(EvolveOutcome {
         pool_id,
         pool_path,
         content_hash,
         result,
+        archive,
     })
 }
 

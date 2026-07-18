@@ -13,7 +13,7 @@ pub mod model;
 pub mod spawn;
 pub mod store;
 
-pub use manager::{CreateError, RunManager};
+pub use manager::{CreateError, HaltOutcome, RunManager};
 pub use model::{
     BacktestParams, CreateRunRequest, EnsembleSnapshot, GateSnapshot, GenSnapshot, RunMeta,
     RunSpec, RunStatus, TrainParams, TrainProgress,

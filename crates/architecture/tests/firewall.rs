@@ -62,6 +62,11 @@ fn firewall_holds_in_the_workspace() {
         // QE-452 Phase A: the composition root reaches the pool artefact, so the pool ⟂ live rule (which
         // constrains `qe-formula-pool`) sits on a crate that a real edge actually reaches — non-vacuous.
         ("qe-cli", "qe-formula-pool"),
+        // QE-452 Phase B: the admin-UI backend now reads formula pools + drives their governance lifecycle,
+        // so `qe-server → qe-formula-pool` is a real edge. Asserting it is parsed proves the `qe-server`
+        // firewall rule (no `qe-runtime`/`qe-venue` edge) covers the crate through which the pool routes
+        // land — the pool code stays server+pool-side, never regressing onto the live path.
+        ("qe-server", "qe-formula-pool"),
     ] {
         assert!(
             reachable(&graph, from).contains(to),

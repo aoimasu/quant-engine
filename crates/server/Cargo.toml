@@ -32,6 +32,10 @@ qe-telemetry.workspace = true
 # repository the `/api/vintages` list reads.
 qe-storage.workspace = true
 qe-vintage.workspace = true
+# QE-452 Phase B: the frozen formula-pool artefact + its durable governance lifecycle. A pure serde leaf
+# (no `qe-runtime`/`qe-venue` edge — runtime never loads a pool), so this edge is firewall-legal and the
+# `qe-server` firewall rule provably covers it (crates/architecture/tests/firewall.rs).
+qe-formula-pool.workspace = true
 # QE-406: the shared run protocol — the `ProgressLine` parse type + the `BacktestParams`/`TrainParams`
 # wire DTOs (re-exported from `runs::model`). A pure serde leaf, so this edge is firewall-neutral.
 qe-run-protocol.workspace = true

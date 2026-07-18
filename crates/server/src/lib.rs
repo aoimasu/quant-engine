@@ -31,17 +31,19 @@ use tower_http::trace::TraceLayer;
 
 pub mod auth;
 pub mod config;
+pub mod pools;
 pub mod read;
 pub mod runs;
 
 pub use auth::{
-    mint_session_cookie, AuthConfig, AuthContext, GoogleClaims, IdTokenVerifier, VerifyError,
-    SESSION_COOKIE_NAME,
+    mint_session_cookie, AuthConfig, AuthContext, AuthedEmail, GoogleClaims, IdTokenVerifier,
+    RoleConfig, VerifyError, SESSION_COOKIE_NAME,
 };
 pub use config::{
     check_storage_dirs_match, load_app_config, resolve_config_path, server_storage_dirs,
     StorageDirMismatch, StorageDirs,
 };
+pub use pools::PoolState;
 pub use runs::{CliJobSpawner, JobSpawner, RunManager};
 
 /// Shared application state carried by the `/api` router.
@@ -57,16 +59,40 @@ pub struct AppState {
     pub auth: Arc<AuthContext>,
     /// The QE-257 read-API state (sealed-vintage repo + opened market store).
     pub read: Arc<ReadState>,
+    /// QE-452 Phase B: the formula-pool artefact roots + the durable governance lifecycle store.
+    pub pools: Arc<PoolState>,
+    /// QE-452 Phase B: the `require_role` seam's allowlists (operators/approvers). QE-454 replaces the
+    /// seam with authoritative RBAC.
+    pub roles: Arc<RoleConfig>,
 }
 
 impl AppState {
-    /// Build the application state from its three halves.
+    /// Build the application state from its core halves. QE-452 Phase B's pool + role state default to a
+    /// **disabled** pool view ([`PoolState::disabled`]) and an **empty, fail-closed** [`RoleConfig`] — so
+    /// every existing caller/test is unchanged; a real deployment (and the pool tests) attach them with
+    /// [`with_pools`](Self::with_pools) / [`with_roles`](Self::with_roles).
     pub fn new(manager: Arc<RunManager>, auth: Arc<AuthContext>, read: Arc<ReadState>) -> Self {
         Self {
             manager,
             auth,
             read,
+            pools: Arc::new(PoolState::disabled()),
+            roles: Arc::new(RoleConfig::default()),
         }
+    }
+
+    /// Attach the QE-452 Phase B pool state (artefact roots + governance store).
+    #[must_use]
+    pub fn with_pools(mut self, pools: Arc<PoolState>) -> Self {
+        self.pools = pools;
+        self
+    }
+
+    /// Attach the QE-452 Phase B `require_role` allowlists.
+    #[must_use]
+    pub fn with_roles(mut self, roles: Arc<RoleConfig>) -> Self {
+        self.roles = roles;
+        self
     }
 }
 
@@ -85,6 +111,18 @@ impl FromRef<AppState> for Arc<AuthContext> {
 impl FromRef<AppState> for Arc<ReadState> {
     fn from_ref(state: &AppState) -> Self {
         Arc::clone(&state.read)
+    }
+}
+
+impl FromRef<AppState> for Arc<PoolState> {
+    fn from_ref(state: &AppState) -> Self {
+        Arc::clone(&state.pools)
+    }
+}
+
+impl FromRef<AppState> for Arc<RoleConfig> {
+    fn from_ref(state: &AppState) -> Self {
+        Arc::clone(&state.roles)
     }
 }
 
@@ -335,7 +373,7 @@ pub fn build_router(static_dir: &Path, state: AppState) -> Router {
     let index = static_dir.join("index.html");
     let static_service = ServeDir::new(static_dir).fallback(ServeFile::new(index));
 
-    let protected = auth::protected_routes(Arc::clone(&state.auth));
+    let protected = auth::protected_routes(Arc::clone(&state.auth), Arc::clone(&state.roles));
 
     // QE-413 per-request tracing, applied to the `/api` router only (static-file serving stays
     // quiet). Order is outermost→innermost: stamp `x-request-id` first (so the span and downstream

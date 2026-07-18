@@ -363,6 +363,10 @@ fn run_evolve_command(cmd: EvolveCli) -> Result<ExitCode, Box<dyn std::error::Er
             let out_path = cmd.run_dir.join("result.json");
             let bytes = serde_json::to_vec_pretty(&outcome.result)?;
             std::fs::write(&out_path, &bytes)?;
+            // QE-452 Phase B: the MAP-Elites archive snapshot the `GET /api/runs/{id}/archive` route serves
+            // (heatmap cells + trial-basis). A sidecar next to `result.json`; not a hashed artefact.
+            let archive_path = cmd.run_dir.join("archive.json");
+            std::fs::write(&archive_path, serde_json::to_vec_pretty(&outcome.archive)?)?;
             if json {
                 let mut out = io::stdout().lock();
                 emit_evolve_done(&mut out, "result.json", &outcome.pool_id)?;
