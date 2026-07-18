@@ -503,6 +503,86 @@ mod tests {
     }
 
     #[test]
+    fn apply_fill_charges_the_taker_rate_not_the_maker_rate() {
+        // QE-449 latent-trap guard (maxdama §7.6) on the REAL production fill path. The engine is a pure
+        // taker today (no post_only/OrderType/limit-order machinery in edge or hedger), and
+        // `backtest()` -> `apply_fill` prices every fill at `Liquidity::Taker` UNCONDITIONALLY; no code
+        // path selects `Liquidity::Maker`. This test drives a genuine `backtest()` to a fill and proves
+        // the CHARGED fee is EXACTLY the taker rate and never the maker rate — non-vacuously (taker and
+        // maker drags differ, and the taker fee actually moves net_pnl). A future maker-rebate change
+        // that routes `Liquidity::Maker` into `apply_fill` will trip this guard and is thereby forced to
+        // also model the paired adverse-selection markout (see the `FeeSchedule` invariant).
+        use crate::friction::{FeeSchedule, SlippageModel};
+
+        let s = schema();
+        // Constant price ⇒ the round-trip realises ZERO gross P&L; feature 0 is high only at bar 0, so
+        // the long genome (hold = 1) enters once (fill at bar 1) and exits once (fill at bar 3): exactly
+        // one round-trip = two fills through `apply_fill`, and nothing else.
+        let flat: Vec<Bar> = (0..8)
+            .map(|i| {
+                bar(
+                    &s,
+                    i as i64 * 60_000,
+                    Decimal::from(100),
+                    u16::from(i == 0) * 4,
+                )
+            })
+            .collect();
+        let g = long_genome(1, 5_000); // size_bps 5000 ⇒ size_frac 0.5
+
+        // Isolate FEES as the only cost: zero slippage (half_spread / impact / alpha_loss); the fixture
+        // carries no funding. So net_pnl is purely the fee drag on the two fills.
+        let no_slip = SlippageModel {
+            half_spread: Decimal::ZERO,
+            impact_coeff: Decimal::ZERO,
+            alpha_loss: Decimal::ZERO,
+            ..SlippageModel::default()
+        };
+        let cfg = |taker: Decimal, maker: Decimal| BacktestConfig {
+            friction: FrictionConfig {
+                fees: FeeSchedule { taker, maker },
+                slippage: no_slip,
+                cost_multiplier: Decimal::ONE,
+            },
+            min_trades: 1,
+            ..BacktestConfig::default()
+        };
+
+        let taker = Decimal::new(5, 4); // 0.05%
+        let maker = Decimal::new(2, 4); // 0.02% (distinct, cheaper)
+        let size_frac = Decimal::new(5, 1); // 5000 bps = 0.5
+
+        let res = backtest(&g, &flat, &cfg(taker, maker));
+        assert_eq!(
+            res.trades, 1,
+            "fixture must produce exactly one round-trip (two fills)"
+        );
+
+        // Two fills, each of notional == size_frac (equity starts at 1 and the price cancels), gross
+        // == 0, slippage/funding off ⇒ net_pnl is EXACTLY minus the TAKER-rate fee on both fills.
+        let taker_drag = -(Decimal::from(2) * taker * size_frac);
+        assert_eq!(
+            res.net_pnl, taker_drag,
+            "apply_fill must charge the taker rate: net_pnl {} != -2·taker·size_frac {}",
+            res.net_pnl, taker_drag
+        );
+        // Non-vacuous: had `apply_fill` charged the maker rate, net_pnl would be this instead.
+        let maker_drag = -(Decimal::from(2) * maker * size_frac);
+        assert_ne!(
+            res.net_pnl, maker_drag,
+            "guard is non-vacuous: the taker and maker drags differ"
+        );
+
+        // The maker rate is NEVER charged on this path: bumping it 10× leaves net_pnl BYTE-IDENTICAL.
+        // (A future change routing `Liquidity::Maker` into `apply_fill` would break this equality.)
+        let maker_bumped = backtest(&g, &flat, &cfg(taker, maker * Decimal::from(10)));
+        assert_eq!(
+            maker_bumped.net_pnl, res.net_pnl,
+            "apply_fill must not charge the maker rate: changing it moved net_pnl"
+        );
+    }
+
+    #[test]
     fn size_impact_strictly_lowers_high_turnover_fitness() {
         // QE-403 AC: with size-impact > 0, a high-turnover / large-size genome's fitness STRICTLY drops
         // relative to impact == 0. `decide` is cost-blind, so the trade sequence is identical — the drop
