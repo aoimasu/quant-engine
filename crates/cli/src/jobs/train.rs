@@ -560,17 +560,21 @@ pub fn run_train_job(
     // Deployed-book modelled capacity ($) at TARGET_AUM_USD — the sum of the same per-member capacities
     // the sealed weights were water-filled against (`strategy_capacities`), not equal-weight.
     let deployed_capacities = strategy_capacities(&chromosomes, &selected_bt, train_adv_notional);
-    // Round to whole dollars: `hash_stable`'s 12-decimal rounding bounds *fractional* precision, but a
-    // multi-million-dollar capacity still carries ~19 significant digits, which serde_json's float parser
-    // does not round-trip (breaking the content-hash verify). An integer-valued f64 (≪ 2^53) serialises
-    // and re-parses exactly, which is ample precision for a capacity figure.
+    // Round to whole dollars so the figure is REPRODUCIBLE in the hashed content. `hash_stable` rounds via
+    // `value * 1e12`; for a multi-million-dollar magnitude that product exceeds f64's exact-integer range
+    // (2^53 ≈ 9.0e15), so its `.round()` operates on already-imprecise low bits and yields a
+    // non-reproducible result — unfit for a content hash. (serde_json itself round-trips any finite f64 via
+    // ryu; the instability is in `hash_stable`, not the JSON codec.) An integer-valued f64 (≪ 2^53) is
+    // exact and stable, which is ample precision for a capacity figure.
     let capacity_usd = deployed_capacities.iter().sum::<f64>().round();
     // Realised turnover of the deployed ensemble: weight-summed per-member round-trip notional per period —
     // the exact turnover the capacity model prices with.
     let realised_turnover = hash_stable(ensemble_turnover(&chromosomes, &selected_bt, &weights));
     // Cost-stressed net (design §4.6a): `min` over friction multipliers m ∈ {1×,2×} of the DEPLOYED
     // ensemble's total net-of-cost holdout return. 1× is the honest `train_cfg`; 2× scales the assumed
-    // fees + slippage only (funding is a realised cashflow and untouched).
+    // fees + slippage only (funding is a realised cashflow and untouched). COMPUTED AT SEAL as a cheap
+    // deterministic function of the exact deployed weights — not captured from a gate field: cost-stress is
+    // not a G1 criterion, so persisting it is evidence recording, not re-deciding the gate.
     let net_1x: f64 = holdout_returns.iter().sum();
     let cfg_2x = BacktestConfig {
         friction: train_cfg.friction.with_multiplier(Decimal::from(2)),
