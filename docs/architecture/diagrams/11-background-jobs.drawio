@@ -2,7 +2,7 @@
   <diagram name="Background Jobs &amp; Subprocess Supervision" id="diagram-1">
     <mxGraphModel dx="980" dy="540" grid="1" gridSize="10" guides="1" tooltips="1"
         connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="980"
-        pageHeight="540" math="0" shadow="0">
+        pageHeight="700" math="0" shadow="0">
       <root>
 <mxCell id="0"/>
 <mxCell id="1" parent="0"/>
@@ -16,6 +16,14 @@
 <mxCell id="tail" value="supervisor tail&#10;parse → update meta.json" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e6f4ea;strokeColor=#2f8f4e;fontColor=#202124;fontFamily=Helvetica;fontSize=12;" vertex="1" parent="1"><mxGeometry x="470" y="320" width="200" height="60" as="geometry"/></mxCell>
 <mxCell id="store" value="run store (files)&#10;meta.json · result.json&#10;stdout.log · index.json" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fef7e0;strokeColor=#c58a1a;fontColor=#202124;fontFamily=Helvetica;fontSize=12;" vertex="1" parent="1"><mxGeometry x="730" y="220" width="200" height="74" as="geometry"/></mxCell>
 <mxCell id="spa" value="SPA poller&#10;GET /runs/:id every 2s&#10;stop on terminal" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8f0fe;strokeColor=#3b6fd4;fontColor=#202124;fontFamily=Helvetica;fontSize=12;" vertex="1" parent="1"><mxGeometry x="730" y="340" width="200" height="74" as="geometry"/></mxCell>
+<mxCell id="ev" value="EVOLVE-RUN SUPERVISION (QE-452/454) — POST /api/runs/{id}/halt requires require_role(Operator)" style="rounded=1;dashed=1;html=1;fillColor=none;strokeColor=#8b3fd4;verticalAlign=top;fontColor=#8b3fd4;fontStyle=1;fontSize=11;" vertex="1" parent="1"><mxGeometry x="40" y="450" width="900" height="150" as="geometry"/></mxCell>
+<mxCell id="ev1" value="POST /api/runs&#10;type: evolve" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e6f4ea;strokeColor=#2f8f4e;fontColor=#202124;fontFamily=Helvetica;fontSize=12;" vertex="1" parent="1"><mxGeometry x="60" y="500" width="160" height="60" as="geometry"/></mxCell>
+<mxCell id="ev2" value="evolve semaphore&#10;QE_SERVER_MAX_EVOLVE_CONCURRENCY&#10;default 1 · serialises campaigns" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8eaed;strokeColor=#3c4043;fontColor=#202124;fontFamily=Helvetica;fontSize=12;" vertex="1" parent="1"><mxGeometry x="260" y="495" width="200" height="70" as="geometry"/></mxCell>
+<mxCell id="ev3" value="~24h wall-clock deadline&#10;tokio::time::timeout&#10;abort → kill_on_drop" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fce8e6;strokeColor=#c5382b;fontColor=#202124;fontFamily=Helvetica;fontSize=12;" vertex="1" parent="1"><mxGeometry x="500" y="495" width="180" height="70" as="geometry"/></mxCell>
+<mxCell id="ev4" value="seals qe-formula-pool&#10;Done emits pool:&#10;(never vintage:)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f3e9fc;strokeColor=#8b3fd4;fontColor=#202124;fontFamily=Helvetica;fontSize=12;" vertex="1" parent="1"><mxGeometry x="720" y="495" width="200" height="70" as="geometry"/></mxCell>
+<mxCell id="ee1" value="" style="endArrow=classic;html=1;strokeColor=#5f6368;fontSize=10;labelBackgroundColor=#ffffff;" edge="1" parent="1"><mxGeometry relative="1" as="geometry"><mxPoint x="220" y="530" as="sourcePoint"/><mxPoint x="260" y="530" as="targetPoint"/></mxGeometry></mxCell>
+<mxCell id="ee2" value="" style="endArrow=classic;html=1;strokeColor=#5f6368;fontSize=10;labelBackgroundColor=#ffffff;" edge="1" parent="1"><mxGeometry relative="1" as="geometry"><mxPoint x="460" y="530" as="sourcePoint"/><mxPoint x="500" y="530" as="targetPoint"/></mxGeometry></mxCell>
+<mxCell id="ee3" value="freeze K≤16" style="endArrow=classic;html=1;strokeColor=#5f6368;fontSize=10;labelBackgroundColor=#ffffff;" edge="1" parent="1"><mxGeometry relative="1" as="geometry"><mxPoint x="680" y="530" as="sourcePoint"/><mxPoint x="720" y="530" as="targetPoint"/></mxGeometry></mxCell>
 <mxCell id="n2" value="" style="endArrow=classic;html=1;strokeColor=#5f6368;fontSize=10;labelBackgroundColor=#ffffff;" edge="1" parent="1"><mxGeometry relative="1" as="geometry"><mxPoint x="190" y="147" as="sourcePoint"/><mxPoint x="230" y="147" as="targetPoint"/></mxGeometry></mxCell>
 <mxCell id="n3" value="" style="endArrow=classic;html=1;strokeColor=#5f6368;fontSize=10;labelBackgroundColor=#ffffff;" edge="1" parent="1"><mxGeometry relative="1" as="geometry"><mxPoint x="320" y="184" as="sourcePoint"/><mxPoint x="320" y="220" as="targetPoint"/></mxGeometry></mxCell>
 <mxCell id="n4" value="slot free" style="endArrow=classic;html=1;strokeColor=#5f6368;fontSize=10;labelBackgroundColor=#ffffff;" edge="1" parent="1"><mxGeometry relative="1" as="geometry"><mxPoint x="320" y="260" as="sourcePoint"/><mxPoint x="320" y="290" as="targetPoint"/></mxGeometry></mxCell>

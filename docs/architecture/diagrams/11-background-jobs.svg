@@ -1,6 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 540" font-family="Helvetica, Arial, sans-serif" font-size="13">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 700" font-family="Helvetica, Arial, sans-serif" font-size="13">
 <defs><marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L8,3 L0,6 Z" fill="#5f6368"/></marker></defs>
-<rect x="0" y="0" width="980" height="540" fill="#ffffff"/>
+<rect x="0" y="0" width="980" height="700" fill="#ffffff"/>
 <text x="24" y="34" font-size="20" font-weight="700" fill="#202124">Background Jobs &amp; Subprocess Supervision</text>
 <text x="24" y="54" font-size="12" fill="#5f6368">No queue/cron; run supervision via a bounded worker pool. Evidence: crates/server/src/runs (manager/spawn/store), web/src/api/runs.ts</text>
 <line x1="190" y1="147" x2="230" y2="147" stroke="#5f6368" stroke-width="1.6" marker-end="url(#arrow)"/>
@@ -53,6 +53,28 @@ kill_on_drop</text>
 stdout.log · index.json</text>
 <rect x="730" y="340" width="200" height="74" rx="7" fill="#e8f0fe" stroke="#3b6fd4" stroke-width="1.6"/>
 <text x="830.0" y="373.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">SPA poller</text>
-<text x="830.0" y="389.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">GET /runs/:id every 2s
-stop on terminal</text>
+<text x="830.0" y="389.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">GET /runs/:id every 2s</text>
+<text x="830.0" y="402.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">stop on terminal</text>
+<rect x="40" y="450" width="900" height="150" rx="10" fill="none" stroke="#8b3fd4" stroke-width="1.5" stroke-dasharray="6 4" opacity="0.9"/>
+<text x="52" y="470" font-size="12" font-weight="700" fill="#8b3fd4" letter-spacing="0.5">EVOLVE-RUN SUPERVISION (QE-452/454) — POST /api/runs/{id}/halt requires require_role(Operator)</text>
+<line x1="220" y1="530" x2="260" y2="530" stroke="#5f6368" stroke-width="1.6" marker-end="url(#arrow)"/>
+<line x1="460" y1="530" x2="500" y2="530" stroke="#5f6368" stroke-width="1.6" marker-end="url(#arrow)"/>
+<line x1="680" y1="530" x2="720" y2="530" stroke="#5f6368" stroke-width="1.6" marker-end="url(#arrow)"/>
+<rect x="662.0" y="521.0" width="76" height="18" rx="4" fill="#ffffff" stroke="#dadce0"/>
+<text x="700.0" y="534.0" font-size="11" fill="#3c4043" text-anchor="middle">freeze K≤16</text>
+<rect x="60" y="500" width="160" height="60" rx="7" fill="#e6f4ea" stroke="#2f8f4e" stroke-width="1.6"/>
+<text x="140.0" y="526.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">POST /api/runs</text>
+<text x="140.0" y="542.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#5f6368" text-anchor="middle">type: evolve</text>
+<rect x="260" y="495" width="200" height="70" rx="7" fill="#e8eaed" stroke="#3c4043" stroke-width="1.6"/>
+<text x="360.0" y="520.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">evolve semaphore</text>
+<text x="360.0" y="536.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="9.5" fill="#5f6368" text-anchor="middle">QE_SERVER_MAX_EVOLVE_CONCURRENCY</text>
+<text x="360.0" y="550.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10" fill="#5f6368" text-anchor="middle">default 1 · serialises campaigns</text>
+<rect x="500" y="495" width="180" height="70" rx="7" fill="#fce8e6" stroke="#c5382b" stroke-width="1.6"/>
+<text x="590.0" y="520.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">~24h wall-clock deadline</text>
+<text x="590.0" y="536.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10" fill="#5f6368" text-anchor="middle">tokio::time::timeout</text>
+<text x="590.0" y="550.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10" fill="#5f6368" text-anchor="middle">abort → kill_on_drop</text>
+<rect x="720" y="495" width="200" height="70" rx="7" fill="#f3e9fc" stroke="#8b3fd4" stroke-width="1.6"/>
+<text x="820.0" y="520.0" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#202124" text-anchor="middle">seals qe-formula-pool</text>
+<text x="820.0" y="536.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10" fill="#5f6368" text-anchor="middle">Done emits pool:</text>
+<text x="820.0" y="550.0" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="10" fill="#5f6368" text-anchor="middle">(never vintage:)</text>
 </svg>
