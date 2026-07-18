@@ -127,9 +127,12 @@ impl RunStore {
 /// Write `bytes` to `path` atomically: write a sibling temp file, then `rename` over `path`. The
 /// temp file shares `path`'s parent so the rename is a same-filesystem move.
 ///
+/// `pub(crate)` so the QE-454 tamper-evident audit log (`crate::audit`) reuses the **same** atomic-write
+/// discipline as the run store rather than forking a second implementation.
+///
 /// # Errors
 /// Any filesystem error creating the parent, writing the temp file, or renaming.
-fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
+pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent)?;
     let tmp = parent.join(format!(".{}.tmp", Uuid::new_v4()));

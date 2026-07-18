@@ -11,13 +11,23 @@ use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::{Json, Router};
+use axum::{Extension, Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use super::manager::{CreateError, RunManager};
 use super::model::{CreateRunRequest, IndexEntry, Progress, RunMeta, RunStatus, TrainProgress};
 use super::store::RunStore;
+use crate::audit::{AuditAction, AuditLog};
+use crate::auth::AuthedEmail;
+
+/// Wall-clock now, epoch-ms (the audit entry's operational timestamp — not a hashed field).
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
 
 /// Default page size for `GET /api/runs` when `?limit=` is absent (spec QE-410 "caps result size").
 const DEFAULT_LIMIT: usize = 50;
@@ -48,10 +58,26 @@ pub fn routes() -> Router<crate::AppState> {
 /// request.
 async fn create_run(
     State(manager): State<Arc<RunManager>>,
+    State(audit): State<Arc<AuditLog>>,
+    Extension(AuthedEmail(actor)): Extension<AuthedEmail>,
     Json(req): Json<CreateRunRequest>,
 ) -> Response {
+    // QE-454 §13.8: an evolve launch commits the **launcher** as the first audit entry at create time (the
+    // separation-of-duties anchor — an approver must never equal the launcher). Run-bound here (the pool is
+    // not frozen yet); the pool-id binding completes when the run produces its pool (Phase B replay).
+    let is_evolve = req.run_type == "evolve";
     match manager.create(req).await {
-        Ok(id) => (StatusCode::CREATED, Json(json!({ "id": id }))).into_response(),
+        Ok(id) => {
+            if is_evolve {
+                if let Err(e) = audit
+                    .append(&actor, AuditAction::Launch, "", &id, "", "", now_ms())
+                    .await
+                {
+                    tracing::warn!(run_id = %id, error = %e, "failed to append launch audit entry");
+                }
+            }
+            (StatusCode::CREATED, Json(json!({ "id": id }))).into_response()
+        }
         Err(CreateError::Validation(msg)) => {
             (StatusCode::BAD_REQUEST, Json(json!({ "error": msg }))).into_response()
         }

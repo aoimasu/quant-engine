@@ -126,20 +126,30 @@ async fn main() -> ExitCode {
 
     // QE-452 Phase B: the formula-pool artefact roots (sandbox = `<artifacts>/research/pools`, production
     // = `<artifacts>/pools` — the §13.6 barrier-2 separate roots) + the durable governance lifecycle store
-    // (`<data_dir>/governance`), and the `require_role` seam's allowlists (fail-closed from env). QE-454
-    // replaces the seam with authoritative RBAC + audit.
+    // (`<data_dir>/governance`), and the authoritative `require_role` allowlists (fail-closed from env).
     let pools = Arc::new(qe_server::PoolState::from_dirs(
         &server_dirs.artifacts_dir,
         &cfg.data_dir,
     ));
     let roles = Arc::new(qe_server::RoleConfig::from_env());
 
+    // QE-454 Phase A: the tamper-evident audit log (`<data_dir>/audit/log.jsonl`). Fail-closed on the
+    // signing key — an unset/ephemeral `QE_AUDIT_SIGNING_KEY` keeps production-seal capability DISABLED.
+    let audit = Arc::new(qe_server::AuditLog::from_env(&cfg.data_dir));
+    if !audit.production_seal_capability_allowed() {
+        tracing::warn!(
+            "QE_AUDIT_SIGNING_KEY unset/ephemeral — production-seal capability is DISABLED (fail-closed); \
+             set a persistent QE_AUDIT_SIGNING_KEY to enable it (QE-454)."
+        );
+    }
+
     // Keep a handle to the manager for the post-serve drain (QE-407); `AppState` takes ownership of one
     // `Arc` clone.
     let shutdown_manager = Arc::clone(&manager);
     let state = AppState::new(manager, auth, read)
         .with_pools(pools)
-        .with_roles(roles);
+        .with_roles(roles)
+        .with_audit(audit);
     let router = build_router(&cfg.static_dir, state);
 
     let listener = match tokio::net::TcpListener::bind(cfg.addr).await {

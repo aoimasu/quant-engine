@@ -415,9 +415,28 @@ async fn callback(
         .into_response()
 }
 
-/// `GET /api/me` — the authenticated email (the session middleware guarantees one is present).
-async fn me(Extension(AuthedEmail(email)): Extension<AuthedEmail>) -> Response {
-    Json(json!({ "email": email })).into_response()
+/// `GET /api/me` — the authenticated email (the session middleware guarantees one is present) plus
+/// **UX-only** capability hints (design §13.8).
+///
+/// `capabilities:{canLaunch, canApprove}` are computed **server-side** from [`RoleConfig`] for the authed
+/// email. They exist only so the SPA can *hide* affordances the caller cannot use — they are **never
+/// authoritative**: every governance route re-checks the role server-side regardless of what the client
+/// renders, and the server never trusts a client-supplied capability. A capability can therefore only
+/// *remove* an affordance, never grant access.
+async fn me(
+    State(roles): State<Arc<RoleConfig>>,
+    Extension(AuthedEmail(email)): Extension<AuthedEmail>,
+) -> Response {
+    let can_launch = roles.is_operator(&email);
+    let can_approve = roles.is_approver(&email);
+    Json(json!({
+        "email": email,
+        "capabilities": {
+            "canLaunch": can_launch,
+            "canApprove": can_approve,
+        },
+    }))
+    .into_response()
 }
 
 /// `GET|POST /api/auth/logout` — clear the session cookie (QE-409). Emits a `Set-Cookie` with the
@@ -465,30 +484,38 @@ pub fn protected_routes(auth: Arc<AuthContext>, roles: Arc<RoleConfig>) -> Route
         .merge(crate::read::routes())
         .merge(crate::pools::read_routes())
         .merge(crate::pools::governance_routes(roles))
+        .merge(crate::audit::routes())
         .route_layer(axum::middleware::from_fn_with_state(auth, require_session))
 }
 
-/// Coarse governance roles (design §13.8). **Phase B placeholder** — a minimal, boot-resolved allowlist
-/// seam. The AUTHORITATIVE enforcement (per-request server-side resolution, separation of duties — an
-/// approver ≠ the launcher — dual sign-off, and the tamper-evident audit binding) is **QE-454**; this
-/// only proves the seam is on the governance-route path so QE-454 can harden it in place.
+/// Coarse governance roles (design §13.8) — the **authoritative** RBAC allowlists (QE-454 Phase A).
+///
+/// Roles are resolved **per-request, server-side**, from these env allowlists — **never** carried in the
+/// session cookie or a request body. The cookie holds only the email
+/// ([`mint_session_cookie`](crate::mint_session_cookie)); the role is looked up fresh on every request, so
+/// **revoking an approver takes effect on their next request** and no cookie/body/header field can forge a
+/// role. All allowlists are **fail-closed**: unset/blank ⇒ nobody holds the role.
 #[derive(Debug, Clone, Default)]
 pub struct RoleConfig {
     /// Emails allowed to launch/monitor/halt campaigns (`QE_ROLE_OPERATORS`).
     pub operators: Vec<String>,
     /// Emails allowed to approve/reject/revoke/seal pools (`QE_ROLE_APPROVERS`).
     pub approvers: Vec<String>,
+    /// Emails allowed to perform admin actions, incl. reading `role_change` audit detail (`QE_ROLE_ADMINS`).
+    pub admins: Vec<String>,
 }
 
 const ENV_ROLE_OPERATORS: &str = "QE_ROLE_OPERATORS";
 const ENV_ROLE_APPROVERS: &str = "QE_ROLE_APPROVERS";
+const ENV_ROLE_ADMINS: &str = "QE_ROLE_ADMINS";
 
 impl RoleConfig {
-    /// Resolve the role allowlists from the environment (both **fail-closed**: unset/blank ⇒ nobody).
+    /// Resolve the role allowlists from the environment (all **fail-closed**: unset/blank ⇒ nobody).
     pub fn from_env() -> Self {
         Self {
             operators: parse_allowlist(&std::env::var(ENV_ROLE_OPERATORS).unwrap_or_default()),
             approvers: parse_allowlist(&std::env::var(ENV_ROLE_APPROVERS).unwrap_or_default()),
+            admins: parse_allowlist(&std::env::var(ENV_ROLE_ADMINS).unwrap_or_default()),
         }
     }
 
@@ -503,6 +530,12 @@ impl RoleConfig {
     pub fn is_approver(&self, email: &str) -> bool {
         contains_email(&self.approvers, email)
     }
+
+    /// Whether `email` holds the admin role (case-insensitive, trimmed).
+    #[must_use]
+    pub fn is_admin(&self, email: &str) -> bool {
+        contains_email(&self.admins, email)
+    }
 }
 
 /// Whether the normalized `email` is in the (already-normalized) `allowlist`.
@@ -511,9 +544,10 @@ fn contains_email(allowlist: &[String], email: &str) -> bool {
     !candidate.is_empty() && allowlist.iter().any(|a| a == &candidate)
 }
 
-/// `require_role(Operator)` seam (design §13.8): gate a route on the caller (the [`AuthedEmail`] set by
-/// [`require_session`]) holding the operator role, else `403`. **QE-454** replaces this with authoritative
-/// RBAC + audit; here it only proves the seam sits on the governance path.
+/// `require_role(Operator)` (design §13.8): gate a route on the caller (the [`AuthedEmail`] set by
+/// [`require_session`]) holding the operator role, else `403`. The role is resolved **per-request,
+/// server-side**, from [`RoleConfig`] (env allowlists) — never from the cookie/body, so a request-supplied
+/// role claim cannot grant access and revoking the role takes effect on the next request.
 pub async fn require_operator(
     State(roles): State<Arc<RoleConfig>>,
     req: axum::extract::Request,
@@ -522,8 +556,9 @@ pub async fn require_operator(
     role_gate(&roles, Role::Operator, req, next).await
 }
 
-/// `require_role(Approver)` seam (design §13.8) — the approve/reject/revoke/seal governance routes. See
-/// [`require_operator`]; **QE-454** adds separation-of-duties + dual sign-off + audit.
+/// `require_role(Approver)` (design §13.8) — the approve/reject/revoke/seal governance routes. See
+/// [`require_operator`]; separation-of-duties + dual sign-off + the tamper-evident audit binding are
+/// enforced by the governance handlers on top of this role gate.
 pub async fn require_approver(
     State(roles): State<Arc<RoleConfig>>,
     req: axum::extract::Request,
@@ -559,11 +594,10 @@ async fn role_gate(
     if held {
         next.run(req).await
     } else {
-        // QE-454 will replace this placeholder with authoritative RBAC + a tamper-evident audit entry.
         reject(
             StatusCode::FORBIDDEN,
-            "role required — this governance action is gated on a server-side role (authoritative \
-             RBAC + audit land in QE-454)",
+            "role required — this governance action is gated on a server-side role resolved \
+             per-request from the env allowlist (never from the session cookie or request body)",
         )
     }
 }

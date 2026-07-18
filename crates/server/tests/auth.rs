@@ -144,7 +144,15 @@ async fn allowlisted_login_sets_a_session_and_me_returns_the_email() {
 
     let me = send(&app, get_with_cookie("/api/me", &cookie)).await;
     assert_eq!(me.status(), StatusCode::OK);
-    assert_eq!(json_body(me).await, serde_json::json!({ "email": email }));
+    // QE-454: `/me` now carries UX-only capability hints alongside the email. This app wires no roles,
+    // so both capabilities are `false` (fail-closed) — the server still enforces per-route regardless.
+    assert_eq!(
+        json_body(me).await,
+        serde_json::json!({
+            "email": email,
+            "capabilities": { "canLaunch": false, "canApprove": false },
+        })
+    );
 }
 
 #[tokio::test]
