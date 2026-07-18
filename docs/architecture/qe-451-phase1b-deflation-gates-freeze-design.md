@@ -68,6 +68,16 @@ gens, windows) = max(distinct_evaluations, effective_trials(cells,gens,windows))
 QE-439's finite-at-large-N `expected_max_sharpe_ln` path. **Errs conservative:** the floor never
 under-counts; over-counting raises the bar ⇒ over-deflate/false-reject (safe), never under-deflate.
 
+**DSR-honest basis = `max(distinct, N*)`, NOT the analytic floor alone (carry-forward to QE-454).** The
+analytic `max(distinct, cells·gens·windows)` basis is honest for the **PBO/dispersion** axis but can
+*under*-deflate the **DSR** axis: the empirical best-of-N in-sample Sharpe is heavier-tailed than the
+parametric Gumbel `E[max SR]`, so a label-shuffled champion sits at DSR `> 0.7` on the raw basis and only
+reaches ≈ 0.5 once deflated against the **shuffle-null-calibrated `N* ≥ P`** (`calibrate_null_basis`). Both
+`gp_trial_basis` and `assess_gp_champion` are **basis-agnostic** (they deflate against whatever `N` the
+caller supplies), and **nothing auto-applies `N*` yet** — the **QE-454 production seal MUST fold `N*` in**
+(deflate G1 against `max(distinct, N*)`); sealing on the analytic floor alone would ship the under-deflated
+DSR. This is the load-bearing carry-forward.
+
 ### Freeze + default-byte-identical (item 8)
 
 `CatalogueIdentity` gains one field:
@@ -95,8 +105,12 @@ autocorrelation). Calibration target (design §5 κ-null row, AC 5): on a label-
 **evolved-champion DSR sits at ≈ 0.5 across node-size bands** — i.e. once the trial basis counts how hard the
 search rummaged, best-of-N noise no longer clears the deflation bar. The test
 `shuffle_null_champion_dsr_is_near_half_across_node_bands` selects the max-Sharpe champion per node-size band
-from a shuffled population, deflates it against the GP-aware basis, and asserts DSR ∈ [0.35, 0.65] for every
-band (calibrated result recorded in the test + the PR). This is the non-vacuous proof the deflation is honest.
+from a label-shuffled population and shows the two-step honesty result: (1) on the **raw** basis `N = P`
+the champion DSR is **> 0.7** — the raw `max(distinct, analytic-floor)` basis *under-deflates* the DSR axis
+(the empirical best-of-N Sharpe is heavier-tailed than the Gumbel `E[max SR]`); (2) `calibrate_null_basis`
+finds `N* ≥ P` at which the shuffled-champion **DSR ∈ [0.45, 0.55] ≈ 0.5** for every band. **The honest DSR
+basis is therefore `max(distinct, N*)`, and QE-454's seal must fold `N*` in** (see §3). This is the
+non-vacuous proof the deflation is honest.
 
 ## 5. Determinism / constraints
 

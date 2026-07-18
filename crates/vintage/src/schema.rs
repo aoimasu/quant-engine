@@ -213,6 +213,72 @@ mod tests {
     }
 
     #[test]
+    fn a_tampered_formula_pool_is_rejected_at_the_load_boundary() {
+        // QE-451 Phase 1b: the frozen GP formula pool is part of the sealed [`CatalogueIdentity`], and the
+        // load boundary asserts it EXACTLY (design §6). This makes tamper-rejection explicit (previously
+        // covered only transitively by the reorder test).
+        use qe_signal::indicator::expr::{Expr, ExprTree, Field, WinOp};
+        let win = |op, f, n| ExprTree::repaired(Expr::Window(op, Box::new(Expr::Input(f)), n));
+        // Two real frozen formulas → their canonical-S-expr SHA-256 `formula_hash`es (sorted).
+        let f1 = win(WinOp::Rank, Field::Close, 20);
+        let f2 = win(WinOp::Zscore, Field::High, 50);
+        let good_pool = {
+            let mut v = vec![f1.canonical_hash(), f2.canonical_hash()];
+            v.sort();
+            v
+        };
+
+        // A QE-454-style build that sanctions `good_pool` re-derives the SAME identity — so a vintage
+        // carrying exactly `good_pool` would pass the boundary's exact-equality check (mirrors
+        // `assert_schema`'s `content.catalogue == current()` comparison).
+        let sanctioned = CatalogueIdentity::current().with_formula_pool(good_pool.clone());
+        assert_eq!(
+            sanctioned,
+            CatalogueIdentity::current().with_formula_pool(good_pool.clone()),
+            "the untampered pool re-derives to the identical sanctioned identity (loads clean)"
+        );
+
+        // TAMPER: alter ONE frozen entry's canonical S-expression (Rank period 20 → 50) so its recomputed
+        // `formula_hash` no longer matches — a single-entry tamper must change the whole identity.
+        let mut tampered_pool = good_pool.clone();
+        let tampered_hash = win(WinOp::Rank, Field::Close, 50).canonical_hash();
+        tampered_pool[0] = tampered_hash.clone();
+        assert_ne!(
+            tampered_pool, good_pool,
+            "the tamper actually changed a hash"
+        );
+        let tampered = CatalogueIdentity::current().with_formula_pool(tampered_pool);
+        assert_ne!(
+            tampered, sanctioned,
+            "a single tampered formula_hash must change the sealed identity"
+        );
+
+        // End-to-end through the REAL load boundary (repo.load → hash-verify → assert_schema): the default
+        // build's `current()` sanctions an EMPTY pool, so a vintage carrying a (tampered) sealed pool is
+        // rejected with the EXACT `SchemaMismatch`, whose `found` carries the sealed pool verbatim.
+        let (_d, repo_t) = repo("pool-tamper");
+        let sealed = Vintage::seal(content_with(tampered.clone())).unwrap();
+        repo_t.write(&sealed).unwrap();
+        match repo_t.load("schema-test") {
+            Err(VintageError::SchemaMismatch { expected, found }) => {
+                assert_eq!(expected, CatalogueIdentity::current());
+                assert_eq!(found, tampered, "the boundary sees the exact tampered pool");
+                assert!(!found.formula_pool.is_empty());
+            }
+            other => panic!("tampered pool must be rejected with SchemaMismatch, got {other:?}"),
+        }
+
+        // The untampered default (empty pool) vintage loads CLEAN at the same boundary — non-vacuous.
+        let (_d2, repo_c) = repo("pool-clean");
+        let clean = Vintage::seal(content_with(CatalogueIdentity::current())).unwrap();
+        repo_c.write(&clean).unwrap();
+        assert!(
+            repo_c.load("schema-test").is_ok(),
+            "the untampered (empty-pool) vintage must load clean"
+        );
+    }
+
+    #[test]
     fn wrong_genome_rep_version_is_rejected_on_load() {
         let mut content = content_with(CatalogueIdentity::current());
         content.chromosomes[0].version = GENOME_REP_VERSION + 1;

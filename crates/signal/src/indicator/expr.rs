@@ -663,14 +663,21 @@ fn prune_deepest_descendant(root: &mut Expr) -> bool {
     prune(root, true)
 }
 
-/// Canonicalise (§8): constant-fold, order commutative operands, and collapse rank-monotone outer
-/// wrappers under a `Rank` root.
+/// Canonicalise (§8): constant-fold, order commutative operands, and collapse outer affine wrappers under
+/// a normalising root. **`Rank`** is invariant to every strictly-increasing transform and **`Zscore`** is
+/// invariant to positive-affine transforms (`zscore(a·x+b) = zscore(x)` for `a > 0`, since standardising
+/// removes the mean and the positive scale) — both collapse the same positive-affine outer layers
+/// ([`strip_monotone_incr`]), so `Rank(a·x+b)`→`Rank(x)` and `Zscore(a·x+b)`→`Zscore(x)`. Extending the
+/// strip to `Zscore` (QE-451 Phase 1b) removes an over-count of Zscore-affine equivalents from the
+/// distinct-canonical trial basis. **Purely additive** — it changes only the canonical form of trees whose
+/// normalising root wraps a strippable affine layer; every other tree's canonical form (and `formula_hash`)
+/// is unchanged.
 #[must_use]
 pub fn canonicalize(expr: &Expr) -> Expr {
     let folded = fold(expr);
     match &folded {
-        Expr::Window(WinOp::Rank, child, n) => {
-            Expr::Window(WinOp::Rank, Box::new(strip_monotone_incr(child)), *n)
+        Expr::Window(op @ (WinOp::Rank | WinOp::Zscore), child, n) => {
+            Expr::Window(*op, Box::new(strip_monotone_incr(child)), *n)
         }
         _ => folded,
     }
@@ -1392,6 +1399,54 @@ mod tests {
             50,
         ));
         assert_ne!(negd.canonical_hash(), bare.canonical_hash());
+    }
+
+    #[test]
+    fn zscore_root_collapses_positive_affine_wrappers() {
+        // QE-451 Phase 1b: Zscore is affine-invariant — `zscore(a·x + b) = zscore(x)` for `a > 0`, since
+        // standardising removes the mean and the positive scale. So positive-affine outer wrappers collapse
+        // under a `Zscore` root exactly as under `Rank`, removing an over-count of Zscore-affine
+        // equivalents from the distinct-canonical trial basis.
+        let bare = ExprTree::new(Expr::Window(
+            WinOp::Zscore,
+            boxed(window(WinOp::Mean, Field::Close, 20)),
+            50,
+        ));
+        // zscore(mean·#2 + #5) == zscore(mean): a nested positive-affine wrapper (×2 then +5).
+        let affine = ExprTree::new(Expr::Window(
+            WinOp::Zscore,
+            boxed(Expr::Binary(
+                BinOp::Add,
+                boxed(Expr::Binary(
+                    BinOp::Mul,
+                    boxed(window(WinOp::Mean, Field::Close, 20)),
+                    boxed(Expr::Const(dec(2))),
+                )),
+                boxed(Expr::Const(dec(5))),
+            )),
+            50,
+        ));
+        assert_eq!(affine.canonical_hash(), bare.canonical_hash());
+        assert_eq!(affine.canonical_sexpr(), bare.canonical_sexpr());
+
+        // `Neg` flips sign (`zscore(−x) = −zscore(x)`) → NOT collapsed → distinct hash.
+        let negd = ExprTree::new(Expr::Window(
+            WinOp::Zscore,
+            boxed(Expr::Unary(
+                UnOp::Neg,
+                boxed(window(WinOp::Mean, Field::Close, 20)),
+            )),
+            50,
+        ));
+        assert_ne!(negd.canonical_hash(), bare.canonical_hash());
+
+        // Additive, not over-collapsing: a genuinely different Zscore formula still hashes differently.
+        let different = ExprTree::new(Expr::Window(
+            WinOp::Zscore,
+            boxed(window(WinOp::Mean, Field::High, 20)),
+            50,
+        ));
+        assert_ne!(different.canonical_hash(), bare.canonical_hash());
     }
 
     #[test]

@@ -329,6 +329,72 @@ mod tests {
     }
 
     #[test]
+    fn a_dedup_rejected_offspring_still_counts_toward_the_trial_basis() {
+        // Isolate ONE reject (design §5 "rejects all count toward N"). `illuminate` runs
+        // `distinct.insert(hash)` + `total += 1` for EVERY offspring BEFORE the archive decides
+        // accept/reject, so a dedup-rejected offspring is still counted. Here two offspring share the same
+        // canonical form AND behavioural series: the first fills the cell, the second is DedupRejected —
+        // total = 2 (both counted), distinct = 1 (same canonical hash), and only one enters the archive.
+        let mut archive = ExprArchive::new();
+        let mut distinct: HashSet<String> = HashSet::new();
+        let mut total: u64 = 0;
+
+        let tree = ExprTree::repaired(Expr::Window(
+            WinOp::Rank,
+            boxed(Expr::Window(
+                WinOp::Mean,
+                boxed(Expr::Input(Field::Close)),
+                20,
+            )),
+            50,
+        ));
+        let series: Vec<Option<i64>> = (0..40).map(|i| Some((i % 5) as i64)).collect();
+
+        // Offer 1 — counted, then accepted into a fresh cell.
+        let hash1 = tree.canonical_hash();
+        distinct.insert(hash1.clone());
+        total += 1;
+        let out1 = archive.insert(ExprElite {
+            tree: tree.clone(),
+            fitness: 1.0,
+            hash: hash1,
+            series: series.clone(),
+        });
+        assert_eq!(out1, ExprInsert::NewCell);
+
+        // Offer 2 — counted BEFORE the archive rejects it as a behavioural duplicate in the same cell.
+        let hash2 = tree.canonical_hash();
+        distinct.insert(hash2.clone());
+        total += 1;
+        let out2 = archive.insert(ExprElite {
+            tree: tree.clone(),
+            fitness: 2.0,
+            hash: hash2,
+            series: series.clone(),
+        });
+
+        assert_eq!(
+            out2,
+            ExprInsert::DedupRejected,
+            "identical behavioural series in the same cell ⇒ dedup reject"
+        );
+        assert_eq!(
+            total, 2,
+            "the single dedup-rejected offspring still increments the total trial count"
+        );
+        assert_eq!(
+            distinct.len(),
+            1,
+            "identical canonical form ⇒ distinct stays 1 (both offers counted toward N)"
+        );
+        assert_eq!(
+            archive.total_elites(),
+            1,
+            "the rejected offspring did NOT enter the archive (it filters, it does not un-count)"
+        );
+    }
+
+    #[test]
     fn same_seed_reproduces_the_archive_byte_for_byte() {
         let samples = series(200);
         let a = illuminate(small_params(99), &samples, lineage());
