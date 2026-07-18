@@ -300,7 +300,6 @@ _All R1.c tickets delivered — see [`reviewed/`](mds/reviewed/)._
 
 | Ticket | Title | Depends on | Status |
 |--------|-------|------------|:------:|
-| [QE-446](./reviews/2026-07-16-maxdama-panel-review.md#qe-446) | Report strategy-level max/avg drawdown at the lifecycle graduation gate  *(panel #17, unanimous)* | QE-134, QE-114 | — |
 | [QE-447](./reviews/2026-07-16-maxdama-panel-review.md#qe-447) | Add a pre-trade %ADV participation guard  *(panel #18, unanimous)* | QE-215, QE-219 | — |
 | [QE-448](./reviews/2026-07-16-maxdama-panel-review.md#qe-448) | Correct the SPA label and document the biases deflation cannot see  *(panel #19, unanimous)* | QE-131 | — |
 | [QE-449](./reviews/2026-07-16-maxdama-panel-review.md#qe-449) | Guard the unused maker rate against future adverse-selection blindness  *(panel #20, unanimous)* | QE-109 | — |

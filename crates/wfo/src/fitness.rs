@@ -33,6 +33,38 @@ pub fn log_growth(returns: &[f64]) -> f64 {
     sum_log / returns.len() as f64
 }
 
+/// The worst **peak-to-trough** drawdown of the equity path implied by net per-period `returns`
+/// (QE-446), as a **non-negative magnitude in `[0, 1]`**: `0.0` = never below a prior peak, `0.30` =
+/// a 30 % decline from the running high, `1.0` = ruin (the equity path reached `≤ 0`). The drawdown
+/// analogue `log_growth` is blind to — `log_growth` only penalises *terminal* ruin, not intermediate
+/// depth at a fixed size.
+///
+/// Empty series ⇒ `0.0` (no path, no drawdown). Computed **locally** here (deliberately not importing
+/// the `qe-ensemble` `cdar` helper — no `qe-wfo → qe-ensemble` edge), mirroring its equity /
+/// running-peak construction: `equity` compounds from a unit start, `peak` tracks the running max, and
+/// the drawdown at each step is `1 − equity/peak`. Deterministic left-to-right fold.
+#[must_use]
+pub fn max_drawdown(returns: &[f64]) -> f64 {
+    if returns.is_empty() {
+        return 0.0;
+    }
+    let mut equity = 1.0_f64; // unit starting capital
+    let mut peak = 1.0_f64; // running high-water mark (≥ 1.0, so never ≤ 0)
+    let mut worst = 0.0_f64; // deepest drawdown magnitude seen so far
+    for &r in returns {
+        equity *= 1.0 + r;
+        if equity <= 0.0 {
+            return 1.0; // ruin: a total (100 %) loss of capital is the deepest possible drawdown
+        }
+        peak = peak.max(equity);
+        let dd = 1.0 - equity / peak; // ≥ 0 by construction (equity ≤ peak)
+        if dd > worst {
+            worst = dd;
+        }
+    }
+    worst
+}
+
 /// The per-period **compound return** equivalent to [`log_growth`] — `exp(log_growth) − 1` — a
 /// human-readable rate. Reports `−1.0` (−100%) on ruin and `0.0` on an empty series.
 #[must_use]
@@ -186,6 +218,24 @@ mod tests {
         // A flat series compounds to 0.
         approx(log_growth(&[0.0, 0.0, 0.0]), 0.0);
         approx(geom_return(&[0.0, 0.0]), 0.0);
+    }
+
+    #[test]
+    fn max_drawdown_is_peak_to_trough_magnitude() {
+        // Empty and monotone-up paths never draw down.
+        approx(max_drawdown(&[]), 0.0);
+        approx(max_drawdown(&[0.1, 0.1, 0.1]), 0.0);
+        // A single −20% step: equity 1 → 0.8, peak 1 ⇒ drawdown 0.20.
+        approx(max_drawdown(&[-0.2]), 0.2);
+        // Up then down then recover: peak 1.2 at bar 1, trough 0.6 at bar 2 ⇒ dd = 1 − 0.6/1.2 = 0.5.
+        // The later recovery does not shrink the *max* drawdown already recorded.
+        approx(max_drawdown(&[0.2, -0.5, 2.0]), 0.5);
+        // Peak resets: new high-water mark before a second decline; the deeper of the two wins.
+        // 1 → 1.5 (peak) → 1.2 (dd 0.20) → 3.0 (new peak) → 1.5 (dd 0.50). Max = 0.50.
+        approx(max_drawdown(&[0.5, -0.2, 1.5, -0.5]), 0.5);
+        // Ruin (≤ −100% at any point) is the deepest possible drawdown: 1.0.
+        approx(max_drawdown(&[0.1, -1.0, 0.2]), 1.0);
+        approx(max_drawdown(&[-1.5]), 1.0);
     }
 
     #[test]

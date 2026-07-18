@@ -18,12 +18,23 @@ use crate::genome::Genome;
 use crate::lifecycle::{QualityGate, QualityThreshold};
 
 /// A persisted strategy: the genome, its noise-robust fitness summary, and the lineage that produced it.
+///
+/// This record is a **non-hashed** vintage artefact (it is not part of the content-hashed
+/// [`VintageContent`](../../vintage) — it only round-trips through the JSONL form), so reporting fields
+/// added here never move a `content_hash` or golden.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StrategyRecord {
     /// The strategy genome (QE-110).
     pub genome: Genome,
     /// Noise-robust geometric fitness over evaluation windows (QE-113/120).
     pub fitness: NoiseRobustFitness,
+    /// Worst peak-to-trough drawdown of the strategy's realised equity path (QE-446), a non-negative
+    /// magnitude in `[0, 1]` (see [`max_drawdown`](crate::fitness::max_drawdown)). **Reporting only** —
+    /// `log_growth` fitness is blind to intermediate drawdown at a fixed size, so this surfaces it on
+    /// the per-strategy record. It rides the non-hashed record, so recording it moves no golden; the
+    /// behaviour-changing use of drawdown is the *optional* gate ceiling
+    /// ([`QualityGate::max_drawdown_ceiling`](crate::lifecycle::QualityGate)), OFF by default.
+    pub max_drawdown: f64,
     /// Provenance — resolvable to a vintage (QE-006).
     pub lineage: Lineage,
 }
@@ -81,20 +92,31 @@ impl StrategyRepository {
         self.records.is_empty()
     }
 
-    /// Record a candidate **iff** it is an exploitation-phase survivor above `threshold` (QE-114). Returns
+    /// Record a candidate **iff** it is an exploitation-phase survivor above `threshold` (QE-114) **and**
+    /// within the gate's optional drawdown ceiling (QE-446). `max_drawdown` is the candidate's realised
+    /// peak-to-trough drawdown magnitude ([`max_drawdown`](crate::fitness::max_drawdown)); it is stored
+    /// on the record for reporting and, when the gate configures a ceiling, gates admission. Returns
     /// `true` if persisted (tagged with `lineage`), `false` if the gate rejects it — early lucky
-    /// candidates and below-bar draws are not persisted.
+    /// candidates, below-bar draws, and (when a ceiling is set) deep-drawdown genomes are not persisted.
+    ///
+    /// The gate's drawdown ceiling defaults OFF, so with a default gate this admits **exactly** the same
+    /// candidates as before — the drawdown is pure reporting.
     pub fn try_record(
         &mut self,
         genome: Genome,
         fitness: NoiseRobustFitness,
+        max_drawdown: f64,
         threshold: &QualityThreshold,
         lineage: Lineage,
     ) -> bool {
-        if self.gate.persists(&fitness, threshold) {
+        if self
+            .gate
+            .persists_with_drawdown(&fitness, max_drawdown, threshold)
+        {
             self.records.push(StrategyRecord {
                 genome,
                 fitness,
+                max_drawdown,
                 lineage,
             });
             true
@@ -104,14 +126,15 @@ impl StrategyRepository {
     }
 
     /// Record every survivor of a cohort against `threshold`, in input order; returns how many persisted.
+    /// Each cohort item carries its realised `max_drawdown` (QE-446).
     pub fn record_survivors(
         &mut self,
-        candidates: impl IntoIterator<Item = (Genome, NoiseRobustFitness, Lineage)>,
+        candidates: impl IntoIterator<Item = (Genome, NoiseRobustFitness, f64, Lineage)>,
         threshold: &QualityThreshold,
     ) -> usize {
         let before = self.records.len();
-        for (genome, fitness, lineage) in candidates {
-            self.try_record(genome, fitness, threshold, lineage);
+        for (genome, fitness, max_drawdown, lineage) in candidates {
+            self.try_record(genome, fitness, max_drawdown, threshold, lineage);
         }
         self.records.len() - before
     }
@@ -229,29 +252,31 @@ mod tests {
         let g = long_genome(2);
 
         // Exploitation evaluation (n = 6 windows ≥ min_exploitation_windows = 5).
-        let robust = backtest(
+        let robust_bt = backtest(
             &g,
             &bars,
             &BacktestConfig {
                 windows: 6,
                 ..BacktestConfig::default()
             },
-        )
-        .fitness;
+        );
+        let robust = robust_bt.fitness;
+        let robust_dd = crate::fitness::max_drawdown(&robust_bt.returns);
         assert_eq!(robust.n, 6);
         assert!(robust.mean.is_finite());
 
         // "Early lucky": the SAME genome evaluated on a single window (Exploration, n = 1) — high mean,
         // no robustness. Must not persist regardless of how good that one draw looks.
-        let lucky = backtest(
+        let lucky_bt = backtest(
             &g,
             &bars,
             &BacktestConfig {
                 windows: 1,
                 ..BacktestConfig::default()
             },
-        )
-        .fitness;
+        );
+        let lucky = lucky_bt.fitness;
+        let lucky_dd = crate::fitness::max_drawdown(&lucky_bt.returns);
         assert_eq!(lucky.n, 1);
 
         // A bar below the robust candidate so it clears, derived from a cohort distribution.
@@ -264,11 +289,13 @@ mod tests {
         let threshold = repo.gate().threshold(&distribution);
 
         // The early lucky (Exploration) candidate is rejected …
-        assert!(!repo.try_record(g.clone(), lucky, &threshold, lineage(1)));
+        assert!(!repo.try_record(g.clone(), lucky, lucky_dd, &threshold, lineage(1)));
         assert!(repo.is_empty());
-        // … the exploitation survivor above the bar is recorded.
-        assert!(repo.try_record(g.clone(), robust, &threshold, lineage(2)));
+        // … the exploitation survivor above the bar is recorded, carrying its drawdown stat.
+        assert!(repo.try_record(g.clone(), robust, robust_dd, &threshold, lineage(2)));
         assert_eq!(repo.len(), 1);
+        // The reporting statistic rides the record (QE-446).
+        assert_eq!(repo.records()[0].max_drawdown, robust_dd);
 
         // A below-threshold exploitation candidate is also rejected.
         let below = NoiseRobustFitness {
@@ -276,7 +303,7 @@ mod tests {
             std_error: robust.std_error,
             n: 6,
         };
-        assert!(!repo.try_record(g, below, &threshold, lineage(3)));
+        assert!(!repo.try_record(g, below, robust_dd, &threshold, lineage(3)));
         assert_eq!(repo.len(), 1);
     }
 
@@ -290,7 +317,7 @@ mod tests {
         };
         let threshold = QualityThreshold::at(0.0);
         let lin = lineage(42);
-        assert!(repo.try_record(long_genome(3), fitness, &threshold, lin.clone()));
+        assert!(repo.try_record(long_genome(3), fitness, 0.1, &threshold, lin.clone()));
 
         let rec = &repo.records()[0];
         // The record carries the supplied lineage, and it resolves to a stable id.
@@ -308,7 +335,14 @@ mod tests {
                 std_error: 0.001,
                 n: 6,
             };
-            assert!(repo.try_record(long_genome(*hold), fitness, &threshold, lineage(i as u64)));
+            let dd = 0.05 + i as f64 * 0.02;
+            assert!(repo.try_record(
+                long_genome(*hold),
+                fitness,
+                dd,
+                &threshold,
+                lineage(i as u64)
+            ));
         }
 
         let mut buf: Vec<u8> = Vec::new();
@@ -335,6 +369,7 @@ mod tests {
                     std_error: 0.0,
                     n: 6,
                 },
+                0.10,
                 lineage(1),
             ),
             // exploration (n=1) → rejected
@@ -345,6 +380,7 @@ mod tests {
                     std_error: 0.0,
                     n: 1,
                 },
+                0.10,
                 lineage(2),
             ),
             // exploitation, below bar → rejected
@@ -355,6 +391,7 @@ mod tests {
                     std_error: 0.0,
                     n: 6,
                 },
+                0.10,
                 lineage(3),
             ),
             // exploitation, above bar → persists
@@ -365,6 +402,7 @@ mod tests {
                     std_error: 0.0,
                     n: 6,
                 },
+                0.10,
                 lineage(4),
             ),
         ];
@@ -374,5 +412,41 @@ mod tests {
         // Order preserved: the two survivors are holds 2 and 7.
         assert_eq!(repo.records()[0].genome.exit.max_holding_bars, 2);
         assert_eq!(repo.records()[1].genome.exit.max_holding_bars, 7);
+    }
+
+    #[test]
+    fn drawdown_ceiling_blocks_deep_drawdown_survivor_and_stat_rides_record() {
+        use crate::lifecycle::ThresholdPolicy;
+        // A gate that graduates on growth but enforces a 30% drawdown ceiling (QE-446 behaviour-on).
+        let gate = QualityGate::new(
+            ThresholdPolicy::Quantile(0.75),
+            5,
+            crate::fitness::DEFAULT_K_SIGMA,
+        )
+        .with_drawdown_ceiling(0.30);
+        let mut repo = StrategyRepository::new(gate);
+        let threshold = QualityThreshold::at(0.10);
+        let strong = NoiseRobustFitness {
+            mean: 0.20,
+            std_error: 0.0,
+            n: 6,
+        }; // clears the growth bar
+
+        // Deep-drawdown (45%) high-growth genome is BLOCKED by the ceiling …
+        assert!(!repo.try_record(long_genome(2), strong, 0.45, &threshold, lineage(1)));
+        assert!(repo.is_empty());
+        // … the SAME growth with a shallow (20%) drawdown graduates, and the stat rides the record.
+        assert!(repo.try_record(long_genome(3), strong, 0.20, &threshold, lineage(2)));
+        assert_eq!(repo.len(), 1);
+        assert_eq!(repo.records()[0].max_drawdown, 0.20);
+
+        // Default gate (ceiling OFF) admits the same deep-drawdown genome — the stat is pure reporting.
+        let mut repo_off = StrategyRepository::new(QualityGate::new(
+            ThresholdPolicy::Quantile(0.75),
+            5,
+            crate::fitness::DEFAULT_K_SIGMA,
+        ));
+        assert!(repo_off.try_record(long_genome(2), strong, 0.45, &threshold, lineage(3)));
+        assert_eq!(repo_off.records()[0].max_drawdown, 0.45);
     }
 }
