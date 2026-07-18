@@ -19,6 +19,7 @@
 //! `docs/architecture/qe-451-phase0-expr-seam-design.md`.
 
 use rust_decimal::Decimal;
+use sha2::{Digest, Sha256};
 
 use super::roll::Roll;
 use super::{Indicator, Kernel, Quantiser, Sample};
@@ -27,6 +28,77 @@ use super::{Indicator, Kernel, Quantiser, Sample};
 /// convention). Far below any real price/volume scale, so the reproduced catalogue subset never
 /// trips it.
 const DIV_EPSILON: Decimal = Decimal::from_parts(1, 0, 0, false, 9); // 1e-9
+
+/// Symmetric clip bound for the `Zscore` normalising root (QE-450 §4.2: clipped `[−4, 4]`).
+const ZSCORE_CLIP: Decimal = Decimal::from_parts(4, 0, 0, false, 0);
+
+// ---- QE-451 Phase 1a: fixed lattices, grid, and structural caps (§4.2 / §4.3) ----------------
+
+/// The fixed window-period lattice every window op snaps to in [`ExprTree::repair`] (§4.2). Snapping
+/// to this set also enforces "window ≥ 5" and makes `Delta(x, 1)` unreachable in the search grammar.
+pub const PERIOD_LATTICE: [Period; 5] = [5, 10, 20, 50, 100];
+
+/// The default period the normalising root wrapper uses when [`ExprTree::repair`] forces a root
+/// (`Rank` is the default root, §4.2). Must be a member of [`PERIOD_LATTICE`].
+pub const DEFAULT_RANK_PERIOD: Period = 50;
+
+/// Hard structural caps (§4.3 / QE-450 spectrum position). Enforced by [`ExprTree::repair`].
+pub const MAX_DEPTH: usize = 4;
+/// Maximum node count (inclusive).
+pub const MAX_NODES: usize = 16;
+/// Maximum total FIR lookback in bars (inclusive).
+pub const MAX_TOTAL_LOOKBACK: usize = 200;
+
+/// The fixed rational constant grid (§4.2). A finite grid keeps the reachable canonical set countable
+/// (`E[maxSR]` well-posed for Phase 1b's deflation). Ascending order (nearest-snap, ties → lower).
+pub const CONST_GRID: [Decimal; 15] = [
+    Decimal::from_parts(100, 0, 0, true, 0),  // -100
+    Decimal::from_parts(10, 0, 0, true, 0),   // -10
+    Decimal::from_parts(5, 0, 0, true, 0),    // -5
+    Decimal::from_parts(2, 0, 0, true, 0),    // -2
+    Decimal::from_parts(1, 0, 0, true, 0),    // -1
+    Decimal::from_parts(5, 0, 0, true, 1),    // -0.5
+    Decimal::from_parts(25, 0, 0, true, 2),   // -0.25
+    Decimal::from_parts(0, 0, 0, false, 0),   // 0
+    Decimal::from_parts(25, 0, 0, false, 2),  // 0.25
+    Decimal::from_parts(5, 0, 0, false, 1),   // 0.5
+    Decimal::from_parts(1, 0, 0, false, 0),   // 1
+    Decimal::from_parts(2, 0, 0, false, 0),   // 2
+    Decimal::from_parts(5, 0, 0, false, 0),   // 5
+    Decimal::from_parts(10, 0, 0, false, 0),  // 10
+    Decimal::from_parts(100, 0, 0, false, 0), // 100
+];
+
+/// Snap a period to the nearest member of [`PERIOD_LATTICE`] (ties → the lower period). Deterministic.
+#[must_use]
+pub fn snap_period(period: Period) -> Period {
+    let mut best = PERIOD_LATTICE[0];
+    let mut best_dist = period.abs_diff(best);
+    for &p in &PERIOD_LATTICE[1..] {
+        let d = period.abs_diff(p);
+        if d < best_dist {
+            best = p;
+            best_dist = d;
+        }
+    }
+    best
+}
+
+/// Snap a constant to the nearest member of [`CONST_GRID`] (ties → the lower, since the grid is scanned
+/// ascending and a strict `<` keeps the first). Deterministic, exact-`Decimal`.
+#[must_use]
+pub fn snap_const(value: Decimal) -> Decimal {
+    let mut best = CONST_GRID[0];
+    let mut best_dist = (value - best).abs();
+    for &g in &CONST_GRID[1..] {
+        let d = (value - g).abs();
+        if d < best_dist {
+            best = g;
+            best_dist = d;
+        }
+    }
+    best
+}
 
 /// A price/volume terminal read from the current bar. Leaf lookback = 1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,6 +156,22 @@ pub enum WinOp {
     Delta,
     /// The oldest window value (`k-ago`, capacity `k + 1`).
     Lag,
+    /// **Normalising root (QE-451 Phase 1a, §4.2).** Trailing rank of the current value in its window,
+    /// `count(v < current) / n ∈ [0, 1)`. Monotone-invariant, strictly-causal FIR.
+    Rank,
+    /// **Normalising root (QE-451 Phase 1a, §4.2).** Trailing population z-score of the current value,
+    /// `(current − mean) / std_pop`, clipped to `[−4, 4]` (`std == 0 ⇒ 0`). Strictly-causal FIR.
+    Zscore,
+}
+
+impl WinOp {
+    /// Whether this op is one of the strongly-typed **normalising roots** (§4.2) — the only ops allowed
+    /// at a tree's root so its output is bounded and feeds the point-wise [`Quantiser`] unchanged. `Rank`
+    /// is the default root.
+    #[must_use]
+    pub fn is_normalising(self) -> bool {
+        matches!(self, WinOp::Rank | WinOp::Zscore)
+    }
 }
 
 /// A window's [`Roll`] capacity, in bars. For `Mean/Max/Min/Std/MeanAbsDev` this is the window length
@@ -208,6 +296,24 @@ fn aggregate(op: WinOp, roll: &Roll) -> Option<Decimal> {
         WinOp::MeanAbsDev => roll.mean_abs_dev(),
         WinOp::Delta => Some(roll.last()? - roll.first()?),
         WinOp::Lag => roll.first(),
+        WinOp::Rank => {
+            // Trailing rank in [0, 1): fraction of window values strictly below the current (newest)
+            // value. `aggregate` is only called on a full window, so capacity == buffered length.
+            let current = roll.last()?;
+            let below = roll.iter().filter(|&v| v < current).count();
+            Some(Decimal::from(below) / Decimal::from(roll.cap()))
+        }
+        WinOp::Zscore => {
+            // Trailing population z-score of the current value, clipped to [-4, 4]; std == 0 ⇒ 0.
+            let current = roll.last()?;
+            let mean = roll.mean()?;
+            let std = roll.std_pop()?;
+            if std.is_zero() {
+                return Some(Decimal::ZERO);
+            }
+            let z = (current - mean) / std;
+            Some(z.clamp(-ZSCORE_CLIP, ZSCORE_CLIP))
+        }
     }
 }
 
@@ -311,6 +417,394 @@ pub fn compile(id: &str, expr: &Expr, quantiser: Quantiser) -> Box<dyn Indicator
 pub fn eval_stream(expr: &Expr, samples: &[Sample]) -> Vec<Option<Decimal>> {
     let mut root = compile_node(expr);
     samples.iter().map(|s| eval(&mut root, s)).collect()
+}
+
+// ---- QE-451 Phase 1a: ExprTree (structure + repair + canonicalisation) -----------------------
+
+/// Total node count of `expr` (every terminal and internal node counts 1).
+#[must_use]
+pub fn count_nodes(expr: &Expr) -> usize {
+    match expr {
+        Expr::Input(_) | Expr::Const(_) => 1,
+        Expr::Unary(_, c) => 1 + count_nodes(c),
+        Expr::Binary(_, a, b) => 1 + count_nodes(a) + count_nodes(b),
+        Expr::Window(_, c, _) => 1 + count_nodes(c),
+    }
+}
+
+/// Depth of `expr` — a terminal has depth 1; a node's depth is `1 + max(child depths)`.
+#[must_use]
+pub fn tree_depth(expr: &Expr) -> usize {
+    match expr {
+        Expr::Input(_) | Expr::Const(_) => 1,
+        Expr::Unary(_, c) => 1 + tree_depth(c),
+        Expr::Binary(_, a, b) => 1 + tree_depth(a).max(tree_depth(b)),
+        Expr::Window(_, c, _) => 1 + tree_depth(c),
+    }
+}
+
+/// Immutable pre-order (node, then children left→right) reference to the `index`-th node, or `None` if
+/// `index` is out of range. The traversal order is deterministic — the substrate for uniform node
+/// selection in the tree operators (§4.3).
+#[must_use]
+pub fn nth_node(expr: &Expr, index: usize) -> Option<&Expr> {
+    fn walk<'a>(e: &'a Expr, target: usize, cur: &mut usize) -> Option<&'a Expr> {
+        if *cur == target {
+            return Some(e);
+        }
+        *cur += 1;
+        match e {
+            Expr::Input(_) | Expr::Const(_) => None,
+            Expr::Unary(_, c) | Expr::Window(_, c, _) => walk(c, target, cur),
+            Expr::Binary(_, a, b) => walk(a, target, cur).or_else(|| walk(b, target, cur)),
+        }
+    }
+    let mut cur = 0;
+    walk(expr, index, &mut cur)
+}
+
+/// Mutable pre-order reference to the `index`-th node (see [`nth_node`]). Lets a tree operator replace a
+/// uniformly-chosen subtree in place.
+#[must_use]
+pub fn nth_node_mut(expr: &mut Expr, index: usize) -> Option<&mut Expr> {
+    fn walk<'a>(e: &'a mut Expr, target: usize, cur: &mut usize) -> Option<&'a mut Expr> {
+        if *cur == target {
+            return Some(e);
+        }
+        *cur += 1;
+        match e {
+            Expr::Input(_) | Expr::Const(_) => None,
+            Expr::Unary(_, c) | Expr::Window(_, c, _) => walk(c, target, cur),
+            Expr::Binary(_, a, b) => walk(a, target, cur).or_else(|| walk(b, target, cur)),
+        }
+    }
+    let mut cur = 0;
+    walk(expr, index, &mut cur)
+}
+
+/// A structure-owning FIR expression tree with a cached exact lookback — the genotype the offline GP
+/// pool evolves (QE-451 Phase 1a). Construct via [`ExprTree::repaired`] (or [`ExprTree::new`] +
+/// [`ExprTree::repair`]) so the invariants (normalising root, on-lattice periods, on-grid constants,
+/// caps, exact cached lookback) always hold.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExprTree {
+    root: Expr,
+    lookback: usize,
+}
+
+impl ExprTree {
+    /// Wrap `root` and cache its lookback **without** repairing. Prefer [`ExprTree::repaired`] unless you
+    /// deliberately want the raw tree (e.g. to test that `repair` fixes it).
+    #[must_use]
+    pub fn new(root: Expr) -> Self {
+        let lookback = max_lookback(&root);
+        ExprTree { root, lookback }
+    }
+
+    /// Wrap `root` and immediately [`repair`](ExprTree::repair) it onto the validity manifold.
+    #[must_use]
+    pub fn repaired(root: Expr) -> Self {
+        let mut t = ExprTree::new(root);
+        t.repair();
+        t
+    }
+
+    /// The tree's root expression.
+    #[must_use]
+    pub fn root(&self) -> &Expr {
+        &self.root
+    }
+
+    /// Consume the tree, returning its root expression.
+    #[must_use]
+    pub fn into_root(self) -> Expr {
+        self.root
+    }
+
+    /// The cached exact FIR lookback (bars). Recomputed by [`repair`](ExprTree::repair).
+    #[must_use]
+    pub fn lookback(&self) -> usize {
+        self.lookback
+    }
+
+    /// Total node count.
+    #[must_use]
+    pub fn node_count(&self) -> usize {
+        count_nodes(&self.root)
+    }
+
+    /// Tree depth.
+    #[must_use]
+    pub fn depth(&self) -> usize {
+        tree_depth(&self.root)
+    }
+
+    /// The window op at the root, if the root is a window node. After [`repair`](ExprTree::repair) this
+    /// is always a normalising root (`Rank`/`Zscore`).
+    #[must_use]
+    pub fn root_op(&self) -> Option<WinOp> {
+        match &self.root {
+            Expr::Window(op, _, _) => Some(*op),
+            _ => None,
+        }
+    }
+
+    /// **`ExprTree::repair` (§4.3)** — deterministic + idempotent. In order: force a normalising root;
+    /// snap every period to [`PERIOD_LATTICE`] and every constant to [`CONST_GRID`]; cap total lookback
+    /// ≤ [`MAX_TOTAL_LOOKBACK`]; cap depth ≤ [`MAX_DEPTH`] and nodes ≤ [`MAX_NODES`] (pruning the
+    /// deterministically-deepest descendant subtree, never the root wrapper); recompute + cache lookback.
+    pub fn repair(&mut self) {
+        // (1) Force a normalising root: wrap iff not already a normalising window node.
+        let already_normalising =
+            matches!(&self.root, Expr::Window(op, _, _) if op.is_normalising());
+        if !already_normalising {
+            let inner = std::mem::replace(&mut self.root, Expr::Const(Decimal::ZERO));
+            self.root = Expr::Window(WinOp::Rank, Box::new(inner), DEFAULT_RANK_PERIOD);
+        }
+        // (2) Snap periods to the lattice and constants to the grid throughout.
+        snap_in_place(&mut self.root);
+        // (3) Cap total lookback; (4) cap depth / nodes — both by pruning the deepest descendant.
+        while max_lookback(&self.root) > MAX_TOTAL_LOOKBACK
+            || tree_depth(&self.root) > MAX_DEPTH
+            || count_nodes(&self.root) > MAX_NODES
+        {
+            if !prune_deepest_descendant(&mut self.root) {
+                break; // root is irreducible (a bare normalising window over a terminal)
+            }
+        }
+        // (5) Recompute + cache lookback.
+        self.lookback = max_lookback(&self.root);
+    }
+
+    /// The canonical form (constant-folded, commutative operands ordered, rank-monotone outer wrappers
+    /// collapsed). Two trees that are equivalent under these rules share a canonical form (§8).
+    #[must_use]
+    pub fn canonical(&self) -> Expr {
+        canonicalize(&self.root)
+    }
+
+    /// A content hash of the [`canonical`](ExprTree::canonical) form — a SHA-256 over the canonical
+    /// S-expression text (constants rendered via exact `Decimal` `Display`, so **`rust_decimal`-only**,
+    /// no `f64` ever feeds the hash). The distinct count of these over all evaluated trees is the
+    /// distinct-canonical trial basis (§8).
+    #[must_use]
+    pub fn canonical_hash(&self) -> String {
+        let mut s = String::new();
+        write_sexpr(&self.canonical(), &mut s);
+        let digest = Sha256::digest(s.as_bytes());
+        digest.iter().map(|b| format!("{b:02x}")).collect()
+    }
+}
+
+/// Snap all periods to [`PERIOD_LATTICE`] and constants to [`CONST_GRID`], in place.
+fn snap_in_place(expr: &mut Expr) {
+    match expr {
+        Expr::Input(_) => {}
+        Expr::Const(c) => *c = snap_const(*c),
+        Expr::Unary(_, child) => snap_in_place(child),
+        Expr::Binary(_, a, b) => {
+            snap_in_place(a);
+            snap_in_place(b);
+        }
+        Expr::Window(_, child, period) => {
+            *period = snap_period(*period);
+            snap_in_place(child);
+        }
+    }
+}
+
+/// Whether `expr` is a terminal (leaf) node.
+fn is_terminal(expr: &Expr) -> bool {
+    matches!(expr, Expr::Input(_) | Expr::Const(_))
+}
+
+/// Collapse the leftmost bottom-most *internal, non-root* node (one whose children are all terminals)
+/// to a terminal. Returns `false` only when the root is a window directly over a terminal (nothing
+/// below to prune). Each successful call strictly reduces the node count, so the `repair` loop halts;
+/// because node count bounds depth, the depth/lookback caps are also reached.
+fn prune_deepest_descendant(root: &mut Expr) -> bool {
+    fn prune(e: &mut Expr, is_root: bool) -> bool {
+        // Recurse deepest-first so a bottom internal node is collapsed before its ancestors.
+        match e {
+            Expr::Input(_) | Expr::Const(_) => return false,
+            Expr::Unary(_, c) | Expr::Window(_, c, _) => {
+                if prune(c, false) {
+                    return true;
+                }
+            }
+            Expr::Binary(_, a, b) => {
+                if prune(a, false) || prune(b, false) {
+                    return true;
+                }
+            }
+        }
+        if is_root {
+            return false; // never collapse the (normalising) root itself
+        }
+        let children_all_terminal = match e {
+            Expr::Unary(_, c) | Expr::Window(_, c, _) => is_terminal(c),
+            Expr::Binary(_, a, b) => is_terminal(a) && is_terminal(b),
+            _ => false,
+        };
+        if children_all_terminal {
+            *e = Expr::Input(Field::Close);
+            return true;
+        }
+        false
+    }
+    prune(root, true)
+}
+
+/// Canonicalise (§8): constant-fold, order commutative operands, and collapse rank-monotone outer
+/// wrappers under a `Rank` root.
+#[must_use]
+pub fn canonicalize(expr: &Expr) -> Expr {
+    let folded = fold(expr);
+    match &folded {
+        Expr::Window(WinOp::Rank, child, n) => {
+            Expr::Window(WinOp::Rank, Box::new(strip_monotone_incr(child)), *n)
+        }
+        _ => folded,
+    }
+}
+
+/// Constant-fold + commutative-order-normalise, bottom-up.
+fn fold(expr: &Expr) -> Expr {
+    match expr {
+        Expr::Input(_) | Expr::Const(_) => expr.clone(),
+        Expr::Unary(op, child) => {
+            let c = fold(child);
+            if let Expr::Const(v) = c {
+                Expr::Const(apply_unary(*op, v))
+            } else {
+                Expr::Unary(*op, Box::new(c))
+            }
+        }
+        Expr::Binary(op, a, b) => {
+            let mut fa = fold(a);
+            let mut fb = fold(b);
+            if let (Expr::Const(x), Expr::Const(y)) = (&fa, &fb) {
+                return Expr::Const(apply_binary(*op, *x, *y));
+            }
+            // Order commutative operands by a canonical key so `add(a,b)` and `add(b,a)` coincide.
+            if matches!(op, BinOp::Add | BinOp::Mul) && canon_key(&fb) < canon_key(&fa) {
+                std::mem::swap(&mut fa, &mut fb);
+            }
+            Expr::Binary(*op, Box::new(fa), Box::new(fb))
+        }
+        Expr::Window(op, child, n) => Expr::Window(*op, Box::new(fold(child)), *n),
+    }
+}
+
+/// Strip strictly-monotone-**increasing** affine outer wrappers (rank-preserving under a `Rank` root):
+/// `add(_, c)`, `sub(_, c)`, `mul(_, c>0)`, `div(_, c>0)`. Stops at the first non-collapsible layer.
+/// `Neg`/`Abs`/`Sign` are not monotone-increasing and are never stripped.
+fn strip_monotone_incr(expr: &Expr) -> Expr {
+    let mut cur = expr.clone();
+    loop {
+        cur = match cur {
+            Expr::Binary(BinOp::Add, a, b) => match (&*a, &*b) {
+                (Expr::Const(_), _) => (*b).clone(),
+                (_, Expr::Const(_)) => (*a).clone(),
+                _ => return Expr::Binary(BinOp::Add, a, b),
+            },
+            // `x - c` is increasing in x; `c - x` is decreasing → only strip a constant subtrahend.
+            Expr::Binary(BinOp::Sub, a, b) if matches!(&*b, Expr::Const(_)) => (*a).clone(),
+            Expr::Binary(BinOp::Mul, a, b) => match (&*a, &*b) {
+                (Expr::Const(c), _) if c.is_sign_positive() && !c.is_zero() => (*b).clone(),
+                (_, Expr::Const(c)) if c.is_sign_positive() && !c.is_zero() => (*a).clone(),
+                _ => return Expr::Binary(BinOp::Mul, a, b),
+            },
+            // `x / c` is increasing for c > 0.
+            Expr::Binary(BinOp::Div, a, b) if matches!(&*b, Expr::Const(c) if c.is_sign_positive() && !c.is_zero()) => {
+                (*a).clone()
+            }
+            other => return other,
+        };
+    }
+}
+
+/// A total canonical ordering key over expressions (for commutative-operand ordering).
+fn canon_key(expr: &Expr) -> String {
+    let mut s = String::new();
+    write_sexpr(expr, &mut s);
+    s
+}
+
+/// Write a canonical S-expression for `expr`. Constants render via exact `Decimal` `Display` (no `f64`).
+fn write_sexpr(expr: &Expr, out: &mut String) {
+    use std::fmt::Write as _;
+    match expr {
+        Expr::Input(f) => out.push_str(field_tag(*f)),
+        Expr::Const(c) => {
+            out.push('#');
+            let _ = write!(out, "{c}");
+        }
+        Expr::Unary(op, child) => {
+            out.push('(');
+            out.push_str(unop_tag(*op));
+            out.push(' ');
+            write_sexpr(child, out);
+            out.push(')');
+        }
+        Expr::Binary(op, a, b) => {
+            out.push('(');
+            out.push_str(binop_tag(*op));
+            out.push(' ');
+            write_sexpr(a, out);
+            out.push(' ');
+            write_sexpr(b, out);
+            out.push(')');
+        }
+        Expr::Window(op, child, n) => {
+            out.push('(');
+            out.push_str(winop_tag(*op));
+            let _ = write!(out, " {n} ");
+            write_sexpr(child, out);
+            out.push(')');
+        }
+    }
+}
+
+fn field_tag(f: Field) -> &'static str {
+    match f {
+        Field::Close => "close",
+        Field::High => "high",
+        Field::Low => "low",
+        Field::Volume => "volume",
+        Field::Typical => "typical",
+    }
+}
+
+fn unop_tag(op: UnOp) -> &'static str {
+    match op {
+        UnOp::Abs => "abs",
+        UnOp::Sign => "sign",
+        UnOp::Neg => "neg",
+    }
+}
+
+fn binop_tag(op: BinOp) -> &'static str {
+    match op {
+        BinOp::Add => "add",
+        BinOp::Sub => "sub",
+        BinOp::Mul => "mul",
+        BinOp::Div => "div",
+    }
+}
+
+fn winop_tag(op: WinOp) -> &'static str {
+    match op {
+        WinOp::Mean => "mean",
+        WinOp::Max => "max",
+        WinOp::Min => "min",
+        WinOp::Std => "std",
+        WinOp::MeanAbsDev => "mad",
+        WinOp::Delta => "delta",
+        WinOp::Lag => "lag",
+        WinOp::Rank => "rank",
+        WinOp::Zscore => "zscore",
+    }
 }
 
 // ---- seeded catalogue-equivalent formulas (default-off) --------------------------------------
@@ -645,5 +1139,302 @@ mod tests {
             crate::feature::FeatureSchema::from_catalogue(&cfg).len(),
             22
         );
+    }
+
+    // ---- QE-451 Phase 1a: grammar (normalising roots) --------------------------------------------
+
+    #[test]
+    fn rank_root_is_bounded_zero_to_one_and_fir() {
+        // Strictly increasing series → the newest value is the largest → rank = (n-1)/n each full bar.
+        let samples: Vec<Sample> = (0..30)
+            .map(|i| {
+                let p = 100 + i as i64;
+                Sample::from_bar(
+                    Bar::new(
+                        Timestamp::from_millis(i as i64 * 5 * MIN),
+                        Resolution::M5,
+                        Price::new(dec(p)).unwrap(),
+                        Price::new(dec(p + 1)).unwrap(),
+                        Price::new(dec(p - 1)).unwrap(),
+                        Price::new(dec(p)).unwrap(),
+                        Qty::new(dec(10)).unwrap(),
+                        1,
+                    )
+                    .unwrap(),
+                )
+            })
+            .collect();
+        let tree = Expr::Window(WinOp::Rank, boxed(Expr::Input(Field::Close)), 10);
+        assert_eq!(max_lookback(&tree), 10);
+        let out = eval_stream(&tree, &samples);
+        // Warm only from bar index 9 onward.
+        assert!(out[..9].iter().all(Option::is_none));
+        for v in out[9..].iter().flatten() {
+            assert!(
+                *v >= Decimal::ZERO && *v < Decimal::ONE,
+                "rank out of [0,1): {v}"
+            );
+            assert_eq!(*v, Decimal::from(9) / Decimal::from(10)); // strictly-increasing ⇒ 9/10
+        }
+    }
+
+    #[test]
+    fn zscore_root_is_clipped_and_zero_on_flat_window() {
+        // A flat window → std = 0 → z-score defined as 0.
+        let flat: Vec<Sample> = (0..12)
+            .map(|i| {
+                Sample::from_bar(
+                    Bar::new(
+                        Timestamp::from_millis(i as i64 * 5 * MIN),
+                        Resolution::M5,
+                        Price::new(dec(100)).unwrap(),
+                        Price::new(dec(100)).unwrap(),
+                        Price::new(dec(100)).unwrap(),
+                        Price::new(dec(100)).unwrap(),
+                        Qty::new(dec(10)).unwrap(),
+                        1,
+                    )
+                    .unwrap(),
+                )
+            })
+            .collect();
+        let tree = Expr::Window(WinOp::Zscore, boxed(Expr::Input(Field::Close)), 5);
+        let out = eval_stream(&tree, &flat);
+        assert_eq!(out.last().unwrap().unwrap(), Decimal::ZERO);
+        assert!(WinOp::Zscore.is_normalising() && WinOp::Rank.is_normalising());
+        assert!(!WinOp::Mean.is_normalising());
+    }
+
+    // ---- QE-451 Phase 1a: ExprTree::repair -------------------------------------------------------
+
+    fn deep_binary_chain(depth: usize) -> Expr {
+        // A left-leaning add chain of `depth` internal nodes over Close — depth/nodes over cap.
+        let mut e = Expr::Input(Field::Close);
+        for _ in 0..depth {
+            e = Expr::Binary(BinOp::Add, boxed(e), boxed(Expr::Input(Field::High)));
+        }
+        e
+    }
+
+    #[test]
+    fn repair_forces_a_normalising_root() {
+        // A non-window root is wrapped in Rank.
+        let t = ExprTree::repaired(Expr::Input(Field::Close));
+        assert_eq!(t.root_op(), Some(WinOp::Rank));
+        // A non-normalising window root (Mean) is also wrapped.
+        let t2 = ExprTree::repaired(window(WinOp::Mean, Field::Close, 20));
+        assert!(matches!(t2.root_op(), Some(op) if op.is_normalising()));
+        // An already-normalising root is preserved (no double wrap).
+        let z = Expr::Window(WinOp::Zscore, boxed(Expr::Input(Field::Close)), 10);
+        let t3 = ExprTree::repaired(z);
+        assert_eq!(t3.root_op(), Some(WinOp::Zscore));
+        assert_eq!(t3.node_count(), 2);
+    }
+
+    #[test]
+    fn repair_snaps_periods_and_constants() {
+        // Period 7 → 5, constant 0.4 → 0.5; verified through the repaired canonical text.
+        let raw = Expr::Window(
+            WinOp::Zscore,
+            boxed(Expr::Binary(
+                BinOp::Add,
+                boxed(Expr::Input(Field::Close)),
+                boxed(Expr::Const(Decimal::new(4, 1))), // 0.4
+            )),
+            7,
+        );
+        let t = ExprTree::repaired(raw);
+        // Root period snapped to a lattice member.
+        assert!(PERIOD_LATTICE.contains(&match t.root() {
+            Expr::Window(_, _, n) => *n,
+            _ => unreachable!(),
+        }));
+        // Every constant in the tree is on the grid.
+        fn all_consts_on_grid(e: &Expr) -> bool {
+            match e {
+                Expr::Const(c) => CONST_GRID.contains(c),
+                Expr::Input(_) => true,
+                Expr::Unary(_, c) | Expr::Window(_, c, _) => all_consts_on_grid(c),
+                Expr::Binary(_, a, b) => all_consts_on_grid(a) && all_consts_on_grid(b),
+            }
+        }
+        assert!(all_consts_on_grid(t.root()));
+        assert_eq!(snap_period(7), 5);
+        assert_eq!(snap_period(35), 20); // 35↔20 = 15, 35↔50 = 15 → tie broken to the lower (20)
+        assert_eq!(snap_period(80), 100); // 80↔50 = 30, 80↔100 = 20 → 100
+        assert_eq!(snap_const(Decimal::new(4, 1)), Decimal::new(5, 1));
+    }
+
+    #[test]
+    fn repair_enforces_all_caps() {
+        // A pathologically deep/wide tree is pruned within every cap.
+        let raw = Expr::Window(WinOp::Mean, boxed(deep_binary_chain(30)), 200);
+        let t = ExprTree::repaired(raw);
+        assert!(t.depth() <= MAX_DEPTH, "depth {}", t.depth());
+        assert!(t.node_count() <= MAX_NODES, "nodes {}", t.node_count());
+        assert!(
+            t.lookback() <= MAX_TOTAL_LOOKBACK,
+            "lookback {}",
+            t.lookback()
+        );
+        assert!(t.root_op().map(WinOp::is_normalising).unwrap_or(false));
+        // Cached lookback equals the exact recomputation.
+        assert_eq!(t.lookback(), max_lookback(t.root()));
+    }
+
+    #[test]
+    fn repair_is_idempotent() {
+        // Over a spread of raw trees, repair∘repair == repair.
+        let raws = vec![
+            Expr::Input(Field::Close),
+            window(WinOp::Mean, Field::Close, 7),
+            Expr::Window(WinOp::Mean, boxed(deep_binary_chain(30)), 123),
+            Expr::Binary(
+                BinOp::Div,
+                boxed(Expr::Input(Field::Close)),
+                boxed(window(WinOp::Std, Field::Close, 33)),
+            ),
+            Expr::Window(WinOp::Zscore, boxed(Expr::Const(Decimal::new(37, 2))), 88),
+        ];
+        for raw in raws {
+            let once = ExprTree::repaired(raw);
+            let mut twice = once.clone();
+            twice.repair();
+            assert_eq!(once, twice, "repair not idempotent");
+            // Post-conditions hold on the once-repaired tree.
+            assert!(once.depth() <= MAX_DEPTH);
+            assert!(once.node_count() <= MAX_NODES);
+            assert!(once.lookback() <= MAX_TOTAL_LOOKBACK);
+            assert!(once.root_op().map(WinOp::is_normalising).unwrap_or(false));
+        }
+    }
+
+    #[test]
+    fn protected_div_zero() {
+        // The grammar's only division is protected: |denom| < ε ⇒ 0 (interpreter invariant).
+        assert_eq!(
+            apply_binary(BinOp::Div, dec(5), Decimal::ZERO),
+            Decimal::ZERO
+        );
+        assert_eq!(apply_binary(BinOp::Div, dec(6), dec(3)), dec(2));
+    }
+
+    // ---- QE-451 Phase 1a: canonicalisation + content hash ----------------------------------------
+
+    #[test]
+    fn canonical_collapses_equivalent_trees() {
+        // (a) commutative order: add(close,high) == add(high,close).
+        let a = ExprTree::new(Expr::Window(
+            WinOp::Rank,
+            boxed(Expr::Binary(
+                BinOp::Add,
+                boxed(Expr::Input(Field::Close)),
+                boxed(Expr::Input(Field::High)),
+            )),
+            50,
+        ));
+        let b = ExprTree::new(Expr::Window(
+            WinOp::Rank,
+            boxed(Expr::Binary(
+                BinOp::Add,
+                boxed(Expr::Input(Field::High)),
+                boxed(Expr::Input(Field::Close)),
+            )),
+            50,
+        ));
+        assert_eq!(a.canonical_hash(), b.canonical_hash());
+
+        // (b) constant folding: mul(#2,#5) folds to #10.
+        let folded = ExprTree::new(Expr::Window(
+            WinOp::Rank,
+            boxed(Expr::Binary(
+                BinOp::Mul,
+                boxed(Expr::Const(dec(2))),
+                boxed(Expr::Const(dec(5))),
+            )),
+            50,
+        ));
+        let direct = ExprTree::new(Expr::Window(WinOp::Rank, boxed(Expr::Const(dec(10))), 50));
+        assert_eq!(folded.canonical_hash(), direct.canonical_hash());
+
+        // (c) rank-monotone wrapper collapse: rank(mul(x, #2)) == rank(x) (positive scale, increasing).
+        let wrapped = ExprTree::new(Expr::Window(
+            WinOp::Rank,
+            boxed(Expr::Binary(
+                BinOp::Mul,
+                boxed(window(WinOp::Mean, Field::Close, 20)),
+                boxed(Expr::Const(dec(2))),
+            )),
+            50,
+        ));
+        let bare = ExprTree::new(Expr::Window(
+            WinOp::Rank,
+            boxed(window(WinOp::Mean, Field::Close, 20)),
+            50,
+        ));
+        assert_eq!(wrapped.canonical_hash(), bare.canonical_hash());
+
+        // Neg is monotone-DEcreasing → NOT collapsed → distinct hash.
+        let negd = ExprTree::new(Expr::Window(
+            WinOp::Rank,
+            boxed(Expr::Unary(
+                UnOp::Neg,
+                boxed(window(WinOp::Mean, Field::Close, 20)),
+            )),
+            50,
+        ));
+        assert_ne!(negd.canonical_hash(), bare.canonical_hash());
+    }
+
+    #[test]
+    fn distinct_canonical_count_over_a_set() {
+        use std::collections::HashSet;
+        // Three trees, two of which are canonically equivalent (commutative order) → 2 distinct.
+        let trees = [
+            ExprTree::new(Expr::Window(
+                WinOp::Rank,
+                boxed(Expr::Binary(
+                    BinOp::Add,
+                    boxed(Expr::Input(Field::Close)),
+                    boxed(Expr::Input(Field::High)),
+                )),
+                50,
+            )),
+            ExprTree::new(Expr::Window(
+                WinOp::Rank,
+                boxed(Expr::Binary(
+                    BinOp::Add,
+                    boxed(Expr::Input(Field::High)),
+                    boxed(Expr::Input(Field::Close)),
+                )),
+                50,
+            )),
+            ExprTree::new(Expr::Window(
+                WinOp::Zscore,
+                boxed(Expr::Input(Field::Low)),
+                10,
+            )),
+        ];
+        let distinct: HashSet<String> = trees.iter().map(ExprTree::canonical_hash).collect();
+        assert_eq!(distinct.len(), 2);
+    }
+
+    #[test]
+    fn nth_node_traverses_preorder() {
+        // (add close high): pre-order = [add, close, high].
+        let e = Expr::Binary(
+            BinOp::Add,
+            boxed(Expr::Input(Field::Close)),
+            boxed(Expr::Input(Field::High)),
+        );
+        assert_eq!(count_nodes(&e), 3);
+        assert!(matches!(nth_node(&e, 0), Some(Expr::Binary(..))));
+        assert!(matches!(nth_node(&e, 1), Some(Expr::Input(Field::Close))));
+        assert!(matches!(nth_node(&e, 2), Some(Expr::Input(Field::High))));
+        assert!(nth_node(&e, 3).is_none());
+        // Mutable replace of node 1.
+        let mut m = e.clone();
+        *nth_node_mut(&mut m, 1).unwrap() = Expr::Input(Field::Low);
+        assert!(matches!(nth_node(&m, 1), Some(Expr::Input(Field::Low))));
     }
 }

@@ -220,6 +220,29 @@ fn aggregate(op: WinOp, vals: &[Decimal]) -> Option<Decimal> {
         }
         WinOp::Delta => Some(*vals.last()? - *vals.first()?),
         WinOp::Lag => vals.first().copied(),
+        WinOp::Rank => {
+            // Fraction of window values strictly below the current (newest) value, in [0, 1).
+            let current = *vals.last()?;
+            let below = vals.iter().filter(|&&v| v < current).count();
+            Some(Decimal::from(below) / n)
+        }
+        WinOp::Zscore => {
+            // (current − mean) / std_pop, clipped to [−4, 4]; std == 0 ⇒ 0.
+            let current = *vals.last()?;
+            let mean = vals.iter().copied().sum::<Decimal>() / n;
+            let var = vals
+                .iter()
+                .map(|&v| (v - mean) * (v - mean))
+                .sum::<Decimal>()
+                / n;
+            let std = var.sqrt()?;
+            if std.is_zero() {
+                Some(Decimal::ZERO)
+            } else {
+                let clip = Decimal::from(4);
+                Some(((current - mean) / std).clamp(-clip, clip))
+            }
+        }
     }
 }
 

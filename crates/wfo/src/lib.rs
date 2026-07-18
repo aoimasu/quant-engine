@@ -47,6 +47,13 @@ pub mod kelly;
 // re-exported here as `qe_wfo::genome` so the search side's `crate::genome::*` and public API are
 // unchanged.
 pub use qe_signal::genome;
+/// QE-451 **Phase 1a** — offline GP `Expr`-tree MAP-Elites pool illumination (default-off, opt-in). The
+/// grammar/normalising-roots/`ExprTree::repair` live in `qe-signal`; this module holds the search:
+/// structural descriptors, the separate `Elite<ExprTree>` archive with behavioural dedup, tree-aware
+/// operators on `DetRng`, illumination under a trivial threshold-cross head, and the distinct-canonical
+/// trial count emitted into a dedicated pool-lineage record. See
+/// `docs/architecture/qe-451-phase1a-gp-pool-design.md`.
+pub mod gp;
 pub mod lifecycle;
 pub mod mapelites;
 pub mod operator;
