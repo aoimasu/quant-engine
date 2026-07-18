@@ -70,7 +70,7 @@ describe('CampaignMonitor', () => {
   });
 
   it('POSTs /halt when the operator halts a running campaign', async () => {
-    const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
+    const fetchMock = vi.fn<typeof fetch>(async (input: RequestInfo | URL) => {
       const url = typeof input === 'string' ? input : input.toString();
       if (url.endsWith('/api/runs/evolve-1/halt')) return json({ id: 'evolve-1', status: 'failed', halted: true });
       if (url.endsWith('/api/runs/evolve-1/archive')) return json(ARCHIVE);
