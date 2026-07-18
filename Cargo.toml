@@ -101,6 +101,10 @@ qe-runtime-core = { path = "crates/runtime-core" }
 qe-hedger = { path = "crates/hedger" }
 qe-edge = { path = "crates/edge" }
 qe-vintage = { path = "crates/vintage" }
+# QE-452 Phase A: the frozen formula-pool artefact (the `evolve` job's output). A pure serde leaf —
+# distinct from `qe-vintage` (different content shape + lifecycle; runtime never loads a pool) — reusing
+# the vintage seal/verify/load SHA-256 discipline.
+qe-formula-pool = { path = "crates/formula-pool" }
 qe-validation = { path = "crates/validation" }
 qe-report = { path = "crates/report" }
 qe-gate = { path = "crates/gate" }

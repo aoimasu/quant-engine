@@ -1630,6 +1630,7 @@ dependencies = [
  "qe-determinism",
  "qe-domain",
  "qe-ensemble",
+ "qe-formula-pool",
  "qe-gate",
  "qe-ingest",
  "qe-risk",
@@ -1733,6 +1734,18 @@ dependencies = [
 name = "qe-error"
 version = "0.1.0"
 dependencies = [
+ "thiserror",
+]
+
+[[package]]
+name = "qe-formula-pool"
+version = "0.1.0"
+dependencies = [
+ "rust_decimal",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
  "thiserror",
 ]
 

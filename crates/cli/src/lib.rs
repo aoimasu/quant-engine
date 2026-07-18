@@ -18,9 +18,12 @@ use qe_determinism::Lineage;
 use rust_decimal::Decimal;
 use thiserror::Error;
 
+use jobs::evolve::{run_evolve_job, EvolveParams as EvolveJobParams};
+pub use jobs::evolve::{EvolveOutcome, EvolveResultDoc};
 use jobs::train::{run_train_job, TrainParams};
 pub use jobs::train::{TrainOutcome, TrainResultDoc};
 use jobs::{ProgressLine, RunError};
+use qe_run_protocol::EvolveMode;
 
 /// Errors from a CLI run.
 #[derive(Debug, Error)]
@@ -146,6 +149,96 @@ pub fn run_train(
     Ok(run_train_job(&params, emit)?)
 }
 
+/// The tunable inputs to an evolve campaign, parsed from the `evolve` command flags (QE-452).
+#[derive(Debug, Clone, PartialEq)]
+pub struct EvolveOptions {
+    /// Campaign mode (sandbox / production).
+    pub mode: EvolveMode,
+    /// Inclusive window start (`YYYY-MM-DD`).
+    pub start: String,
+    /// Exclusive window end (`YYYY-MM-DD`).
+    pub end: String,
+    /// Bar resolution (`1h`, …).
+    pub resolution: String,
+    /// Master illumination seed (**required** — no config fallback, unlike `train`).
+    pub seed: u64,
+    /// Illumination generations.
+    pub generations: usize,
+    /// Offspring evaluated per generation.
+    pub offspring: usize,
+    /// Quantiser state count for the trivial decision head.
+    pub states: u16,
+    /// Frozen-pool size `K`.
+    pub k: usize,
+}
+
+/// Run the offline GP evolve pipeline for `cfg`, sealing a **formula pool** under a mode-specific pool
+/// root (a directory **separate** from the vintage root) and streaming [`ProgressLine`]s through `emit`.
+/// `code_commit` is folded into the campaign lineage / pool id (passed in for determinism).
+///
+/// Mirrors [`run_train`]'s config/universe/lineage/dir responsibilities, then delegates the real
+/// illuminate → deflation → freeze → seal pipeline to [`jobs::evolve::run_evolve_job`]. **Produces a pool,
+/// never a vintage** (§13.3).
+///
+/// # Errors
+/// [`CliError`] on config/universe validation, an empty instrument list, directory creation, or an
+/// evolve-job runtime failure ([`RunError`]).
+pub fn run_evolve(
+    cfg: &Config,
+    opts: &EvolveOptions,
+    code_commit: &str,
+    emit: &mut dyn FnMut(ProgressLine),
+) -> Result<EvolveOutcome, CliError> {
+    let _universe = cfg.universe()?;
+    let instrument = cfg
+        .instruments
+        .first()
+        .cloned()
+        .ok_or(CliError::EmptyUniverse)?;
+
+    for dir in [
+        &cfg.storage.market_dir,
+        &cfg.storage.synthetic_dir,
+        &cfg.storage.artifacts_dir,
+    ] {
+        create_dir(dir)?;
+    }
+
+    // The evolve seed is REQUIRED (design §13.10) — the lineage / pool id is deterministic for it.
+    let lineage = Lineage::from_config(cfg, "", code_commit, vec![opts.seed])?;
+
+    let params = EvolveJobParams {
+        store_path: PathBuf::from(&cfg.storage.market_dir),
+        map_size: qe_storage::DEFAULT_MAP_SIZE,
+        pool_root: pool_root_for(&cfg.storage.artifacts_dir, opts.mode),
+        instrument,
+        start: opts.start.clone(),
+        end: opts.end.clone(),
+        resolution: opts.resolution.clone(),
+        mode: opts.mode,
+        seed: opts.seed,
+        generations: opts.generations,
+        offspring: opts.offspring,
+        states: opts.states,
+        k: opts.k,
+        lineage,
+        profile: cfg.profile.as_str().to_owned(),
+    };
+
+    Ok(run_evolve_job(&params, emit)?)
+}
+
+/// The mode-specific formula-pool root under `artifacts_dir` — a directory **separate from the vintage
+/// root** (`<artifacts>/vintages`), and, for sandbox, a **separate research root** the production load
+/// path never lists (§13.6): sandbox → `<artifacts>/research/pools`, production → `<artifacts>/pools`.
+fn pool_root_for(artifacts_dir: &str, mode: EvolveMode) -> PathBuf {
+    let base = PathBuf::from(artifacts_dir);
+    match mode {
+        EvolveMode::Sandbox => base.join("research").join("pools"),
+        EvolveMode::Production => base.join("pools"),
+    }
+}
+
 fn create_dir(path: impl AsRef<Path>) -> Result<(), CliError> {
     let path = path.as_ref();
     std::fs::create_dir_all(path).map_err(|source| CliError::Io {
@@ -188,6 +281,36 @@ pub enum Command {
         holdout: usize,
         /// Embargo bars purged between the train window and the holdout.
         embargo: usize,
+    },
+    /// Run the offline GP evolve pipeline (QE-452): illuminate → deflation → freeze → **seal a formula
+    /// pool** (never a vintage).
+    Evolve {
+        /// Config file path.
+        config: PathBuf,
+        /// Operating profile.
+        profile: qe_config::Profile,
+        /// Run directory the job writes `result.json` into.
+        run_dir: PathBuf,
+        /// Emit JSON-line progress on stdout.
+        json: bool,
+        /// Campaign mode (sandbox / production).
+        mode: EvolveMode,
+        /// Inclusive window start (`YYYY-MM-DD`).
+        start: String,
+        /// Exclusive window end (`YYYY-MM-DD`).
+        end: String,
+        /// Bar resolution (`1h`, …).
+        resolution: String,
+        /// Master illumination seed (**required**).
+        seed: u64,
+        /// Illumination generations.
+        generations: usize,
+        /// Offspring evaluated per generation.
+        offspring: usize,
+        /// Quantiser state count for the trivial decision head.
+        states: u16,
+        /// Frozen-pool size `K`.
+        k: usize,
     },
     /// Backtest a sealed vintage over a window (QE-251).
     Backtest {
@@ -295,6 +418,56 @@ where
                 embargo,
             })
         }
+        "evolve" => {
+            let mut config = PathBuf::from("config.toml");
+            let mut profile = qe_config::Profile::Train;
+            let mut run_dir = PathBuf::new();
+            let mut json = false;
+            let mut mode = EvolveMode::Sandbox;
+            let mut start = String::new();
+            let mut end = String::new();
+            let mut resolution = "1h".to_owned();
+            let mut seed: Option<u64> = None;
+            let mut generations = DEFAULT_EVOLVE_GENERATIONS;
+            let mut offspring = DEFAULT_EVOLVE_OFFSPRING;
+            let mut states = DEFAULT_EVOLVE_STATES;
+            let mut k = DEFAULT_EVOLVE_K;
+            while let Some(flag) = it.next() {
+                match flag.as_str() {
+                    "--config" => config = PathBuf::from(value(&mut it, "--config")?),
+                    "--profile" => profile = parse_profile(&value(&mut it, "--profile")?)?,
+                    "--run-dir" => run_dir = PathBuf::from(value(&mut it, "--run-dir")?),
+                    "--json" => json = true,
+                    "--mode" => mode = parse_mode(&value(&mut it, "--mode")?)?,
+                    "--start" => start = value(&mut it, "--start")?,
+                    "--end" => end = value(&mut it, "--end")?,
+                    "--resolution" => resolution = value(&mut it, "--resolution")?,
+                    "--seed" => seed = Some(parse_usize_flag(&mut it, "--seed")? as u64),
+                    "--generations" => generations = parse_usize_flag(&mut it, "--generations")?,
+                    "--offspring" => offspring = parse_usize_flag(&mut it, "--offspring")?,
+                    "--states" => states = parse_usize_flag(&mut it, "--states")? as u16,
+                    "--k" => k = parse_usize_flag(&mut it, "--k")?,
+                    other => return Err(CliError::Usage(format!("unknown flag `{other}`"))),
+                }
+            }
+            // `--seed` is REQUIRED for evolve (design §13.10): the campaign must stay byte-reproducible.
+            let seed = seed.ok_or_else(|| CliError::Usage("--seed is required".to_owned()))?;
+            Ok(Command::Evolve {
+                config,
+                profile,
+                run_dir,
+                json,
+                mode,
+                start,
+                end,
+                resolution,
+                seed,
+                generations,
+                offspring,
+                states,
+                k,
+            })
+        }
         "backtest" => {
             let mut vintage: Option<String> = None;
             let mut strategy: Option<String> = None;
@@ -398,6 +571,26 @@ pub const DEFAULT_TRAIN_POPULATION: usize = 24;
 pub const DEFAULT_TRAIN_HOLDOUT: usize = 31;
 /// Default embargo bars purged between the train window and the holdout for `train`.
 pub const DEFAULT_TRAIN_EMBARGO: usize = 2;
+
+/// Default illumination generations for `evolve` (small budget — a fixture run is sub-second).
+pub const DEFAULT_EVOLVE_GENERATIONS: usize = 8;
+/// Default offspring per generation for `evolve`.
+pub const DEFAULT_EVOLVE_OFFSPRING: usize = 24;
+/// Default quantiser state count for the trivial decision head in `evolve`.
+pub const DEFAULT_EVOLVE_STATES: u16 = 5;
+/// Default frozen-pool size `K` for `evolve` (the cap; `qe_run_protocol::EVOLVE_MAX_POOL`).
+pub const DEFAULT_EVOLVE_K: usize = 16;
+
+/// Parse an `--mode` value into an [`EvolveMode`] (`sandbox` | `production`).
+fn parse_mode(s: &str) -> Result<EvolveMode, CliError> {
+    match s {
+        "sandbox" => Ok(EvolveMode::Sandbox),
+        "production" => Ok(EvolveMode::Production),
+        other => Err(CliError::Usage(format!(
+            "unknown mode `{other}` (sandbox|production)"
+        ))),
+    }
+}
 
 /// Pull the value that must follow a flag, or a `Usage` error naming the flag.
 fn value<I>(it: &mut I, flag: &str) -> Result<String, CliError>

@@ -40,7 +40,7 @@ pub struct Progress {
 /// existing `super::model::{BacktestParams, TrainParams}` import paths (and the `meta.params` wire
 /// shape they define) are unchanged. Their `#[serde(default)]` leniency and the CLI-mirroring defaults
 /// (`taker_fee_bps` / `slippage_model`) are preserved verbatim on the shared types.
-pub use qe_run_protocol::{BacktestParams, TrainParams};
+pub use qe_run_protocol::{BacktestParams, EvolveParams, TrainParams};
 
 /// Typed, **non-serialized** run parameters that drive subprocess spawning. Built by `manager::create`
 /// from the validated request; the spawner matches on it to build either the `backtest` or `train`
@@ -52,6 +52,9 @@ pub enum RunSpec {
     Backtest(BacktestParams),
     /// A QE-260/QE-261 training-search run.
     Train(TrainParams),
+    /// A QE-452 offline GP indicator-**evolution** campaign — produces a sealed **formula pool**, never a
+    /// vintage (§13.3).
+    Evolve(EvolveParams),
 }
 
 impl RunSpec {
@@ -60,6 +63,7 @@ impl RunSpec {
         match self {
             RunSpec::Backtest(_) => "backtest",
             RunSpec::Train(_) => "train",
+            RunSpec::Evolve(_) => "evolve",
         }
     }
 
@@ -69,16 +73,25 @@ impl RunSpec {
         match self {
             RunSpec::Backtest(p) => serde_json::to_value(p),
             RunSpec::Train(p) => serde_json::to_value(p),
+            RunSpec::Evolve(p) => serde_json::to_value(p),
         }
         .unwrap_or(Value::Null)
     }
 
-    /// The human discovery label for `index.json` (backtest: the vintage id; train: the window).
+    /// The human discovery label for `index.json` (backtest: the vintage id; train/evolve: the window).
     pub fn label(&self) -> String {
         match self {
             RunSpec::Backtest(p) => p.vintage.clone(),
             RunSpec::Train(p) => format!("train {}→{}", p.start, p.end),
+            RunSpec::Evolve(p) => format!("evolve {}→{} ({})", p.start, p.end, p.mode.as_str()),
         }
+    }
+
+    /// Whether a run of this kind ever writes a vintage. **`evolve` never does** (§13.3): it produces a
+    /// pool artefact only. This is the load-bearing lifecycle-separation predicate the supervisor asserts
+    /// against the terminal `done` line.
+    pub fn writes_vintage(&self) -> bool {
+        matches!(self, RunSpec::Train(_))
     }
 }
 
@@ -165,9 +178,14 @@ pub struct TrainProgress {
     /// G1 gate verdict snapshot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gate: Option<GateSnapshot>,
-    /// The sealed vintage id from the terminal `done` (the deep-link target).
+    /// The sealed vintage id from the terminal `done` (the deep-link target). Set only by a `train` run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vintage: Option<String>,
+    /// The sealed **formula-pool** id from the terminal `done` (QE-452 `evolve` run). Set only by an
+    /// `evolve` run — **mutually exclusive** with `vintage` (§13.3). Absent (`None`) for train/backtest,
+    /// so their `meta.json` shape is unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool: Option<String>,
 }
 
 /// A run's `meta.json` — the **authoritative** status + progress record (§6.1 / §8.2).

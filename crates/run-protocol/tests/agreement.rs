@@ -8,7 +8,8 @@
 //! field rename in either crate would change this type and fail a case below.
 
 use qe_run_protocol::{
-    emit_done, emit_error, emit_progress, emit_train_done, ProgressLine, PROTOCOL_VERSION,
+    emit_done, emit_error, emit_evolve_done, emit_progress, emit_train_done, ProgressLine,
+    PROTOCOL_VERSION,
 };
 
 /// Round-trip a value against its exact wire string: value → JSON == wire, and wire → value == value.
@@ -78,14 +79,15 @@ fn ensemble_and_gate_wire_are_frozen() {
 
 #[test]
 fn done_and_error_wire_are_frozen() {
-    // Backtest form (no vintage) — carries the current protocol version.
+    // Backtest form (no vintage, no pool) — carries the current protocol version (QE-452: 2).
     assert_wire(
         &ProgressLine::Done {
             result: "result.json".to_owned(),
             protocol_version: PROTOCOL_VERSION,
             vintage: None,
+            pool: None,
         },
-        r#"{"t":"done","result":"result.json","protocol_version":1}"#,
+        r#"{"t":"done","result":"result.json","protocol_version":2}"#,
     );
     // Train form — names the sealed vintage.
     assert_wire(
@@ -93,8 +95,19 @@ fn done_and_error_wire_are_frozen() {
             result: "result.json".to_owned(),
             protocol_version: PROTOCOL_VERSION,
             vintage: Some("vintage-abc123".to_owned()),
+            pool: None,
         },
-        r#"{"t":"done","result":"result.json","protocol_version":1,"vintage":"vintage-abc123"}"#,
+        r#"{"t":"done","result":"result.json","protocol_version":2,"vintage":"vintage-abc123"}"#,
+    );
+    // Evolve form (QE-452) — names the sealed formula pool, never a vintage.
+    assert_wire(
+        &ProgressLine::Done {
+            result: "result.json".to_owned(),
+            protocol_version: PROTOCOL_VERSION,
+            vintage: None,
+            pool: Some("pool-abc123".to_owned()),
+        },
+        r#"{"t":"done","result":"result.json","protocol_version":2,"pool":"pool-abc123"}"#,
     );
     assert_wire(
         &ProgressLine::Error {
@@ -102,6 +115,23 @@ fn done_and_error_wire_are_frozen() {
         },
         r#"{"t":"error","msg":"boom"}"#,
     );
+}
+
+/// A v1 `done` line (which predates QE-452's `pool` field) still deserializes — `pool` defaults to
+/// `None` — so an older CLI's terminal line is never dropped by a newer parser (serde-default back-compat).
+#[test]
+fn v1_done_without_pool_still_deserializes() {
+    let parsed: ProgressLine = serde_json::from_str(
+        r#"{"t":"done","result":"result.json","protocol_version":1,"vintage":"v-1"}"#,
+    )
+    .expect("deserialize");
+    match parsed {
+        ProgressLine::Done { pool, vintage, .. } => {
+            assert_eq!(pool, None, "an omitted pool field defaults to None");
+            assert_eq!(vintage.as_deref(), Some("v-1"));
+        }
+        other => panic!("expected Done, got {other:?}"),
+    }
 }
 
 /// The server's tolerance of non-finite floats: `serde_json` renders a non-finite `f64` as `null` on
@@ -156,6 +186,7 @@ fn emit_helpers_match_the_frozen_wire() {
     emit_progress(&mut buf, 5, "load", "loading").unwrap();
     emit_done(&mut buf, "result.json").unwrap();
     emit_train_done(&mut buf, "result.json", "vintage-abc123").unwrap();
+    emit_evolve_done(&mut buf, "result.json", "pool-abc123").unwrap();
     emit_error(&mut buf, "boom").unwrap();
     let out = String::from_utf8(buf).unwrap();
     let lines: Vec<&str> = out.lines().collect();
@@ -163,8 +194,9 @@ fn emit_helpers_match_the_frozen_wire() {
         lines,
         vec![
             r#"{"t":"progress","pct":5,"stage":"load","msg":"loading"}"#,
-            r#"{"t":"done","result":"result.json","protocol_version":1}"#,
-            r#"{"t":"done","result":"result.json","protocol_version":1,"vintage":"vintage-abc123"}"#,
+            r#"{"t":"done","result":"result.json","protocol_version":2}"#,
+            r#"{"t":"done","result":"result.json","protocol_version":2,"vintage":"vintage-abc123"}"#,
+            r#"{"t":"done","result":"result.json","protocol_version":2,"pool":"pool-abc123"}"#,
             r#"{"t":"error","msg":"boom"}"#,
         ]
     );

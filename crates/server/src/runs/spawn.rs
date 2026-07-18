@@ -7,7 +7,7 @@ use std::process::Stdio;
 
 use tokio::process::{Child, Command};
 
-use super::model::{BacktestParams, RunSpec, TrainParams};
+use super::model::{BacktestParams, EvolveParams, RunSpec, TrainParams};
 
 /// Environment variable naming the `qe-cli` binary to spawn.
 pub const ENV_CLI_BIN: &str = "QE_SERVER_CLI_BIN";
@@ -66,6 +66,7 @@ impl JobSpawner for CliJobSpawner {
         match spec {
             RunSpec::Backtest(params) => backtest_args(&mut cmd, params, run_dir),
             RunSpec::Train(params) => train_args(&mut cmd, params, run_dir),
+            RunSpec::Evolve(params) => evolve_args(&mut cmd, params, run_dir),
         }
         // QE-419: pin the child to the server's config file so it reads the same `[storage]` dirs.
         if let Some(config_path) = &self.config_path {
@@ -137,6 +138,43 @@ fn train_args(cmd: &mut Command, params: &TrainParams, run_dir: &Path) {
     }
     if let Some(embargo) = params.embargo {
         cmd.arg("--embargo").arg(embargo.to_string());
+    }
+    cmd.arg("--run-dir").arg(run_dir).arg("--json");
+}
+
+/// Build the `evolve … --run-dir <dir> --json` argv (QE-452). Reuses the same shape as `train_args`
+/// (config/profile from the pinned config; the window + seed; optional budget/cap knobs only when set)
+/// plus the campaign `--mode`. The QE-419 config pin + `kill_on_drop` are applied by the caller exactly
+/// as for train/backtest.
+fn evolve_args(cmd: &mut Command, params: &EvolveParams, run_dir: &Path) {
+    cmd.arg("evolve");
+    if let Some(config) = &params.config {
+        cmd.arg("--config").arg(config);
+    }
+    if let Some(profile) = &params.profile {
+        cmd.arg("--profile").arg(profile);
+    }
+    cmd.arg("--mode")
+        .arg(params.mode.as_str())
+        .arg("--start")
+        .arg(&params.start)
+        .arg("--end")
+        .arg(&params.end)
+        .arg("--resolution")
+        .arg(&params.resolution)
+        .arg("--seed")
+        .arg(params.seed.to_string());
+    if let Some(generations) = params.generations {
+        cmd.arg("--generations").arg(generations.to_string());
+    }
+    if let Some(offspring) = params.offspring {
+        cmd.arg("--offspring").arg(offspring.to_string());
+    }
+    if let Some(states) = params.states {
+        cmd.arg("--states").arg(states.to_string());
+    }
+    if let Some(k) = params.k {
+        cmd.arg("--k").arg(k.to_string());
     }
     cmd.arg("--run-dir").arg(run_dir).arg("--json");
 }

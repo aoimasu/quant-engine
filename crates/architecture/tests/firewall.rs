@@ -23,6 +23,8 @@ fn firewall_holds_in_the_workspace() {
         "qe-runtime-core",
         "qe-hedger",
         "qe-edge",
+        // QE-452 Phase A: the frozen formula-pool artefact crate, guarded by its own pool ⟂ live rule.
+        "qe-formula-pool",
     ] {
         assert!(
             graph.contains_key(required),
@@ -57,6 +59,9 @@ fn firewall_holds_in_the_workspace() {
         ("qe-hedger", "qe-vintage"),
         ("qe-runtime-core", "qe-domain"),
         ("qe-runtime", "qe-edge"),
+        // QE-452 Phase A: the composition root reaches the pool artefact, so the pool ⟂ live rule (which
+        // constrains `qe-formula-pool`) sits on a crate that a real edge actually reaches — non-vacuous.
+        ("qe-cli", "qe-formula-pool"),
     ] {
         assert!(
             reachable(&graph, from).contains(to),
