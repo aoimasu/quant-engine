@@ -55,7 +55,10 @@ pub use ic::{
     benjamini_hochberg, forward_returns, rank_ic, screen_catalogue, spearman_pvalue, HorizonIc,
     IcScreenConfig, IcScreenReport, IndicatorScreen, IndicatorSignals, Verdict,
 };
-pub use nulls::{buy_and_hold_returns, random_entry_returns, realised_turnover};
+pub use nulls::{
+    block_bootstrap_returns, buy_and_hold_returns, label_shuffle_returns, random_entry_returns,
+    realised_turnover,
+};
 pub use pbo::{pbo_cscv, PboReport};
 pub use spa::{reality_check_pvalue, SpaConfig};
 pub use stats::{

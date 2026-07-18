@@ -201,6 +201,7 @@ mod tests {
             catalogue_version: schema.version(),
             num_states: schema.num_states(),
             id_hash: reordered,
+            formula_pool: Vec::new(),
         };
         let (_d, repo) = repo("reorder");
         let sealed = Vintage::seal(content_with(reordered_identity)).unwrap();

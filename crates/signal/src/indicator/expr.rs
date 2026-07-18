@@ -583,15 +583,23 @@ impl ExprTree {
         canonicalize(&self.root)
     }
 
+    /// The exact **canonical S-expression text** the content hash is taken over (constants rendered via
+    /// exact `Decimal` `Display`, so **`rust_decimal`-only**, no `f64`). Human-readable and exact — the
+    /// frozen-pool artefact (QE-451 Phase 1b) carries this string alongside its [`canonical_hash`].
+    #[must_use]
+    pub fn canonical_sexpr(&self) -> String {
+        let mut s = String::new();
+        write_sexpr(&self.canonical(), &mut s);
+        s
+    }
+
     /// A content hash of the [`canonical`](ExprTree::canonical) form — a SHA-256 over the canonical
     /// S-expression text (constants rendered via exact `Decimal` `Display`, so **`rust_decimal`-only**,
     /// no `f64` ever feeds the hash). The distinct count of these over all evaluated trees is the
     /// distinct-canonical trial basis (§8).
     #[must_use]
     pub fn canonical_hash(&self) -> String {
-        let mut s = String::new();
-        write_sexpr(&self.canonical(), &mut s);
-        let digest = Sha256::digest(s.as_bytes());
+        let digest = Sha256::digest(self.canonical_sexpr().as_bytes());
         digest.iter().map(|b| format!("{b:02x}")).collect()
     }
 }

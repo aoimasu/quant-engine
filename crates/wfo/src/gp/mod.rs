@@ -16,7 +16,10 @@
 //! gates, cross-asset pooled fitness, freezing `K ≤ 16` into `CatalogueIdentity`, flow terminals.
 
 pub mod archive;
+pub mod deflation;
 pub mod descriptor;
+pub mod freeze;
+pub mod gates;
 pub mod variation;
 
 use std::collections::HashSet;
@@ -31,9 +34,19 @@ use serde::{Deserialize, Serialize};
 use crate::operator::{ApplicationOutcome, Operator, OperatorSelector};
 
 pub use archive::{quantised_correlation, ExprArchive, ExprElite, ExprInsert, DEDUP_THRESHOLD};
+pub use deflation::{
+    assess_gp_champion, calibrate_null_basis, formula_returns, gp_trial_basis,
+    market_forward_returns, mdl_penalised_fitness, mean_cross_asset_correlation, pooled_t_eff,
+    signal_series, uncensored_pbo, GpDeflationGate, GpDeflationReport,
+};
 pub use descriptor::{
     descriptor_for_tree, family_of_tree, grid_cells, ComplexityBand, ExprCell, COMPLEXITIES,
     EXPR_CELLS,
+};
+pub use freeze::{FreezeError, FrozenFormula, FrozenPool, MAX_POOL_SIZE};
+pub use gates::{
+    cost_stressed_net, evaluate_tradability, ic_screen_trees, inlined_capacity, turnover_frac,
+    TradabilityConfig, TradabilityVerdict, CAPACITY_FLOOR, MAX_TURNOVER_FRAC,
 };
 pub use variation::{explore, fresh_random, local_refine};
 

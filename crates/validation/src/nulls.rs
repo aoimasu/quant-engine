@@ -41,6 +41,54 @@ pub fn random_entry_returns(market_returns: &[f64], target_turnover: f64, seed: 
     out
 }
 
+/// **Label-shuffle null** (QE-451 Phase 1b, design §5 κ-calibration row): a seeded Fisher–Yates
+/// permutation of `returns`, destroying any signal→forward-return alignment while preserving the return
+/// **marginal** (same values, same mean/variance/higher moments). A formula's edge on shuffled labels is
+/// pure selection noise, so the deflation basis is *calibrated* against it — a champion selected over a
+/// shuffled population must show DSR ≈ 0.5 once the trial count reflects how hard the search rummaged.
+///
+/// Deterministic via `task_rng(seed, ·)` (QE-006); the same `seed` reproduces the same permutation.
+#[must_use]
+pub fn label_shuffle_returns(returns: &[f64], seed: u64) -> Vec<f64> {
+    let mut out = returns.to_vec();
+    let mut rng = task_rng(seed, 0);
+    // Fisher–Yates from the top; `next_u64 % (i+1)` is a portable, deterministic index draw.
+    for i in (1..out.len()).rev() {
+        let j = (rng.next_u64() % (i as u64 + 1)) as usize;
+        out.swap(i, j);
+    }
+    out
+}
+
+/// **Moving-block-bootstrap null** (QE-451 Phase 1b): resample `returns` in overlapping contiguous blocks
+/// of length `block_len`, preserving short-range autocorrelation (which a plain shuffle destroys) while
+/// still breaking the long-range structure any edge would rest on. The output has the same length as the
+/// input: `⌈T/block_len⌉` blocks are drawn (each starting at a uniform in-range index) and concatenated,
+/// then truncated to `T`. `block_len == 0` or `≥ T` degenerates to a single whole-series draw.
+///
+/// Deterministic via `task_rng(seed, ·)` (QE-006).
+#[must_use]
+pub fn block_bootstrap_returns(returns: &[f64], block_len: usize, seed: u64) -> Vec<f64> {
+    let t = returns.len();
+    if t == 0 {
+        return Vec::new();
+    }
+    let block = block_len.clamp(1, t);
+    let n_starts = t.saturating_sub(block) + 1; // number of valid block start positions
+    let mut rng = task_rng(seed, 0);
+    let mut out = Vec::with_capacity(t);
+    while out.len() < t {
+        let start = (rng.next_u64() % n_starts as u64) as usize;
+        for &r in &returns[start..start + block] {
+            out.push(r);
+            if out.len() == t {
+                break;
+            }
+        }
+    }
+    out
+}
+
 /// The realised turnover (fraction of periods whose position changed) of a position series — a test/audit
 /// helper to confirm a random-entry null matches its target.
 #[must_use]
@@ -82,6 +130,53 @@ mod tests {
         assert_eq!(a, b);
         // A different seed gives a different path.
         assert_ne!(a, random_entry_returns(&market, 0.2, 6));
+    }
+
+    #[test]
+    fn label_shuffle_is_a_seeded_permutation_preserving_the_marginal() {
+        let returns: Vec<f64> = (0..200).map(|i| 0.001 * ((i % 13) as f64 - 6.0)).collect();
+        let a = label_shuffle_returns(&returns, 42);
+        let b = label_shuffle_returns(&returns, 42);
+        assert_eq!(a, b, "same seed reproduces the permutation");
+        assert_eq!(a.len(), returns.len());
+        // It is a permutation: same multiset ⇒ identical sum and sum-of-squares (marginal preserved).
+        let sum = |v: &[f64]| v.iter().sum::<f64>();
+        let sq = |v: &[f64]| v.iter().map(|x| x * x).sum::<f64>();
+        approx(sum(&a), sum(&returns), 1e-9);
+        approx(sq(&a), sq(&returns), 1e-9);
+        // A different seed gives a different order (with overwhelming probability at T=200).
+        assert_ne!(a, label_shuffle_returns(&returns, 43));
+        // The order actually changed (not the identity permutation).
+        assert_ne!(a, returns);
+    }
+
+    #[test]
+    fn block_bootstrap_is_seeded_and_length_preserving() {
+        let returns: Vec<f64> = (0..100).map(|i| 0.01 * (i as f64)).collect();
+        let a = block_bootstrap_returns(&returns, 10, 7);
+        let b = block_bootstrap_returns(&returns, 10, 7);
+        assert_eq!(a, b, "same seed reproduces the resample");
+        assert_eq!(a.len(), returns.len(), "length preserved");
+        // Every value is drawn from the input population.
+        assert!(a.iter().all(|x| returns.contains(x)));
+        // A ramp series: within-block consecutive differences are +0.01 (autocorrelation preserved),
+        // which a plain shuffle would not keep — count the fraction of +0.01 steps and require it high.
+        let consec = a
+            .windows(2)
+            .filter(|w| (w[1] - w[0] - 0.01).abs() < 1e-9)
+            .count();
+        assert!(
+            consec as f64 / (a.len() - 1) as f64 > 0.7,
+            "moving blocks must preserve short-range structure: {consec}/{}",
+            a.len() - 1
+        );
+        // Degenerate block sizes fall back to a whole-series draw of the right length.
+        assert_eq!(block_bootstrap_returns(&returns, 0, 1).len(), returns.len());
+        assert_eq!(
+            block_bootstrap_returns(&returns, 999, 1).len(),
+            returns.len()
+        );
+        assert!(block_bootstrap_returns(&[], 5, 1).is_empty());
     }
 
     #[test]

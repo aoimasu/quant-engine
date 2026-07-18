@@ -1943,11 +1943,13 @@ dependencies = [
  "qe-risk",
  "qe-signal",
  "qe-storage",
+ "qe-validation",
  "rand_core 0.9.5",
  "rayon",
  "rust_decimal",
  "serde",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]
