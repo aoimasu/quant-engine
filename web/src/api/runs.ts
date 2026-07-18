@@ -34,6 +34,45 @@ export interface BacktestParams {
   slippage_model: string;
 }
 
+/** Campaign mode of an `evolve` run (design §13.6). Mirrors `qe_run_protocol::EvolveMode`. */
+export type EvolveMode = 'sandbox' | 'production';
+
+/**
+ * Evolve-campaign parameters (QE-452) — the `params` object of a `type:"evolve"` create-run request.
+ * Kept **hand-in-lockstep** with `crates/run-protocol/src/lib.rs::EvolveParams` (the source of truth).
+ * **`seed` is REQUIRED** (diverges from {@link TrainParams}' optional seed — an evolve approval must stay
+ * byte-reproducible off the recorded seed). The caps (`depth≤4`, `nodes≤16`, `lookback≤200`, `k≤16`,
+ * `windows ⊆ {5,10,20,50,100}`) are enforced client-side (mirroring `validate_evolve`) and re-enforced
+ * server-side as a uniform `400`.
+ */
+export interface EvolveParams {
+  /** Master illumination seed (**required**). */
+  seed: number;
+  /** Campaign mode — `sandbox` (research) or `production` (gated on QE-454 prereqs). */
+  mode: EvolveMode;
+  start: string;
+  end: string;
+  resolution: string;
+  /** Illumination generations; omitted ⇒ the CLI default. */
+  generations?: number;
+  /** Offspring evaluated per generation; omitted ⇒ the CLI default. */
+  offspring?: number;
+  /** Quantiser state count for the trivial decision head. */
+  states?: number;
+  /** Declared max tree depth (≤ 4). */
+  depth?: number;
+  /** Declared max tree node count (≤ 16). */
+  nodes?: number;
+  /** Declared max indicator lookback in bars (≤ 200). */
+  lookback?: number;
+  /** Declared window-length lattice (each entry ∈ {5,10,20,50,100}). */
+  windows?: number[];
+  /** Frozen-pool size `K` (≤ 16). */
+  k?: number;
+  config?: string;
+  profile?: string;
+}
+
 /** Training parameters — the `params` object of a `type:"train"` create-run request (QE-261). */
 export interface TrainParams {
   start: string;
@@ -110,12 +149,18 @@ export interface RunMetaBase {
  * update both together. Narrow on `meta.type` at each consumer instead of casting, so a train run can
  * no longer be statically read as a backtest (and vice-versa).
  */
-export type RunMeta = BacktestRunMeta | TrainRunMeta;
+export type RunMeta = BacktestRunMeta | TrainRunMeta | EvolveRunMeta;
 
 /** A `type:"backtest"` run — its `params` is a {@link BacktestParams}. */
 export interface BacktestRunMeta extends RunMetaBase {
   type: 'backtest';
   params: BacktestParams;
+}
+
+/** A `type:"evolve"` run (QE-452) — its `params` is an {@link EvolveParams}. */
+export interface EvolveRunMeta extends RunMetaBase {
+  type: 'evolve';
+  params: EvolveParams;
 }
 
 /** A `type:"train"` run (QE-261) — {@link TrainParams} + the rich {@link TrainProgress} for polling. */
@@ -134,6 +179,11 @@ export function isTrainRun(run: RunMeta): run is TrainRunMeta {
 /** Type-predicate narrowing a {@link RunMeta} to the `backtest` variant (for `.filter(isBacktestRun)`). */
 export function isBacktestRun(run: RunMeta): run is BacktestRunMeta {
   return run.type === 'backtest';
+}
+
+/** Type-predicate narrowing a {@link RunMeta} to the `evolve` variant (for `.filter(isEvolveRun)`). */
+export function isEvolveRun(run: RunMeta): run is EvolveRunMeta {
+  return run.type === 'evolve';
 }
 
 /** One trade row of the §8.1 result contract. */
@@ -375,4 +425,193 @@ export function createRun(params: BacktestParams): Promise<string> {
 /** Create + spawn a training run (QE-261). Resolves to the new run id; throws {@link ApiError} on 400. */
 export function createTrainRun(params: TrainParams): Promise<string> {
   return postRun('train', params);
+}
+
+/**
+ * Create + spawn an `evolve` campaign (QE-452). Resolves to the new run id; throws {@link ApiError} on a
+ * `400` — including a **production launch refused** by the compiled prereq const (surfaced honestly, not
+ * hidden). Client-side {@link EvolveParams} validation mirrors the server's `validate_evolve` caps.
+ */
+export function createEvolveRun(params: EvolveParams): Promise<string> {
+  return postRun('evolve', params);
+}
+
+// ---- formula-pool + evolve-archive types (QE-452 Phase B wire; kept in lockstep with `pools.rs`) ------
+
+/** A pool's durable governance lifecycle (design §13.3). Wire tokens are snake_case. */
+export type PoolLifecycleState = 'draft' | 'approved' | 'sealed' | 'rejected' | 'revoked';
+
+/** The campaign mode a pool was produced under. */
+export type PoolMode = 'sandbox' | 'production';
+
+/** A governance action against a pool (the four `POST` transitions). */
+export type PoolTransition = 'approve' | 'reject' | 'revoke' | 'seal';
+
+/** One frozen formula: its canonical S-expression + the content-addressed `formula_hash`. */
+export interface PoolFormula {
+  sexpr: string;
+  formula_hash: string;
+}
+
+/**
+ * The deflation-summary block (design §5/§13.5) — the minimum honest stat set the PoolReview gate renders.
+ * The `Decimal` bars arrive as **strings** (byte-stable hashing), so parse for display, never for math.
+ */
+export interface DeflationSummary {
+  /** Whether the trial basis came from the real GP-aware trial counter (QE-439). */
+  gp_aware: boolean;
+  /** Distinct-canonical formulas evaluated (incl. rejects) — the QE-439 basis. */
+  distinct_evaluations: number;
+  /** The trial basis `N` (= `max(distinct, analytic floor)`) the DSR deflated against. */
+  n_trials: number;
+  /** The analytic `cells·gens·windows` floor (`N == floor` is the "QE-439 not wired" tell). */
+  analytic_floor: number;
+  /** Size of the uncensored Sharpe-dispersion population. */
+  variance_trials: number;
+  /** Cross-trial Sharpe variance over the uncensored population (string Decimal). */
+  trial_variance: string;
+  /** The best-of-`N` noise Sharpe bar `E[max SR]` (string Decimal; finite via the log-N path). */
+  expected_max_sharpe: string;
+  /** The champion's Deflated Sharpe Ratio (string Decimal; necessary-not-sufficient floor). */
+  champion_dsr: string;
+  /** Uncensored PBO over the full population (string Decimal), or `null` if unestimable. */
+  uncensored_pbo: string | null;
+}
+
+/** The pool's review lineage (design §13.10) — the reproducible provenance binding an approval. */
+export interface PoolLineage {
+  campaign_id: string;
+  seed: number;
+  mode: PoolMode;
+  code_commit: string;
+  input_snapshot_id: string;
+  config_hash: string;
+  pool_hash: string;
+}
+
+/** The hashed content of a formula pool (`GET /api/formula-pools/{id}`'s `content`). */
+export interface FormulaPoolContent {
+  format_version: number;
+  pool_id: string;
+  mode: PoolMode;
+  formulas: PoolFormula[];
+  deflation: DeflationSummary;
+  lineage: PoolLineage;
+}
+
+/** One appended governance event (the QE-454 audit-entry placeholder). */
+export interface TransitionRecord {
+  transition: PoolTransition;
+  actor: string;
+  ts_ms: number;
+  from: PoolLifecycleState;
+  to: PoolLifecycleState;
+}
+
+/** A pool list row — the slim summary the PoolBrowser renders (`GET /api/formula-pools`). */
+export interface PoolSummary {
+  id: string;
+  mode: PoolMode;
+  content_hash: string;
+  pool_hash: string;
+  formula_count: number;
+  gp_aware: boolean;
+  distinct_evaluations: number;
+  lifecycle: PoolLifecycleState;
+}
+
+/** The pool detail view (`GET /api/formula-pools/{id}`) the PoolReview gate consumes. */
+export interface PoolDetail {
+  content: FormulaPoolContent;
+  content_hash: string;
+  lifecycle: PoolLifecycleState;
+  history: TransitionRecord[];
+}
+
+/** The result of a successful governance transition (`200 {pool_id,lifecycle}`). */
+export interface TransitionResult {
+  pool_id: string;
+  lifecycle: PoolLifecycleState;
+}
+
+/** One occupied MAP-Elites niche of an evolve run's archive (`GET /api/runs/{id}/archive` `cells`). */
+export interface ArchiveCell {
+  family: string;
+  timescale: string;
+  complexity: string;
+  node_count: number;
+  best_fitness: number | null;
+}
+
+/** The GP-aware trial-count basis the CampaignMonitor's TrialCountBar renders. */
+export interface ArchiveTrialBasis {
+  distinct_evaluations: number;
+  n_trials: number;
+  analytic_floor: number;
+  expected_max_sharpe: number | null;
+  occupied_cells: number;
+  total_cells: number;
+}
+
+/** The `archive.json` snapshot an evolve run writes (`GET /api/runs/{id}/archive`). */
+export interface EvolveArchive {
+  pool_id: string;
+  mode: string;
+  generations: number;
+  offspring: number;
+  cells: ArchiveCell[];
+  trial_basis: ArchiveTrialBasis;
+}
+
+// ---- formula-pool + evolve-archive API (session-gated reads + role-gated governance) ------------------
+
+/** List the frozen formula pools (both roots), each hash-verified server-side. */
+export function listFormulaPools(): Promise<PoolSummary[]> {
+  return getJson<PoolSummary[]>('/api/formula-pools');
+}
+
+/** Fetch one pool's verified detail (K formulas + deflation + lineage + lifecycle); `404` → throws. */
+export function getFormulaPool(id: string): Promise<PoolDetail> {
+  return getJson<PoolDetail>(`/api/formula-pools/${encodeURIComponent(id)}`);
+}
+
+/** Fetch an evolve run's MAP-Elites archive snapshot; `404` (no archive yet) → throws {@link ApiError}. */
+export function getRunArchive(id: string): Promise<EvolveArchive> {
+  return getJson<EvolveArchive>(`/api/runs/${encodeURIComponent(id)}/archive`);
+}
+
+/**
+ * POST a governance transition. Resolves to the new lifecycle on `200`; **throws {@link ApiError}** on a
+ * `409` (a production Seal gated on QE-454, or an illegal edge), `404`, or `403` (role-less) — the caller
+ * surfaces the server's message honestly and re-reads the pool to reflect the true (unchanged) lifecycle.
+ */
+export async function postPoolTransition(
+  id: string,
+  transition: PoolTransition,
+): Promise<TransitionResult> {
+  const res = await fetch(`/api/formula-pools/${encodeURIComponent(id)}/${transition}`, {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: JSON_HEADERS,
+  });
+  if (!res.ok) await throwForResponse(res);
+  return (await res.json()) as TransitionResult;
+}
+
+/** The outcome of `POST /api/runs/{id}/halt`. */
+export interface HaltResult {
+  id: string;
+  status: RunStatus;
+  halted: boolean;
+}
+
+/** Cooperatively halt a running evolve campaign; throws {@link ApiError} on `404`/`409` (already terminal). */
+export async function haltRun(id: string): Promise<HaltResult> {
+  const res = await fetch(`/api/runs/${encodeURIComponent(id)}/halt`, {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: JSON_HEADERS,
+  });
+  if (!res.ok) await throwForResponse(res);
+  return (await res.json()) as HaltResult;
 }
