@@ -335,27 +335,37 @@ _All sixteen delivered — see [`reviewed/`](mds/reviewed/) (qe-434..449)._
 > the missing **vintage inspector + leaderboard**. Produced by a five-discipline panel interviewing the owner
 > (2026-07-18).
 >
+> **Panel re-review (2026-07-18):** the 11 tickets were re-reviewed against the Max Dama recs + `specs.md` and
+> found to specify provenance/gate evidence as *visible* but never *persisted* into the sealed `VintageContent`.
+> The remediation adds a foundation ticket **QE-467** (persist the full seal evidence + a canonical net-of-cost
+> holdout series on the deployed capacity-capped weights + capacity/turnover + `data_provenance` in **one**
+> `VINTAGE_FORMAT_VERSION` 7→8 bump — downstream reads, never recomputes) and reshapes the holdout contract
+> (single consultation, regime-aware, overlap-keyed budget), the steer knobs (deflation-scaling +
+> archive-coverage floor), ingest (as-of universe, real calibration inputs, liquidity screen), and the
+> leaderboard (ranks the *persisted* series + enforces the consultation budget). QE-467 lands **first** in R1.
+>
 > **Dominant guardrail:** an **outer genetic loop across runs / auto-selector over the leaderboard is
 > explicitly REJECTED** as overfitting. No steer knob may relax a G1 threshold (cost-stress / turnover /
 > capacity / DSR-PBO / holdout-embargo are compiled floors, off the whitelist); the holdout is frozen and
 > recorded in lineage; the leaderboard is inspection, not selection; **promotion stays through the existing
 > per-run G1 gate + seal.** Additive over the QE-430..454 deflation backbone; not new spec features; does not
-> change the P0–P2 gates. Rollout **R1** (inspect & steer, no engine change) → **R2** (composite flow) → **R3**
+> change the P0–P2 gates. Rollout **R1** (persist + inspect & steer) → **R2** (composite flow) → **R3**
 > (real ingest, the long pole).
 
 | Ticket | Title | Depends on | Status |
 |--------|-------|------------|:------:|
-| [QE-456](./mds/tickets/QE-456.md) | `GET /api/vintages/{id}` vintage-detail read endpoint (composition → indicators + weights + G1 gate/deflation snapshot + holdout split) — additive, no engine change  *(R1 · backend/api)* | QE-257, QE-260 | — |
-| [QE-457](./mds/tickets/QE-457.md) | SPA Vintage Inspector screen (mirrors evolve PoolReview; net-of-cost/tradability-led gate card; inspection only)  *(R1 · frontend)* | QE-456, QE-259 | — |
-| [QE-458](./mds/tickets/QE-458.md) | Steerable-search params (budget / indicator subset / windows) + the **gate-monotone whitelist guardrail** — a steered run cannot seal a vintage the un-steered gate rejects  *(R1 · run-protocol/server/wfo)* | QE-260, QE-437, QE-451 | — |
+| [QE-467](./mds/tickets/QE-467.md) | **Persist seal evidence + net-of-cost holdout series (deployed capacity-capped weights) + capacity/turnover + `data_provenance`** into the sealed `VintageContent` in **ONE** `VINTAGE_FORMAT_VERSION` 7→8 bump — the R1 **foundation**; downstream tickets read (never recompute) it  *(R1 · vintage/server/storage/run-protocol)* | QE-260, QE-434, QE-431, QE-440, QE-430, QE-437, QE-439 | — |
+| [QE-456](./mds/tickets/QE-456.md) | `GET /api/vintages/{id}` vintage-detail read endpoint resliced to EXACTLY what QE-467 persists (composition + weights + gate/deflation evidence + `data_provenance` + holdout-series handle + split/regime) + vintage→run reverse-join — additive, no recompute  *(R1 · backend/api)* | QE-467, QE-257, QE-260 | — |
+| [QE-457](./mds/tickets/QE-457.md) | SPA Vintage Inspector screen (mirrors evolve PoolReview; **provenance banner** + net-of-cost/tradability-led gate card + holdout regime composition + "not paper-confirmed" label; inspection only)  *(R1 · frontend)* | QE-456, QE-467, QE-259 | — |
+| [QE-458](./mds/tickets/QE-458.md) | Steerable-search params (budget / indicator subset / windows) + **gate-monotone whitelist** + **deflation-scaling** (subset cardinality→N, noise-series false-discovery test) + **archive-coverage floor** + regime-coverage invariant + steer-delta into lineage  *(R1 · run-protocol/server/wfo)* | QE-467, QE-260, QE-437, QE-439, QE-451 | — |
 | [QE-459](./mds/tickets/QE-459.md) | SPA steering controls (indicator picker / budget / windows) with blocklisted thresholds shown as fixed guardrail chips  *(R1 · frontend)* | QE-458, QE-261 | — |
-| [QE-460](./mds/tickets/QE-460.md) | `RunSpec::Flow` composite run-kind: server-owned train→backtest sequencing, deterministic vintage handoff, **frozen OOS holdout** carved once + recorded in lineage  *(R2 · run-protocol/server)* | QE-452, QE-419, QE-458 | — |
+| [QE-460](./mds/tickets/QE-460.md) | `RunSpec::Flow` composite run-kind: server-owned train→backtest sequencing, deterministic vintage handoff, **collapsed holdout contract** (backtest IS the single recorded consultation), **regime-aware/walk-forward** holdout, **overlap-keyed** consultation counter, **cost-calibration parity** across sub-runs, `PROTOCOL_VERSION` 2→3 (lineage rides QE-467's bump)  *(R2 · run-protocol/server)* | QE-467, QE-452, QE-419, QE-458, QE-117, QE-125 | — |
 | [QE-461](./mds/tickets/QE-461.md) | Flow supervision: dedicated concurrency lane + resume-from-sealed-vintage checkpoint + authorised halt (runs are terminal 4-state today)  *(R2 · backend/orchestration)* | QE-460, QE-407 | — |
 | [QE-462](./mds/tickets/QE-462.md) | SPA single stepped Flow page (configure train+backtest+steer once → run)  *(R2 · frontend)* | QE-460, QE-459 | — |
 | [QE-463](./mds/tickets/QE-463.md) | Real `http` ingest decoder for one exchange (Binance USDT-M): incremental / resumable / idempotent historical download behind the default-off `http` feature  *(R3 · ingest — the long pole)* | QE-253 | — |
-| [QE-464](./mds/tickets/QE-464.md) | `ingest` run-kind + `POST /api/ingest` trigger (instruments / range / fetch-all) + **real-vs-synthetic provenance** on the store/coverage  *(R3 · server/storage/ingest)* | QE-463, QE-257 | — |
+| [QE-464](./mds/tickets/QE-464.md) | `ingest` run-kind + `POST /api/ingest` (instruments / range / fetch-all via the **as-of universe machinery** — survivorship kill) + **real-vs-synthetic-vs-mixed provenance** into store/coverage (key-only) + `VintageContent.lineage` (QE-467) + **liquidity screen** (per-instrument ADV/impact, QE-440/447); no `PROTOCOL_VERSION` bump  *(R3 · server/storage/ingest)* | QE-463, QE-467, QE-257, QE-440 | — |
 | [QE-465](./mds/tickets/QE-465.md) | SPA ingest-trigger screen + **provenance column** in MarketData  *(R3 · frontend)* | QE-464 | — |
-| [QE-466](./mds/tickets/QE-466.md) | Vintage **leaderboard/comparison** surface: rank sealed vintages on net-of-cost / capacity-at-size / cross-vintage correlation (NOT gross Sharpe) + steer diffs — **INFORMATIONAL, introduces no best-of-N selection**; promotion stays via the existing gate/seal  *(R1 · backend/frontend)* | QE-456, QE-457 | — |
+| [QE-466](./mds/tickets/QE-466.md) | Vintage **leaderboard/comparison**: rank sealed vintages on the **persisted** net-of-cost holdout series (deployed capacity-capped weights) / capacity-at-size / turnover / cross-vintage correlation (**QE-430 R(N)/Fisher-z**, effective N) + steer diffs; **ENFORCES the holdout-consultation budget** (grey-out/escalate over-consulted; no fresh cross-vintage selection statistic); "not paper-confirmed" — **INFORMATIONAL, no best-of-N selection**; promotion stays via the gate/seal (owes G2/G3)  *(R1 · backend/frontend)* | QE-467, QE-460, QE-456, QE-457, QE-430 | — |
 
 ---
 

@@ -10,8 +10,21 @@
 > [Max Dama panel review QE-430..449](../backlog.md#review-r2); the
 > [admin-UI PreP3 design](../superpowers/specs/2026-07-02-admin-ui-training-backtest-design.md).
 
-`Area: server / wfo / signal / ingest / frontend (qe-server, qe-wfo, qe-run-protocol, qe-ingest, web)` ·
-`Depends on (hard): QE-260, QE-257, QE-259, QE-451, QE-452, QE-419, QE-407, QE-253`
+`Area: server / wfo / signal / ingest / frontend (qe-server, qe-wfo, qe-run-protocol, qe-ingest, qe-vintage, web)` ·
+`Depends on (hard): QE-260, QE-257, QE-259, QE-451, QE-452, QE-419, QE-407, QE-253, QE-430, QE-434, QE-431, QE-440, QE-437, QE-439, QE-117, QE-125`
+
+> **Panel re-review (2026-07-18, remediation).** A five-expert re-review against the Max Dama panel recs and
+> `docs/specs.md` found a load-bearing breach: **provenance + gate evidence were specified as *visible* (via the
+> inspector/leaderboard) but never *persisted* into the sealed `VintageContent`**, and several surfaces ranked or
+> returned data the engine never stores. The remediation adds a foundation ticket **QE-467** that persists the
+> full seal evidence + a canonical net-of-cost holdout return series (on the deployed capacity-capped weights) +
+> capacity/turnover + data-provenance into the sealed artefact in **one** `VINTAGE_FORMAT_VERSION` 7→8 bump, and
+> reshapes the holdout contract (§4: single consultation, regime-aware/walk-forward, overlap-keyed budget),
+> the steer knobs (§6: deflation-scaling + archive-coverage preservation), ingest (§8: as-of universe, real
+> calibration inputs, liquidity screen), and the leaderboard (§9: ranks on the *persisted* series, enforces the
+> consultation budget). Every newly-persisted detail is surfaced in the admin UI (inspector/flow/leaderboard/
+> MarketData). The QE-430..454 overfitting discipline is preserved throughout: steering cannot relax the gate,
+> the holdout stays frozen, the leaderboard is inspection not selection, and the seal stays authoritative.
 
 ---
 
@@ -89,6 +102,11 @@ design is therefore organised around **boundaries that are structural, not advis
 
 ### In scope
 
+- **A persistence foundation (QE-467)** — persist the full seal evidence (IC/FDR, cost-stress `min{1×,2×}` net,
+  realised turnover, `capacity_usd`), a **canonical net-of-cost holdout return series on the deployed
+  capacity-capped weights**, and a hashed **`data_provenance`** (+ holdout split/regime, consultation count,
+  steer delta) into the sealed `VintageContent`, in **one** `VINTAGE_FORMAT_VERSION` 7→8 bump (§4.1). Everything
+  downstream *reads* this; nothing recomputes it.
 - **Steerable search parameters** on `RunSpec::Train` + `validate_train`: search budget (generations /
   population), an **indicator subset** (which catalogue indicators and which evolved-pool formulas are in
   play), and window/fold configuration — all behind a **compiled gate-monotone whitelist** (§6).
@@ -139,22 +157,62 @@ slice. QE-455 makes it a **first-class, protected, recorded contract**:
 - **Carved once, by the server, for the whole flow.** `RunSpec::Flow` computes the holdout split from the flow
   spec *before* the train sub-run starts, and hands the *same* split to the backtest sub-run. Neither the
   operator's steer knobs nor a mid-flow resume can move it.
-- **The search cannot read it.** The holdout bars are excluded from every fold the MAP-Elites/DE search scores
-  on (already true for `train`); the composite additionally asserts the backtest sub-run's evaluation window
-  and the training folds are **disjoint** from the holdout, with the embargo enforced on both edges — reusing
-  the purge/embargo discipline of QE-113/117.
+- **The search cannot read it; the backtest IS the single consultation of it.** The holdout bars are excluded
+  from every fold the MAP-Elites/DE search scores on (already true for `train`), with the embargo enforced on
+  both edges (QE-113/117 purge/embargo). **The composite's backtest is the *single recorded consultation* of the
+  holdout — it re-surfaces the gate's holdout evaluation and confers NO independent deflation credit.** It is
+  *not* a second, disjoint OOS window: the earlier "backtest window disjoint from the holdout" framing was a
+  contradiction (a fresh OOS sample would be a second free look) and is **dropped**. The flow-backtest number is
+  the gate's holdout verdict re-surfaced, not new evidence.
+- **Regime-aware / walk-forward geometry — not a single trailing block.** The holdout is carved
+  **regime-stratified or as multi-fold walk-forward** (reusing QE-117 WFO windows + QE-125 regime labels),
+  asserting **≥ K regime labels** or **N non-contiguous embargoed folds**, so the verdict rides diverse regimes
+  including the mandated stress regime — not one lucky trailing window. If a single trailing holdout is kept for
+  v1, its window edge is **server-derived from the pinned input snapshot's right edge**, never operator-chosen.
+  The regime composition is recorded (QE-467).
 - **Frozen against steering.** The holdout size/embargo have **compiled floors**; `validate_train` /
   `validate_flow` reject a request that shrinks the holdout below the floor or zeroes the embargo. The holdout
   is **not** a steerable knob (§6).
-- **Recorded in lineage + seal evidence.** The `{holdout_bars, embargo_bars, holdout_range, train_range}` split
-  is written into `VintageContent.lineage` (`crates/vintage/src/lib.rs`) so the split is reproducible and
-  auditable from the sealed artefact — anyone can recompute which bars the verdict rode on. The Vintage
-  Inspector (§7) surfaces it.
-- **Consultation budgeting (dissent-flagged, §11).** A steered campaign can re-consult the *same* holdout many
-  times; that is silent multiple-testing at the campaign level. v1 **records** the holdout range + a
-  per-holdout consultation count in lineage so the exposure is visible; escalating the DSR threshold with
-  cumulative consultations (as QE-450 §5 "holdout-consultation budgeting" proposes) is a follow-up, not a v1
-  blocker — but the leaderboard must **not** be used to shop the holdout (§9).
+- **Recorded in lineage + seal evidence (via QE-467's single schema bump).** The `{holdout_range, embargo,
+  train_range}` split **and the holdout regime composition** are written into `VintageContent.lineage` (via
+  QE-467's persisted schema, `crates/vintage/src/lib.rs`) so the split is reproducible and auditable from the
+  sealed artefact — anyone can recompute which bars the verdict rode on. The Vintage Inspector (§7) surfaces it.
+- **Consultation budgeting — overlap-keyed, recorded, and enforced at the leaderboard (§11.3).** A steered
+  campaign can re-consult the *same* holdout many times; that is silent multiple-testing at the campaign level.
+  v1 **records** a per-holdout consultation count in lineage (QE-467) **keyed on holdout-bar OVERLAP** — any
+  sealed vintage whose holdout *intersects* this run's, or whose training window covers a prior holdout, not
+  exact range equality — so partial re-use is still counted (QE-460). Escalating the DSR threshold with
+  cumulative consultations (QE-450 §5) remains a documented follow-up, but the **leaderboard now enforces** the
+  budget: over-consulted vintages have their DSR bar greyed-out/escalated and no fresh cross-vintage selection
+  statistic is computed on holdout verdicts (§9). The leaderboard must **not** be used to shop the holdout.
+
+### 4.1 The persisted seal evidence (QE-467 — the foundation)
+
+**The remediation's load-bearing fix.** Every surface above (inspector §7, leaderboard §9, flow verdict §5)
+was specified to *read* provenance and gate evidence out of the sealed vintage — but that evidence is computed
+at gate time and **thrown away**: `GateSnapshot` (`crates/server/src/runs/model.rs:150`) lives on the run's
+`meta.json`, not the artefact; the tradability results (cost-stress, turnover, `capacity_usd`) from QE-431/440
+are not persisted; there is no per-vintage net-of-cost holdout series; and `VintageContent.lineage` (a bare
+`Lineage{config_hash,input_snapshot_id,code_commit,seeds}`, `crates/determinism/src/lineage.rs:26`) has no
+provenance field. **QE-467 persists it once, so downstream reads (never recomputes) it:**
+
+- **Full seal evidence into `VintageContent`** — IC/FDR (QE-434), cost-stress `min{1×,2×}` net (QE-431/450 §4.6),
+  realised turnover, and `capacity_usd` (QE-431/440), alongside the DSR/SPA/uncensored-PBO already on
+  `GateSnapshot`. Content-addressed (part of the hashed content).
+- **A canonical net-of-cost holdout return series on the DEPLOYED capacity-capped weights** (QE-438), persisted
+  per vintage and content-addressed — the exact series the leaderboard's cross-vintage correlation (QE-430
+  R(N)/Fisher-z) and the inspector consume. Never gross / equal-weight / lone-Sharpe.
+- **Hashed `data_provenance ∈ {real, synthetic, mixed}` + the extended lineage the flow needs** — the holdout
+  split `{holdout_range, embargo, train_range}`, the holdout **regime composition** (QE-125), a per-holdout
+  **consultation count** (overlap-keyed, QE-460), and the **steer delta** (indicator-subset hash + gens/pop +
+  window/fold counts, QE-458).
+- **Exactly one `VINTAGE_FORMAT_VERSION` 7→8 bump** (`crates/vintage/src/lib.rs:41`): QE-467 **owns** the schema
+  and the single bump; QE-458 (steer delta) and QE-460 (split/regime/consultation) **populate** the fields under
+  the same bump — nobody bumps twice. Goldens are regenerated via the **real seal path** (the bump moves them
+  intentionally, no unrelated hash drift) and the `== 7` assertion (`lib.rs:533`) becomes `== 8`; the QE-006
+  determinism harness stays green.
+
+QE-467 is the **R1 foundation and lands first** (§12): the inspector/leaderboard/flow all read from it.
 
 ---
 
@@ -223,6 +281,29 @@ never *what passes the gate.* The mechanism is a **compiled whitelist of gate-mo
 | **Indicator subset** — catalogue-indicator inclusion + evolved-pool-formula inclusion | new `TrainParams` field | Restricts/expands the feature set the search may reference. Fewer indicators = a *smaller* hypothesis space (strictly safer); more = counted in N. The evolved pool is consumed **only if already sealed** (QE-451/452); inclusion cannot un-seal or re-deflate it. |
 | **Windows / folds** — number & length of WFO windows/folds | new `TrainParams` field | More/longer windows raise `T_eff` and make CV *harder to pass*, not easier. Purge/embargo sizing is derived from indicator lookback (`cv.rs`), **not** operator-set (§4), so a window knob cannot shrink the embargo. |
 | **Seed** | `TrainParams.seed` (exists) | Reproducibility only; changes the RNG stream, not any threshold. |
+
+### 6.1a Deflation-scaling, cardinality→N, and archive-coverage preservation (remediation)
+
+Plain monotonicity ("a knob can't move reject→seal") was necessary but not sufficient. The re-review hardened
+the steer contract (QE-458):
+
+- **Indicator-subset cardinality enters the trial basis.** The available-feature-space size — catalogue-indicator
+  count **plus** included evolved-pool-formula count — feeds the distinct-trial `N` / `E[maxSharpe]`. QE-439's
+  effective-trials computation is extended to **ingest the available-feature-space size**, not only
+  gens × windows × niches: referencing more indicators means a larger hypothesis space, deflated accordingly.
+- **Deflation-scaling property.** As subset cardinality / budget rise, the recorded `N` and the deflation bar are
+  **non-decreasing** (steering more only *raises* the bar), and a **false-discovery test on pure-noise series**
+  asserts a larger subset does **not** raise the seal rate. Both are merge gates; the plain reject→seal sweep
+  (§6.3) is the base case.
+- **Archive-coverage preservation (the QD mandate).** Archive coverage (occupied niches / descriptor-space) is
+  recorded **pre/post steer**; a **minimum-occupied-niches floor** stops steering from flattening the MAP-Elites
+  archive (`specs.md`'s quality-diversity mandate). Coverage collapse is surfaced (in the steering UI, §7-adjacent
+  QE-459), never hidden.
+- **Regime coverage invariant to steering.** Window/fold knobs cannot shrink the total OOS span below a floor or
+  exclude the mandated stress regime (`validate_train` `400`s otherwise) — the same regime discipline §4 puts on
+  the holdout.
+- **Steer delta recorded.** The applied steer (subset hash + gens/pop + window/fold counts) is written into
+  `VintageContent.lineage` via QE-467's schema, so the leaderboard (§9) can diff the frontier.
 
 ### 6.2 The blocklist (NOT steerable — compiled floors, `validate_*` rejects)
 
@@ -296,31 +377,62 @@ and the CLI `run_ingest` is written against the injectable `HistoricalSource` se
 (`crates/cli/src/jobs/ingest.rs:50`). QE-463 fills in **one** exchange decoder (Binance USDT-M klines +
 funding), reusing the existing planner/reconciliation (QE-101..103):
 
-- **Incremental / resumable** — fetch only the missing periods vs what the store already covers
-  (`coverage_bounds`, `crates/storage/src/coverage.rs`); a re-run after interruption continues, not restarts.
+- **Real calibration inputs or an honest `uncalibrated` tag.** The QE-431/440 slippage/impact/ADV calibration
+  needs real inputs: QE-463 either fetches **trade/quote (aggTrade) + premium-index** so the calibration is
+  measured, OR a klines-only real vintage records `calibration.source = uncalibrated/default` (surfaced in the
+  inspector) — never a default number read as measured. (`run_ingest` currently *discards*
+  `open_interest`/`mark_price`; that is flagged.)
+- **Closed windows only** — fetch only closed bars/funding intervals (exclude the forming right-edge bar and the
+  in-progress funding interval), so idempotency is real and re-fetch does not mask upstream revisions.
+- **Incremental / resumable + internal-gap detection** — fetch only the missing periods vs what the store
+  already covers (`coverage_bounds`, `crates/storage/src/coverage.rs`); a re-run after interruption continues,
+  not restarts; and gaps **within** `[first,last]` (a bar-count / missing-key scan) are detected and back-filled,
+  not just edge-extended.
 - **Idempotent** — re-fetching a covered period is a no-op (same bars, byte-identical), so retries are safe.
-- **Default-off** — all real-network code stays behind `#[cfg(feature = "http")]`; the default build and CI
-  remain offline (the `--synthetic` path and in-memory test sources are untouched).
+- **Default-off, no new TLS deps** — all real-network code stays behind `#[cfg(feature = "http")]`; the default
+  build and CI remain offline (the `--synthetic` path and in-memory test sources are untouched); the `ureq`
+  feature set adds no `ring`/`rsa`/rustls transitive dependency.
 
 ### 8.2 The trigger + provenance (QE-464 — run-kind + endpoint)
 
 - **An `ingest` run-kind** (`RunSpec::Ingest(IngestParams)`) + **`POST /api/ingest`** trigger: instruments,
-  date range, resolution, and a **"fetch all available instruments"** option resolved from the exchange's
-  instrument-list endpoint. Supervised like other runs (run store, subprocess, terminal `done` line via
-  `qe-run-protocol` — there is already an `ingest` `done`-line writer, `crates/run-protocol/src/lib.rs:212`).
+  date range, resolution, and a **"fetch all available instruments"** option (see §8.4 — routed through the
+  point-in-time universe machinery, not an open-ended dump). Supervised like other runs (run store, subprocess,
+  terminal `done` line via `qe-run-protocol` — there is already an `ingest` `done`-line writer,
+  `crates/run-protocol/src/lib.rs:212`); **no `PROTOCOL_VERSION` bump** (the `done`-line already exists), and no
+  `input_snapshot_id` drift for already-ingested data.
 - **Real-vs-synthetic provenance is the headline requirement.** Today `CoverageRow`
   (`crates/storage/src/coverage.rs:22`) carries `{symbol, resolution, from, to, bars}` with **no source
-  marker**, and `--synthetic` only warns at the CLI. QE-464 records a **provenance tag (`real` | `synthetic`)
-  on the stored data + coverage** so the store itself knows the origin of every bar — nobody can train on
-  synthetic bars believing they are real. Mixed-provenance coverage is surfaced explicitly (interleaved real +
-  synthetic is allowed by design, but always *labelled*).
+  marker**, and `--synthetic` only warns at the CLI. QE-464 records a **provenance tag (`real` | `synthetic`) on
+  the stored data + coverage** (stored key-scannably so coverage stays key-only per QE-412) **and threads
+  `data_provenance` into `VintageContent.lineage` via QE-467** — so both the store and the sealed vintage know
+  the origin of every bar, and a synthetic/mixed input store yields a vintage **marked** synthetic-/mixed-derived,
+  never silently "real". Mixed-provenance coverage is written as **multiple contiguous rows, one per provenance
+  run** (interleaved real + synthetic is allowed by design, but always *labelled*, never blended into one row).
 
 ### 8.3 The SPA (QE-465)
 
 An ingest-trigger screen (instruments / date range / fetch-all) and a **provenance column** in the existing
-MarketData view (`web/src/app/MarketData.tsx`) so coverage rows show `real` vs `synthetic` at a glance.
+MarketData view (`web/src/app/MarketData.tsx`) so coverage rows show `real` vs `synthetic` at a glance —
+mixed provenance rendering as row-per-provenance-run or a `mixed` badge with drill-down (component-tested for the
+interleaved case), plus **per-page/percentage progress and a cancel affordance** for the long real ingest (the
+`HistoricalSource::fetch() → one window` seam may need a streaming/paged change to emit incremental progress).
 
-### 8.4 Honesty about scope (§11)
+### 8.4 As-of universe for fetch-all + the liquidity screen (remediation)
+
+"Fetch all available instruments" is exactly where survivorship bias and the capacity mirage sneak in. QE-464:
+
+- **Routes fetch-all through the existing point-in-time universe machinery** — `crates/config/src/universe.rs`
+  `InstrumentListing{listed,delisted}` + `crates/ingest/src/plan.rs::overlaps()` — mapping the exchange's
+  listing/delisting dates onto listing windows and writing the **resolved as-of instrument set** into
+  coverage/lineage, so an as-of-date backtest **excludes not-yet-listed / already-delisted instruments**
+  (survivorship kill, QE-448). If listing dates are unavailable in v1, fetch-all is **flagged
+  `survivorship-unsafe`**, not silently open-ended.
+- **Applies a liquidity screen** — capacity-eligibility requires **per-instrument rolling-ADV/impact calibration
+  (QE-440)**; the major-calibrated `$250k` floor is a mirage on thin alts, so thin names (below the `%ADV`
+  participation guard, QE-447) are flagged/excluded rather than admitted at the major floor.
+
+### 8.5 Honesty about scope (§11)
 
 Real ingest is the ticket most likely to slip: rate limits, pagination, funding-vs-kline cadence alignment,
 exchange API drift, and **data-licence reality** (redistribution terms differ from the public-dumps path
@@ -336,22 +448,29 @@ non-negotiable part; the breadth is explicitly minimal.
 can *see* which sealed the best tradable strategy and how steer/params differed — but it must **not** become
 the outer best-of-N selector §3 rejects.
 
-- **Ranks on the tradable, deflation-honest metrics only:** **net-of-cost** performance (never gross Sharpe —
-  the QE-450 §13.5 inversion), **capacity-at-size** (`VintageContent` capacity/`sizer`, QE-128/433), and
-  **cross-vintage correlation** (are these vintages actually diverse, or the same bet re-drawn?). Gross Sharpe
-  and in-sample metrics are demoted or absent.
-- **Plus steer/param diffs** — which indicator subset, budget, windows produced each vintage, so the operator
-  can *understand* the frontier, not *auto-pick* off it.
+- **Ranks on the PERSISTED, tradable, deflation-honest metrics only** (all read from QE-467's sealed evidence,
+  never recomputed): **net-of-cost** performance from the **persisted net-of-cost holdout return series on the
+  DEPLOYED capacity-capped weights** (QE-467/438 — never gross Sharpe, equal-weight, or lone Sharpe, the QE-450
+  §13.5 inversion), **capacity-at-size** (`capacity_usd`, QE-467/QE-128/433) and **realised turnover** (QE-467),
+  and **cross-vintage correlation** over the persisted series with **QE-430 R(N)/Fisher-z sample-size deflation,
+  surfacing the effective N** (are these vintages diverse, or the same bet re-drawn?). Gross Sharpe and in-sample
+  metrics are absent.
+- **Plus steer/param diffs** — the QE-467-recorded steer delta (indicator subset, budget, windows) per vintage,
+  so the operator can *understand* the frontier, not *auto-pick* off it.
 - **Structurally not a selector.** The leaderboard is a read-only view over already-sealed vintages; it exposes
   **no "promote"/"select-best" action**. Promotion to a runtime vintage stays through the *existing per-run G1
-  gate + seal* — each vintage already passed its own honest gate; ranking them does not confer any additional
-  blessing. The AC (QE-466) explicitly asserts the leaderboard adds no endpoint that seals/promotes/selects,
-  and does not feed any automated re-run loop.
-- **Holdout-shopping guard.** Because ranking many vintages on their holdout verdicts is exactly the
-  multiple-testing the §4 consultation budget is about, the leaderboard surfaces each vintage's
-  **holdout-consultation exposure** rather than hiding it, and carries a standing caveat that cross-vintage
-  ranking is *inspection*, and that acting on it by re-running until the top slot improves is the rejected
-  best-of-N pattern.
+  gate + seal* — each vintage already passed its own honest gate; ranking them confers no additional blessing,
+  and every vintage carries the **"backtest-holdout only — not paper-confirmed"** label (promotion still owes the
+  G2/G3 live/shadow gates). The AC (QE-466) asserts the leaderboard adds no endpoint that seals/promotes/selects
+  and feeds no automated re-run loop.
+- **Holdout-shopping guard — enforced, not just displayed.** Because ranking many vintages on their holdout
+  verdicts is exactly the multiple-testing the §4 consultation budget is about, the leaderboard **enforces** the
+  budget: it surfaces each vintage's overlap-keyed holdout-consultation exposure AND **greys-out / escalates the
+  DSR bar on over-consulted vintages** so the top slot cannot be "improved" by re-runs. It picks one posture and
+  states it: EITHER a **max-statistic / SPA correction across the displayed set**, OR **rank only on each
+  vintage's own already-deflated evidence with no fresh cross-vintage selection statistic on holdout verdicts**.
+  A standing caveat states cross-vintage ranking is *inspection*, and that re-running until the top slot improves
+  is the rejected best-of-N pattern.
 
 ---
 
@@ -366,7 +485,9 @@ the outer best-of-N selector §3 rejects.
 | **Determinism / reproducibility** (QE-006) | Flow `seed` + pinned `input_snapshot_id` reproduce the vintage byte-identically; the deterministic vintage-id (content hash) handoff is exact; ingest is idempotent. |
 | **Net-of-cost truth** (QE-109) | Every ranked/inspected number is net-of-cost; the leaderboard forbids gross Sharpe; the inspector leads with cost-stress/turnover/capacity. |
 | **Provenance honesty** | Every stored bar is tagged `real`/`synthetic` on the store + coverage; mixed coverage is labelled, never silently blended (§8). |
-| **Run lifecycle** | The 4-state `RunStatus` and the seal predicate are unchanged; flow resume/halt are supervision concerns that never leak a new status into the gate/vintage path (§5.3). |
+| **Run lifecycle** | The 4-state `RunStatus` and the seal predicate are unchanged; flow resume/halt are supervision concerns that never leak a new status into the gate/vintage path — `halt` reuses `Failed` + a halt reason, not a 5th variant (§5.3). |
+| **Persisted evidence is authoritative** | QE-467 persists the seal evidence + net-of-cost holdout series + capacity/turnover + `data_provenance` into `VintageContent` in one `VINTAGE_FORMAT_VERSION` 7→8 bump; every downstream surface *reads* it, none recomputes it (§4.1). Goldens move only by the intended bump (real seal path), no unrelated hash drift. |
+| **Every persisted detail is surfaced in the admin UI** | The provenance banner + gate/deflation evidence + holdout regime composition land in the Vintage Inspector (QE-457); holdout/regime chips + not-paper-confirmed in the Flow page (QE-462); the persisted net-of-cost/capacity/correlation + enforced consultation budget in the leaderboard (QE-466); provenance + progress/cancel in MarketData (QE-465). Nothing persisted is invisible to the operator. |
 
 ---
 
@@ -379,11 +500,14 @@ The panel did not agree on everything; dissents are recorded honestly.
 | 1 | **Steering becomes a covert best-of-N.** An operator runs 50 steered flows and picks the top leaderboard slot — the exact uncounted multiple-testing the backbone kills. | **blocker** | The outer loop / auto-selector is rejected in code (§3, §9): no promote/select action, no automated re-run, holdout-consultation exposure surfaced. The panel's *dominant* concern; the boundary is structural, not a guideline. |
 | 2 | **A steer knob quietly relaxes G1.** A future knob (e.g. "let me lower the cost multiplier just for research") is added to the whitelist without the monotonicity proof. | **blocker** | The whitelist is compiled + the gate-monotonicity test (QE-458) is a merge gate; the blocklist floors are enforced in `validate_*`. A knob without a passing monotonicity test is not admitted. |
 | 3 | **Holdout consultation budget (unresolved dissent).** QR#1 wanted the DSR threshold to escalate with cumulative holdout consultations *in v1*; SRE/SSE argued recording-and-surfacing is enough for a single-operator research tool and escalation is a follow-up. | major | **Resolution:** v1 **records + surfaces** the consultation count (§4, §9); threshold escalation is a documented follow-up (QE-450 §5 "holdout-consultation budgeting"). Dissent preserved. |
-| 4 | **Real ingest is a much bigger lift than the rest** — network, pagination, rate limits, funding/kline cadence, API drift, and **data-licence/redistribution reality** differ from the public-dumps path. | major | Scope to **one exchange, few instruments, USDT-M perps, historical only**, behind default-off `http`; provenance marker non-negotiable, breadth explicitly minimal (§8.4). Honestly the long pole — sequence it last (R3). |
+| 4 | **Real ingest is a much bigger lift than the rest** — network, pagination, rate limits, funding/kline cadence, API drift, and **data-licence/redistribution reality** differ from the public-dumps path. | major | Scope to **one exchange, few instruments, USDT-M perps, historical only**, behind default-off `http`; provenance marker non-negotiable, breadth explicitly minimal (§8.5). Honestly the long pole — sequence it last (R3). |
 | 5 | **Provenance blind spot** — someone trains on synthetic bars thinking they are real. | major | `real`/`synthetic` tag on store + coverage (QE-464); mixed coverage labelled; SPA provenance column (QE-465). The one part of ingest with no scope-down. |
 | 6 | **Flow resume corrupts determinism** — a resumed backtest rides a different seed/holdout than the sealed vintage. | major | Resume only from the *sealed-vintage* checkpoint (content-addressed); the holdout split is carved once and recorded in lineage; re-run from seed + snapshot is byte-identical (§5.2/5.3). |
 | 7 | **Inspector leaks a promote path** — a "looks good, promote it" button re-introduces selection outside the gate. | minor | Inspector is read-only (§7.2); the leaderboard exposes no select/promote (§9); promotion stays via the existing seal. |
 | 8 | **Composite starves interactive work** — a multi-hour flow blocks backtests. | minor | Dedicated flow concurrency lane (semaphore, default 1) + per-flow deadline, reusing the `evolve` supervision pattern (§5.2). |
+| 9 | **Provenance/evidence specified as visible but never persisted (the remediation trigger).** The inspector/leaderboard/flow were to *read* gate evidence, a net-of-cost holdout series, capacity/turnover and data-provenance out of the sealed vintage — but none was carried into `VintageContent`; downstream surfaces would have to *recompute* it, re-opening the deflation basis. | **blocker** | **QE-467** persists all of it once, in a single `VINTAGE_FORMAT_VERSION` 7→8 bump (§4.1); every downstream ticket reads, never recomputes. |
+| 10 | **A "backtest disjoint from holdout" second free look.** The flow originally claimed the backtest window was disjoint from the holdout — a fresh OOS sample = a second uncounted look. | major | Collapsed: the backtest **is** the single recorded holdout consultation (no independent deflation credit); the holdout is regime-aware/walk-forward; the consultation budget is overlap-keyed and enforced at the leaderboard (§4/§9). |
+| 11 | **Capacity/survivorship mirage on fetch-all.** "Fetch all" as an open-ended dump admits delisted names (survivorship) and thin alts at a major-calibrated capacity floor. | major | Fetch-all routes through the as-of universe machinery (`InstrumentListing`/`overlaps()`, survivorship kill QE-448) and a liquidity screen (per-instrument ADV/impact, QE-440/447); unavailable listing dates → flagged `survivorship-unsafe` (§8.4). |
 
 ---
 
@@ -394,20 +518,30 @@ deflation discipline intact.
 
 | Phase | Goal | Tickets | Nature |
 |---|---|---|---|
-| **R1 — Inspect & steer (no engine change)** | Give `train` the inspection `evolve` has; expose the gate-monotone steer knobs; add the informational leaderboard. | **QE-456** (`/api/vintages/{id}`), **QE-457** (Vintage Inspector), **QE-458** (steer params + whitelist guardrail + monotonicity test), **QE-459** (SPA steering controls), **QE-466** (leaderboard) | Additive. Read endpoints, a validated param block, SPA screens. No engine/gate change. |
+| **R1 — Persist, inspect & steer** | **First persist the evidence (QE-467, the foundation)**, then give `train` the inspection `evolve` has; expose the gate-monotone steer knobs; add the informational leaderboard. | **QE-467** (persist seal evidence + net-of-cost holdout series + provenance; single `VINTAGE_FORMAT_VERSION` 7→8 bump) **← lands first**, then **QE-456** (`/api/vintages/{id}`), **QE-457** (Vintage Inspector), **QE-458** (steer params + whitelist + deflation-scaling + monotonicity test), **QE-459** (SPA steering controls), **QE-466** (leaderboard) | QE-467 is the one schema/version bump; everything else reads it. Additive read endpoints, a validated param block, SPA screens. No gate change. |
 | **R2 — Composite flow** | Train→backtest as one supervised, atomic, resumable lifecycle with the frozen holdout carved once. | **QE-460** (`RunSpec::Flow` + holdout carve/record), **QE-461** (flow supervision: lane + resume/halt), **QE-462** (SPA stepped Flow page) | New composite run-kind + supervision; reuses the existing train/backtest sub-jobs and the QE-407 registry. |
-| **R3 — Real-data ingest (the long pole)** | Train on real exchange data with visible provenance, alongside synthetic. | **QE-463** (`http` Binance decoder), **QE-464** (`ingest` run-kind + `POST /api/ingest` + provenance), **QE-465** (SPA ingest trigger + provenance column) | The big lift: real network + provenance. Behind default-off `http`; scope-minimal (§8.4). |
+| **R3 — Real-data ingest (the long pole)** | Train on real exchange data with visible provenance, alongside synthetic. | **QE-463** (`http` Binance decoder), **QE-464** (`ingest` run-kind + `POST /api/ingest` + provenance), **QE-465** (SPA ingest trigger + provenance column) | The big lift: real network + provenance. Behind default-off `http`; scope-minimal (§8.5). |
 
-Dependency spine (all cited ids verified present in the repo): the inspector rides QE-257/259/260; the steer
-work rides QE-260/437/451; the flow rides QE-452/419/407; ingest rides QE-253; every ticket that touches the
-search/flow/leaderboard carries the §6/§4/§9 guardrails in its AC.
+Dependency spine (all cited ids verified present in the repo): the **QE-467 foundation** rides
+QE-260/434/431/440/430/437/439 (the gate evidence + capacity/ADV + correlation/PBO/DSR basis it persists); the
+inspector rides QE-467/456/257/259/260; the steer work rides QE-467/260/437/439/451; the flow rides
+QE-467/452/419/458/117/125; the leaderboard rides QE-467/460/456/457/430; ingest rides QE-253/467/440; every
+ticket that touches the search/flow/leaderboard carries the §6/§4/§9 guardrails in its AC, and every
+newly-persisted detail is surfaced in the admin UI (QE-457/459/462/465/466).
 
 ---
 
 ## 13. Acceptance criteria (design-level)
 
+0. **The evidence is persisted, once** — QE-467 carries the full seal evidence (IC/FDR, cost-stress `min{1×,2×}`
+   net, turnover, `capacity_usd`), a canonical net-of-cost holdout series on the deployed capacity-capped
+   weights, and hashed `data_provenance` (+ holdout split/regime, consultation count, steer delta) into
+   `VintageContent` in a single `VINTAGE_FORMAT_VERSION` 7→8 bump; goldens regenerate via the real seal path with
+   no unrelated hash drift; every downstream surface reads it, none recomputes it.
 1. **No steered run can seal a vintage the un-steered gate rejects** — the gate-monotonicity sweep (QE-458)
-   passes for every whitelisted knob across its full range on a fixed reject-seed dataset.
+   passes for every whitelisted knob across its full range on a fixed reject-seed dataset, and the
+   deflation-scaling + noise-series false-discovery tests hold (subset cardinality feeds N; a bigger subset never
+   raises the seal rate).
 2. **The blocklist is enforced server-side** — `validate_train`/`validate_flow` reject (`400`) any request that
    sets a cost-stress / turnover / capacity / DSR-PBO / holdout-embargo value below its compiled floor; a
    crafted `POST` cannot relax a gate threshold.
