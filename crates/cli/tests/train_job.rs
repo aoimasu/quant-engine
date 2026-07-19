@@ -76,6 +76,10 @@ fn params(store_path: PathBuf, vintage_root: PathBuf, seed: u64) -> TrainParams 
         seed_weighting: qe_ensemble::SeedWeighting::Equal,
         lineage: lineage(seed),
         profile: "train".to_owned(),
+        // Un-steered by default (byte-identical to the pre-QE-458 seal).
+        indicator_subset: None,
+        windows: None,
+        folds: None,
     }
 }
 
@@ -385,5 +389,130 @@ fn no_funding_window_trips_coverage_gate_and_seals_nothing() {
     assert!(
         !sealed_any,
         "no vintage may be written when the funding gate fails"
+    );
+}
+
+// ---- QE-458 steered-search live-path wiring (cardinality→N, steer delta, coverage floor) -------------
+
+/// A steered params over the fixture: the indicator subset is the FULL catalogue in catalogue order, so
+/// the search draw sequence is byte-identical to the un-steered run (a full allowlist in order collapses
+/// `allowed[below(rng,len)]` back to `below(rng,len)`) — isolating the steer's effect to the recorded
+/// trial basis `N` and the steer delta, which makes the assertions exact.
+fn steered_full_catalogue_params(
+    store_path: PathBuf,
+    vintage_root: PathBuf,
+    seed: u64,
+) -> TrainParams {
+    let ids: Vec<String> = catalogue_schema().ids().to_vec();
+    TrainParams {
+        indicator_subset: Some(ids),
+        ..params(store_path, vintage_root, seed)
+    }
+}
+
+#[test]
+fn steered_run_records_steer_delta_raises_the_trial_basis_and_stays_golden_for_unsteered() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store_path = copy_store_to(tmp.path());
+
+    // Un-steered run (the golden path).
+    let un_root = tmp.path().join("artifacts/unsteered");
+    let un = run_train_job(
+        &params(store_path.clone(), un_root.clone(), 42),
+        &mut |_| {},
+    )
+    .expect("un-steered train runs");
+    let un_v = VintageRepository::new(&un_root)
+        .load(&un.vintage_id)
+        .unwrap();
+
+    // Steered run (full-catalogue subset ⇒ identical search, isolating the steer effect).
+    let st_root = tmp.path().join("artifacts/steered");
+    let st = run_train_job(
+        &steered_full_catalogue_params(store_path.clone(), st_root.clone(), 42),
+        &mut |_| {},
+    )
+    .expect("steered train runs (coverage floor cleared)");
+    let st_v = VintageRepository::new(&st_root)
+        .load(&st.vintage_id)
+        .unwrap();
+
+    // (e) The un-steered vintage records NO steer delta; the steered one records the applied delta with the
+    // subset hash over the catalogue in play + the real budget/window/fold counts.
+    assert!(
+        un_v.content.provenance.steer_delta.is_none(),
+        "an un-steered run must not record a steer delta (byte-identical provenance)"
+    );
+    let delta = st_v
+        .content
+        .provenance
+        .steer_delta
+        .clone()
+        .expect("a steered run must record a steer delta");
+    let full_ids: Vec<String> = catalogue_schema().ids().to_vec();
+    assert_eq!(
+        delta.indicator_subset_hash,
+        qe_vintage::SteerDelta::subset_hash(&full_ids, &[]),
+        "the recorded subset hash must be the hash of the catalogue in play"
+    );
+    assert_eq!(delta.generations, 4);
+    assert_eq!(delta.windows, 2); // un-steered windows default
+    assert_eq!(delta.folds, 2); // == cv_folds when --folds is not set
+
+    // (a) Cardinality feeds the LIVE trial basis: the steered run's recorded N is strictly greater than the
+    // equivalent un-steered run's (multiplied by the available-feature-space size), and >= it (monotone).
+    let un_n = un_v.content.seal_evidence.n_trials;
+    let st_n = st_v.content.seal_evidence.n_trials;
+    assert!(
+        st_n > un_n,
+        "steered N ({st_n}) must exceed un-steered N ({un_n}) — cardinality feeds N live"
+    );
+
+    // The steer changes the sealed artefact (steer delta + N) but NOT the lineage id (same seed/config).
+    assert_eq!(
+        st.vintage_id, un.vintage_id,
+        "the vintage id is the lineage id — independent of the steer"
+    );
+    assert_ne!(
+        st_v.content_hash, un_v.content_hash,
+        "the steered vintage must be a distinct content-addressed artefact"
+    );
+
+    // Golden stability: a second un-steered run reproduces the un-steered content hash byte-for-byte.
+    let un_root2 = tmp.path().join("artifacts/unsteered2");
+    let un2 = run_train_job(&params(store_path, un_root2.clone(), 42), &mut |_| {})
+        .expect("un-steered train re-runs");
+    let un2_v = VintageRepository::new(&un_root2)
+        .load(&un2.vintage_id)
+        .unwrap();
+    assert_eq!(
+        un2_v.content_hash, un_v.content_hash,
+        "the un-steered seal must be deterministic / byte-identical (golden unchanged)"
+    );
+}
+
+#[test]
+fn steered_run_with_an_unknown_indicator_errors_rather_than_running_unsteered() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store_path = copy_store_to(tmp.path());
+    let vintage_root = tmp.path().join("artifacts/vintages");
+
+    let bad = TrainParams {
+        indicator_subset: Some(vec!["not_a_real_indicator".to_owned()]),
+        ..params(store_path, vintage_root.clone(), 42)
+    };
+    let err = run_train_job(&bad, &mut |_| {}).expect_err("an unknown indicator must error");
+    assert!(
+        matches!(err, RunError::UnknownIndicator { ref id } if id == "not_a_real_indicator"),
+        "a misnamed steer indicator must be rejected, not silently run over the full catalogue: {err:?}"
+    );
+    // Nothing was sealed.
+    let sealed_any = vintage_root.exists()
+        && std::fs::read_dir(&vintage_root)
+            .map(|mut d| d.next().is_some())
+            .unwrap_or(false);
+    assert!(
+        !sealed_any,
+        "no vintage may be sealed for an unknown-indicator steer"
     );
 }

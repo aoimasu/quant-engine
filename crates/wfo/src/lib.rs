@@ -116,7 +116,8 @@ pub use thompson::{
     NichePrior, ThompsonParentSelector, DEFAULT_OBS_VAR, DEFAULT_PRIOR_MEAN, DEFAULT_PRIOR_VAR,
 };
 pub use variation::{
-    explore, fresh_random, local_refine, StepReport, VariationDriver, LOCAL_SIZE_STEP,
+    explore, explore_masked, fresh_random, fresh_random_masked, local_refine, StepReport,
+    VariationDriver, LOCAL_SIZE_STEP,
 };
 pub use walkforward::{WalkForward, Window, WindowMode};
 

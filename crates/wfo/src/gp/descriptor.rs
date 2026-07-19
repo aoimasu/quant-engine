@@ -178,6 +178,14 @@ mod tests {
     }
 
     #[test]
+    fn descriptor_space_matches_the_steer_guardrail_mirror() {
+        // QE-458: `qe_validation::steer::DESCRIPTOR_SPACE_CELLS` is a documented mirror of `EXPR_CELLS`
+        // (qe-wfo depends on qe-validation, never the reverse). Pin them together so an archive-grid change
+        // cannot silently drift the archive-coverage floor's descriptor-space size.
+        assert_eq!(EXPR_CELLS, qe_validation::steer::DESCRIPTOR_SPACE_CELLS);
+    }
+
+    #[test]
     fn family_classifier_is_structural_and_never_flow() {
         // Volume-dominant → Volume.
         assert_eq!(

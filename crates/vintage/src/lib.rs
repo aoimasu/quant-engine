@@ -181,6 +181,50 @@ pub struct SteerDelta {
     pub folds: u64,
 }
 
+impl SteerDelta {
+    /// The SHA-256 (64 lowercase hex) **order-independent set hash** of the steered indicator subset —
+    /// the catalogue-indicator ids in play plus any included evolved-formula hashes, sorted + deduped so
+    /// the hash is a stable set identity regardless of listing order. The single source of truth both the
+    /// server (`validate`/record) and the CLI seal path address the steered feature space by (QE-458).
+    #[must_use]
+    pub fn subset_hash(catalogue_ids: &[String], evolved_formula_hashes: &[String]) -> String {
+        let mut items: Vec<String> = catalogue_ids
+            .iter()
+            .map(|s| format!("cat:{s}"))
+            .chain(evolved_formula_hashes.iter().map(|s| format!("evo:{s}")))
+            .collect();
+        items.sort();
+        items.dedup();
+        let mut hasher = Sha256::new();
+        for item in items {
+            hasher.update(item.as_bytes());
+            hasher.update([0u8]); // length-safe separator
+        }
+        hex(&hasher.finalize())
+    }
+
+    /// Build the recorded steer delta from the applied steer knobs (QE-458 populates QE-467's schema):
+    /// the [`subset_hash`](Self::subset_hash) over the feature space in play plus the budget / window /
+    /// fold counts the steered search actually ran.
+    #[must_use]
+    pub fn from_parts(
+        catalogue_ids: &[String],
+        evolved_formula_hashes: &[String],
+        generations: u64,
+        population: u64,
+        windows: u64,
+        folds: u64,
+    ) -> Self {
+        SteerDelta {
+            indicator_subset_hash: Self::subset_hash(catalogue_ids, evolved_formula_hashes),
+            generations,
+            population,
+            windows,
+            folds,
+        }
+    }
+}
+
 /// The **extended lineage / provenance block** (QE-467) riding the sealed vintage alongside the resolvable
 /// [`Lineage`] — the "sibling lineage block on `VintageContent`" the ticket permits (so the widely-shared
 /// `qe_determinism::Lineage` stays untouched). Part of the hashed content, so `data_provenance` and every

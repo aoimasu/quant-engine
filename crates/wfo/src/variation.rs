@@ -49,6 +49,21 @@ fn flip(rng: &mut impl RngCore) -> bool {
     rng.next_u64() & 1 == 0
 }
 
+/// Pick a clause `feature` index. With an **empty** `allowed` allowlist this is the historical
+/// `below(rng, len)` — byte-identical to the un-steered search. With a **non-empty** allowlist (QE-458
+/// steered search over a restricted catalogue subset) it draws uniformly from the allowed feature indices.
+/// It consumes exactly **one** rng draw either way, so gating on the allowlist never shifts an un-steered
+/// run's deterministic draw sequence (the sealed golden vintage stays byte-identical). The allowed indices
+/// are valid indices into the full-width schema, so `Genome::repair` never re-points them and the search
+/// stays leak-free — a disallowed feature can never appear in any clause.
+fn pick_feature(rng: &mut impl RngCore, len: usize, allowed: &[u16]) -> u16 {
+    if allowed.is_empty() {
+        below(rng, len.max(1) as u64) as u16
+    } else {
+        allowed[below(rng, allowed.len() as u64) as usize]
+    }
+}
+
 /// A random `[lo, hi]` band within `0..num_states` (inclusive, `lo ≤ hi`).
 fn random_band(rng: &mut impl RngCore, num_states: u16) -> (u16, u16) {
     let n = num_states.max(1) as u64;
@@ -61,8 +76,9 @@ fn random_band(rng: &mut impl RngCore, num_states: u16) -> (u16, u16) {
     }
 }
 
-/// A random rule bank with at least clause 0 enabled (so the bank has a descriptor).
-fn random_bank<R: RngCore>(rng: &mut R, len: usize, num_states: u16) -> RuleSet {
+/// A random rule bank with at least clause 0 enabled (so the bank has a descriptor). `allowed` restricts
+/// which feature indices clauses may reference (empty ⇒ the full catalogue — see [`pick_feature`]).
+fn random_bank<R: RngCore>(rng: &mut R, len: usize, num_states: u16, allowed: &[u16]) -> RuleSet {
     let mut clauses = [Clause {
         enabled: false,
         feature: 0,
@@ -73,7 +89,7 @@ fn random_bank<R: RngCore>(rng: &mut R, len: usize, num_states: u16) -> RuleSet 
         let (lo, hi) = random_band(rng, num_states);
         *slot = Clause {
             enabled: i == 0 || flip(rng),
-            feature: below(rng, len.max(1) as u64) as u16,
+            feature: pick_feature(rng, len, allowed),
             lo,
             hi,
         };
@@ -86,12 +102,22 @@ fn random_bank<R: RngCore>(rng: &mut R, len: usize, num_states: u16) -> RuleSet 
 
 /// **Maximal exploration:** a brand-new random genome (no parent), repaired onto the validity manifold.
 pub fn fresh_random<R: RngCore>(rng: &mut R, schema: &FeatureSchema) -> Genome {
+    fresh_random_masked(rng, schema, &[])
+}
+
+/// [`fresh_random`] restricted to the `allowed` catalogue-feature allowlist (QE-458 steered search).
+/// `allowed` empty ⇒ identical to [`fresh_random`].
+pub fn fresh_random_masked<R: RngCore>(
+    rng: &mut R,
+    schema: &FeatureSchema,
+    allowed: &[u16],
+) -> Genome {
     let len = schema.len();
     let num_states = schema.num_states();
     let mut g = Genome {
         version: crate::genome::REP_VERSION,
-        long_entry: random_bank(rng, len, num_states),
-        short_entry: random_bank(rng, len, num_states),
+        long_entry: random_bank(rng, len, num_states, allowed),
+        short_entry: random_bank(rng, len, num_states, allowed),
         exit: ExitParams {
             max_holding_bars: (below(rng, MAX_RANDOM_HOLDING) as u16) + 1,
             exit_on_opposite: flip(rng),
@@ -156,6 +182,17 @@ pub fn local_refine<R: RngCore>(parent: &Genome, rng: &mut R, schema: &FeatureSc
 /// (changes family/timescale), force it enabled with a fresh band, and reset `max_holding_bars` (changes
 /// the holding band). The offspring typically lands in a different niche.
 pub fn explore<R: RngCore>(parent: &Genome, rng: &mut R, schema: &FeatureSchema) -> Genome {
+    explore_masked(parent, rng, schema, &[])
+}
+
+/// [`explore`] restricted to the `allowed` catalogue-feature allowlist (QE-458 steered search). `allowed`
+/// empty ⇒ identical to [`explore`].
+pub fn explore_masked<R: RngCore>(
+    parent: &Genome,
+    rng: &mut R,
+    schema: &FeatureSchema,
+    allowed: &[u16],
+) -> Genome {
     let mut g = parent.clone();
     let len = schema.len();
     let num_states = schema.num_states();
@@ -165,7 +202,7 @@ pub fn explore<R: RngCore>(parent: &Genome, rng: &mut R, schema: &FeatureSchema)
         let (lo, hi) = random_band(rng, num_states);
         set.clauses[i] = Clause {
             enabled: true,
-            feature: below(rng, len.max(1) as u64) as u16,
+            feature: pick_feature(rng, len, allowed),
             lo,
             hi,
         };
@@ -198,16 +235,37 @@ pub struct StepReport {
 pub struct VariationDriver {
     selector: OperatorSelector,
     direction: Direction,
+    /// QE-458 steered-search feature allowlist: the catalogue-feature indices the search may reference.
+    /// **Empty ⇒ the full catalogue** (un-steered; byte-identical draw sequence). A non-empty allowlist
+    /// restricts every offspring's clause features to these indices (leak-free — see [`pick_feature`]).
+    allowed_features: Vec<u16>,
 }
 
 impl VariationDriver {
-    /// Build a driver evolving `direction` with the given credit-proportional `selector`.
+    /// Build a driver evolving `direction` with the given credit-proportional `selector`. The feature
+    /// allowlist is empty (un-steered, full catalogue) — use [`with_allowed_features`](Self::with_allowed_features)
+    /// to restrict a steered search.
     #[must_use]
     pub fn new(selector: OperatorSelector, direction: Direction) -> Self {
         VariationDriver {
             selector,
             direction,
+            allowed_features: Vec::new(),
         }
+    }
+
+    /// Restrict this driver's search to the given catalogue-feature indices (QE-458 steered search). An
+    /// empty slice leaves it un-steered (full catalogue). Indices must be valid into the search schema.
+    #[must_use]
+    pub fn with_allowed_features(mut self, allowed: Vec<u16>) -> Self {
+        self.allowed_features = allowed;
+        self
+    }
+
+    /// The feature allowlist this driver restricts its search to (empty ⇒ full catalogue).
+    #[must_use]
+    pub fn allowed_features(&self) -> &[u16] {
+        &self.allowed_features
     }
 
     /// Read-only access to the underlying bandit (selection probabilities / per-operator credit).
@@ -241,11 +299,13 @@ impl VariationDriver {
             Operator::FreshRandom => None,
             _ => archive.sample_parent_elite(self.direction, rng).cloned(),
         };
+        let allowed = self.allowed_features.as_slice();
         let offspring = match (operator, &parent) {
+            // Local refine never re-points a feature, so the allowlist is irrelevant there.
             (Operator::LocalRefine, Some(p)) => local_refine(&p.genome, rng, schema),
-            (Operator::Explore, Some(p)) => explore(&p.genome, rng, schema),
+            (Operator::Explore, Some(p)) => explore_masked(&p.genome, rng, schema, allowed),
             // FreshRandom, or any operator with no parent available (cold start).
-            _ => fresh_random(rng, schema),
+            _ => fresh_random_masked(rng, schema, allowed),
         };
 
         let fitness = eval(&offspring);
@@ -524,5 +584,101 @@ mod tests {
             "expected at least one Added (no-credit) over the run"
         );
         let _ = OPERATORS;
+    }
+
+    // QE-458: an EMPTY allowlist reproduces the un-steered draw sequence exactly — the golden invariant.
+    #[test]
+    fn empty_allowlist_is_byte_identical_to_the_unmasked_search() {
+        let s = schema();
+        // fresh_random vs fresh_random_masked(&[]) from the same seed ⇒ identical genome.
+        let mut a = task_rng(42, 0);
+        let mut b = task_rng(42, 0);
+        for _ in 0..200 {
+            assert_eq!(
+                fresh_random(&mut a, &s),
+                fresh_random_masked(&mut b, &s, &[]),
+                "empty allowlist must not shift the deterministic draw sequence"
+            );
+        }
+        // explore vs explore_masked(&[]) from the same seed ⇒ identical genome.
+        let mut pa = task_rng(9, 0);
+        let parent = fresh_random(&mut pa, &s);
+        let mut c = task_rng(7, 0);
+        let mut d = task_rng(7, 0);
+        for _ in 0..200 {
+            assert_eq!(
+                explore(&parent, &mut c, &s),
+                explore_masked(&parent, &mut d, &s, &[]),
+            );
+        }
+    }
+
+    // QE-458: a NON-EMPTY allowlist confines every referenced feature to the allowed set — the steered
+    // search genuinely explores a restricted hypothesis space, and (leak-free) `repair` never re-introduces
+    // a disallowed feature. This is what makes indicator-subset steering real (AC 4) and honest (AC a/e).
+    #[test]
+    fn allowlist_confines_every_referenced_feature_to_the_subset() {
+        let s = schema();
+        // A small subset of catalogue indices (well within the full width).
+        let allowed: Vec<u16> = vec![0, 3, 7];
+        let allowed_set: std::collections::BTreeSet<u16> = allowed.iter().copied().collect();
+        let mut rng = task_rng(2024, 0);
+        // fresh_random_masked: every clause feature (enabled or not) is drawn from the allowlist.
+        for _ in 0..500 {
+            let g = fresh_random_masked(&mut rng, &s, &allowed);
+            for set in [&g.long_entry, &g.short_entry] {
+                for c in &set.clauses {
+                    assert!(
+                        allowed_set.contains(&c.feature),
+                        "fresh_random_masked leaked feature {} not in {allowed:?}",
+                        c.feature
+                    );
+                }
+            }
+        }
+        // explore_masked: re-pointed clauses also stay within the allowlist; referenced (enabled) features
+        // over a long chain remain a subset of the allowed set.
+        let mut parent = fresh_random_masked(&mut rng, &s, &allowed);
+        for _ in 0..500 {
+            parent = explore_masked(&parent, &mut rng, &s, &allowed);
+            assert!(
+                parent.referenced_features().is_subset(&allowed_set),
+                "explore_masked leaked a referenced feature outside {allowed:?}: {:?}",
+                parent.referenced_features()
+            );
+        }
+    }
+
+    // QE-458: the driver-level allowlist restricts a full MAP-Elites run's occupied niches to the families
+    // the subset can express — a driver with an empty allowlist is byte-identical to today.
+    #[test]
+    fn driver_with_allowed_features_restricts_the_run() {
+        let s = schema();
+        let allowed: Vec<u16> = vec![0, 1, 2];
+        let mut steered = VariationDriver::new(OperatorSelector::with_defaults(), Direction::Long)
+            .with_allowed_features(allowed.clone());
+        assert_eq!(steered.allowed_features(), allowed.as_slice());
+        let allowed_set: std::collections::BTreeSet<u16> = allowed.iter().copied().collect();
+        let mut archive = MapElitesArchive::new(s.clone());
+        let mut rng = task_rng(55, 0);
+        let eval = |_: &Genome| 0.5_f64;
+        for _ in 0..300 {
+            let _ = steered.step(&mut archive, &s, &mut rng, eval);
+        }
+        // Every elite that landed in the archive references only allowed features.
+        let dir_archive = archive.direction(Direction::Long);
+        let cells: Vec<_> = dir_archive.occupied_cells().cloned().collect();
+        assert!(
+            !cells.is_empty(),
+            "the steered run should occupy some niche"
+        );
+        for cell in &cells {
+            for e in dir_archive.cell(cell).unwrap().elites() {
+                assert!(
+                    e.genome.referenced_features().is_subset(&allowed_set),
+                    "a steered elite referenced a feature outside the allowlist"
+                );
+            }
+        }
     }
 }

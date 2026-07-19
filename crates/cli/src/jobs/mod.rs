@@ -90,6 +90,28 @@ pub enum RunError {
     #[error("ensemble search selected no strategies")]
     EmptyEnsemble,
 
+    /// QE-458: a steered `--indicator` id is not in the catalogue. Rejected (never a silent full-catalogue
+    /// fallback) so a steered request that misnames an indicator errors rather than running un-steered.
+    #[error("unknown steer indicator `{id}`: not in the catalogue")]
+    UnknownIndicator {
+        /// The unrecognised catalogue-indicator id.
+        id: String,
+    },
+
+    /// QE-458 (design §6.1a): a steered search collapsed the MAP-Elites quality-diversity archive below the
+    /// minimum-occupied-niches floor. Surfaced as a hard error (never silently sealed) so steering cannot
+    /// flatten the QD archive — widen the indicator subset / raise the budget.
+    #[error(
+        "steered search collapsed the archive to {occupied} occupied niche(s), below the \
+         minimum-occupied-niches floor {floor}: widen the indicator subset or raise the budget"
+    )]
+    ArchiveCoverageCollapsed {
+        /// Occupied MAP-Elites niches the steered search achieved.
+        occupied: usize,
+        /// The compiled minimum-occupied-niches floor.
+        floor: usize,
+    },
+
     /// Funding coverage over the training window is below the configured floor (QE-403). Selecting,
     /// validating, and G1-gating on funding-free returns would admit exactly the funding-negative
     /// strategies QE-109 exists to reject, so the job refuses to seal.

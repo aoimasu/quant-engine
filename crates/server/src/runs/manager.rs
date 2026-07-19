@@ -410,12 +410,84 @@ fn validate_backtest(p: &BacktestParams) -> Result<(), CreateError> {
     Ok(())
 }
 
-/// Validate train params (QE-261): the training window is required; the budget/config are optional
+/// Validate train params (QE-261 + QE-458): the training window is required; the budget/config are optional
 /// (the `qe train` CLI supplies its own defaults) and the universe is config-derived.
+///
+/// QE-458 (design §6.2): the whitelisted steer knobs (budget, indicator subset, windows/folds) are accepted
+/// leniently, but the **blocklist** — everything the G1 gate's decision rides on — carries a compiled floor
+/// that is rejected (`400`) when a request tries to set it *below* the floor, and the **regime-coverage
+/// invariant** rejects a window/fold count that would shrink OOS/regime coverage below its floor. The G1
+/// thresholds themselves (`G1Criteria`, `DEFLATION_BASIS_VERSION`) stay server-side and are never edited.
 fn validate_train(p: &TrainParams) -> Result<(), CreateError> {
     require("start", &p.start)?;
     require("end", &p.end)?;
     require("resolution", &p.resolution)?;
+
+    // (§6.2) Blocklist. Everything the G1 gate's own DECISION rides on is off the whitelist and is not
+    // steerable in ANY direction — a request that so much as *names* one is a `400`. Rejecting outright (not
+    // merely "below a floor") is the fail-safe reading: it closes the hole where a cap/ceiling-style knob
+    // (`max_turnover_frac`, `pbo_cutoff`, `ic_fdr_threshold`) could be *raised* to RELAX the gate — exactly
+    // the overfitting this ticket exists to kill. The compiled floors (`qe_validation::*_FLOOR`) name the
+    // safe value each is pinned at server-side; no request field edits them.
+    reject_if_present(
+        "cost_stress_multiplier",
+        p.cost_stress_multiplier.map(|_| ()),
+    )?;
+    reject_if_present("max_turnover_frac", p.max_turnover_frac.map(|_| ()))?;
+    reject_if_present("capacity_floor_usd", p.capacity_floor_usd.map(|_| ()))?;
+    reject_if_present("dsr_cutoff", p.dsr_cutoff.map(|_| ()))?;
+    reject_if_present("pbo_cutoff", p.pbo_cutoff.map(|_| ()))?;
+    reject_if_present("ic_fdr_threshold", p.ic_fdr_threshold.map(|_| ()))?;
+
+    // Holdout / embargo / purge PRE-EXIST as legitimate knobs (QE-261) — the frozen holdout is *floored, not
+    // tuned* (design §4): they may be RAISED (a safe tighten) but never dropped below their compiled floor.
+    floor_usize("holdout", p.holdout, qe_validation::HOLDOUT_FLOOR)?;
+    floor_usize("embargo", p.embargo, qe_validation::EMBARGO_FLOOR)?;
+    floor_usize("purge", p.purge, qe_validation::PURGE_FLOOR)?;
+
+    // (§6.1a d) Regime-coverage invariant: the window/fold knobs cannot shrink OOS/regime coverage below the
+    // floor. Fewer windows ⇒ a smaller total OOS span ⇒ weaker regime coverage, so a below-floor count is a
+    // `400` — regime coverage is invariant to steering.
+    floor_usize("windows", p.windows, qe_validation::MIN_WFO_WINDOWS)?;
+    floor_usize("folds", p.folds, qe_validation::MIN_WFO_FOLDS)?;
+
+    // QE-458: evolved-pool-as-indicator steering is not yet applied by the live train search — including a
+    // sealed GP formula as a strategy indicator requires a QE-402-safe feature-space extension (a follow-up).
+    // Reject it rather than accept-and-silently-ignore, so a steered request naming an evolved pool errors
+    // instead of running an un-steered full-catalogue search. (Indicator-subset / window / fold / budget
+    // steering IS applied live by `run_train_job`.)
+    if p.evolved_pool.is_some() || p.evolved_formulas.is_some() {
+        return Err(CreateError::Validation(
+            "evolved-pool-as-indicator steering (`evolved_pool` / `evolved_formulas`) is not yet \
+             supported on the live train search — use `indicator_subset` / `windows` / `folds` / budget \
+             steering (a QE-402-safe feature-space extension is a follow-up)"
+                .to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+/// Reject a non-steerable (blocklist) gate-decision knob that appears in the request at all (a `400`) —
+/// these carry compiled floors and are never client-editable in any direction (design §6.2).
+fn reject_if_present(name: &str, value: Option<()>) -> Result<(), CreateError> {
+    if value.is_some() {
+        return Err(CreateError::Validation(format!(
+            "`{name}` is not steerable — it rides the G1 gate decision and stays pinned at its compiled \
+             floor server-side; a request cannot set it"
+        )));
+    }
+    Ok(())
+}
+
+/// Reject a `usize` floored knob (holdout/embargo/purge/windows/folds) set below its compiled floor (`400`).
+fn floor_usize(name: &str, value: Option<usize>, floor: usize) -> Result<(), CreateError> {
+    if let Some(v) = value {
+        if v < floor {
+            return Err(CreateError::Validation(format!(
+                "`{name}` cannot be set below its compiled floor {floor} (got {v})"
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -933,5 +1005,102 @@ mod tests {
         let spec = build_spec(&evolve_req(valid_evolve_params())).unwrap();
         assert!(!spec.writes_vintage(), "evolve must never write a vintage");
         assert_eq!(spec.run_type(), "evolve");
+    }
+
+    // ---- QE-458 steer whitelist / blocklist / regime-coverage invariant (validate_train) --------------
+
+    /// A valid baseline train params object (window present; no steer knobs).
+    fn valid_train_params() -> serde_json::Value {
+        json!({ "start": "2021-01-01", "end": "2021-06-01", "resolution": "1h" })
+    }
+
+    fn train_req(params: serde_json::Value) -> CreateRunRequest {
+        CreateRunRequest {
+            run_type: "train".to_owned(),
+            params,
+        }
+    }
+
+    /// Drive `build_spec` with a train params override, asserting a `Validation` `400` naming `needle`.
+    fn assert_train_rejected(key: &str, value: serde_json::Value, needle: &str) {
+        let mut params = valid_train_params();
+        params[key] = value;
+        let err = build_spec(&train_req(params)).expect_err("train request must reject");
+        match err {
+            CreateError::Validation(msg) => assert!(
+                msg.contains(needle),
+                "expected rejection mentioning `{needle}`, got: {msg}"
+            ),
+            other => panic!("expected Validation error, got {other:?}"),
+        }
+    }
+
+    fn assert_train_accepted(params: serde_json::Value) {
+        build_spec(&train_req(params)).expect("train request must be accepted");
+    }
+
+    #[test]
+    fn validate_train_accepts_the_whitelisted_steer_knobs() {
+        // Budget + indicator subset + windows/folds at/above their floors is a clean accept (these are
+        // applied live by `run_train_job`).
+        assert_train_accepted(json!({
+            "start": "2021-01-01", "end": "2021-06-01", "resolution": "1h",
+            "generations": 80, "population": 24,
+            "indicator_subset": ["rsi_14", "atr_pct"],
+            "windows": 6, "folds": 4
+        }));
+    }
+
+    #[test]
+    fn validate_train_rejects_evolved_pool_as_not_yet_supported_not_silently_ignored() {
+        // Evolved-pool-as-indicator steering is not yet applied on the live search, so it is REJECTED
+        // (never accepted-then-silently-ignored) — item 4 non-negotiable.
+        assert_train_rejected("evolved_pool", json!("pool-abc"), "evolved-pool");
+        assert_train_rejected("evolved_formulas", json!(["aa", "bb"]), "evolved-pool");
+    }
+
+    #[test]
+    fn validate_train_rejects_gate_decision_knobs_in_any_direction() {
+        // The six gate-decision knobs are NOT steerable — a request that names one is a `400` regardless of
+        // value. This closes the hole where a cap/ceiling knob could be RAISED to relax the gate: e.g. a
+        // high PBO cutoff (0.9) would loosen the primary GP gate, so it must be rejected, not accepted.
+        for (key, relaxing_value) in [
+            ("cost_stress_multiplier", json!(0.5)), // below 1× — would soften the cost stress
+            ("max_turnover_frac", json!(0.9)),      // ABOVE the cap — would loosen turnover
+            ("capacity_floor_usd", json!(1_000)), // below floor — would shrink capacity discipline
+            ("dsr_cutoff", json!(0.5)),           // below floor — would lower the DSR bar
+            ("pbo_cutoff", json!(0.9)), // ABOVE floor — would loosen the PBO gate (the hole)
+            ("ic_fdr_threshold", json!(0.9)), // any set — not editable
+        ] {
+            assert_train_rejected(key, relaxing_value, key);
+        }
+    }
+
+    #[test]
+    fn validate_train_rejects_floored_holdout_embargo_purge_below_floor() {
+        assert_train_rejected("holdout", json!(10), "holdout");
+        assert_train_rejected("embargo", json!(0), "embargo");
+        assert_train_rejected("purge", json!(0), "purge");
+    }
+
+    #[test]
+    fn validate_train_floored_knobs_may_be_raised_a_safe_tighten() {
+        // Holdout/embargo/purge PRE-EXIST (QE-261) and may be RAISED above their floor — the safe direction.
+        assert_train_accepted(json!({
+            "start": "2021-01-01", "end": "2021-06-01", "resolution": "1h",
+            "holdout": 500, "embargo": 24, "purge": 5
+        }));
+    }
+
+    #[test]
+    fn validate_train_regime_invariant_rejects_thin_windows_and_folds() {
+        // §6.1a(d): window/fold counts below the floor shrink OOS/regime coverage → `400`.
+        assert_train_rejected("windows", json!(2), "windows");
+        assert_train_rejected("folds", json!(1), "folds");
+        // At/above the floor regime coverage is preserved → accepted.
+        assert_train_accepted(json!({
+            "start": "2021-01-01", "end": "2021-06-01", "resolution": "1h",
+            "windows": 4, "folds": 2
+        }));
     }
 }

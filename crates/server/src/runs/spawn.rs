@@ -139,6 +139,18 @@ fn train_args(cmd: &mut Command, params: &TrainParams, run_dir: &Path) {
     if let Some(embargo) = params.embargo {
         cmd.arg("--embargo").arg(embargo.to_string());
     }
+    // QE-458 steer knobs: only emitted when set (un-steered runs pass none ⇒ the CLI seals byte-identically).
+    // `evolved_pool`/`evolved_formulas` are intentionally NOT forwarded — `validate_train` rejects them as
+    // not-yet-supported on the live train search, so a steered request never reaches the CLI as a silent no-op.
+    for id in params.indicator_subset.iter().flatten() {
+        cmd.arg("--indicator").arg(id);
+    }
+    if let Some(windows) = params.windows {
+        cmd.arg("--windows").arg(windows.to_string());
+    }
+    if let Some(folds) = params.folds {
+        cmd.arg("--folds").arg(folds.to_string());
+    }
     cmd.arg("--run-dir").arg(run_dir).arg("--json");
 }
 
