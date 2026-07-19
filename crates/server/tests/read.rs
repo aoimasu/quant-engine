@@ -488,6 +488,360 @@ async fn vintage_detail_requires_a_session() {
     assert_eq!(status, StatusCode::UNAUTHORIZED, "no session ⇒ 401");
 }
 
+// ---- QE-466 `GET /api/vintages/leaderboard` (informational, NOT a selector) ------------------------
+
+/// A minimal single-chromosome genome for a sealed leaderboard fixture (mirrors `seal_rich_vintage`).
+fn one_genome() -> Genome {
+    let off = Clause {
+        enabled: false,
+        feature: 0,
+        lo: 0,
+        hi: 0,
+    };
+    let mut clauses = [off; CLAUSES_PER_SET];
+    clauses[0] = Clause {
+        enabled: true,
+        feature: 0,
+        lo: 1,
+        hi: 2,
+    };
+    Genome {
+        version: REP_VERSION,
+        long_entry: RuleSet {
+            clauses,
+            min_satisfied: 1,
+        },
+        short_entry: RuleSet {
+            clauses: [off; CLAUSES_PER_SET],
+            min_satisfied: 1,
+        },
+        exit: ExitParams {
+            max_holding_bars: 10,
+            exit_on_opposite: false,
+        },
+        risk: RiskParams { size_bps: 5_000 },
+    }
+}
+
+/// Seal a vintage with **caller-chosen** ranking metrics — the persisted net-of-cost figure, DSR, the
+/// overlap-keyed consultation count and the holdout series — so a leaderboard test can drive the ranking +
+/// consultation-budget enforcement directly. Every metric lands in the sealed content (QE-467), so the
+/// endpoint READS it, never recomputes it.
+#[allow(clippy::too_many_arguments)]
+fn seal_leaderboard_vintage(
+    dir: &Path,
+    id: &str,
+    provenance: DataProvenance,
+    cost_net: Option<f64>,
+    dsr: f64,
+    consultation: u64,
+    series: Vec<f64>,
+) -> Vintage {
+    let content = VintageContent {
+        format_version: VINTAGE_FORMAT_VERSION,
+        vintage_id: id.to_owned(),
+        chromosomes: vec![one_genome()],
+        weights: vec![1.0],
+        calibration: CalibrationProfile::new(Fraction::new(Decimal::new(2, 1)).unwrap()),
+        slippage: SlippageCalibration::default(),
+        sizer: PortfolioSizer::default(),
+        shocks: ShockConfig::default(),
+        worst_case_loss: Some(0.2),
+        catalogue: CatalogueIdentity::current(),
+        lineage: Lineage::new("cfg-hash", "snapshot", "commit", vec![7, 42]),
+        seal_evidence: SealEvidence {
+            dsr,
+            pbo: 0.1,
+            spa_pvalue: 0.02,
+            n_trials: 64,
+            realised_turnover: 0.33,
+            capacity_usd: 1_500_000.0,
+            cost_stress_net_min: cost_net,
+            ..SealEvidence::default()
+        },
+        holdout_series: HoldoutReturnSeries { returns: series },
+        provenance: ResearchProvenance {
+            data_provenance: provenance,
+            holdout_split: HoldoutSplit {
+                holdout_range: None,
+                train_range: None,
+                embargo_bars: 12,
+            },
+            regime_composition: vec![RegimeShare {
+                regime: "trend".to_owned(),
+                bars: 100,
+            }],
+            consultation_count: consultation,
+            steer_delta: Some(SteerDelta {
+                indicator_subset_hash: "b".repeat(64),
+                generations: 30,
+                population: 10,
+                windows: 5,
+                folds: 3,
+            }),
+        },
+    };
+    let sealed = Vintage::seal(content).unwrap();
+    VintageRepository::new(dir).write(&sealed).unwrap();
+    sealed
+}
+
+fn post_authed(uri: &str) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("cookie", common::session_cookie_header(TEST_EMAIL))
+        .body(Body::empty())
+        .unwrap()
+}
+
+#[tokio::test]
+async fn leaderboard_ranks_on_persisted_net_of_cost_and_shows_steer_diffs() {
+    let tmp = TempDir::new().unwrap();
+    let artifacts = tmp.path().join("artifacts");
+    // Both within budget; "vlo" has the higher net-of-cost so it must rank first — on the PERSISTED
+    // cost-stress net, never gross Sharpe / equal-weight / lone Sharpe / in-sample.
+    seal_leaderboard_vintage(
+        &artifacts,
+        "vlo",
+        DataProvenance::Real,
+        Some(0.05),
+        0.6,
+        1,
+        vec![0.01, -0.01, 0.02, 0.0, 0.01],
+    );
+    seal_leaderboard_vintage(
+        &artifacts,
+        "vhi",
+        DataProvenance::Real,
+        Some(0.20),
+        0.9,
+        1,
+        vec![0.02, 0.01, -0.02, 0.03, 0.0],
+    );
+    let app = build_app_with_artifacts(&tmp, artifacts);
+
+    let (status, body) = send(&app, get_authed("/api/vintages/leaderboard")).await;
+    assert_eq!(status, StatusCode::OK, "body = {body}");
+
+    let entries = body["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 2, "both sealed vintages ranked: {body}");
+    assert_eq!(
+        entries[0]["id"], "vhi",
+        "higher persisted net ranks first: {body}"
+    );
+    assert_eq!(entries[0]["rank"], 1);
+    assert_eq!(entries[0]["cost_stress_net_min"], 0.20);
+    assert_eq!(entries[1]["id"], "vlo");
+    assert_eq!(entries[1]["rank"], 2);
+
+    // Steer/param diffs are surfaced per vintage.
+    assert_eq!(entries[0]["steer_delta"]["generations"], 30);
+    assert_eq!(entries[0]["steer_delta"]["windows"], 5);
+
+    // The forbidden ranking bases must be structurally ABSENT — no gross Sharpe, equal-weight, lone Sharpe,
+    // or in-sample field anywhere in the body.
+    for forbidden in [
+        "gross_sharpe",
+        "equal_weight",
+        "sharpe",
+        "in_sample",
+        "gross",
+    ] {
+        assert!(
+            find_key(&body, forbidden).is_none(),
+            "the leaderboard must not expose `{forbidden}` (would be a QE-450 §13.5 inversion): {body}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn leaderboard_surfaces_cross_vintage_correlation_and_effective_n() {
+    let tmp = TempDir::new().unwrap();
+    let artifacts = tmp.path().join("artifacts");
+    // Series of unequal length (5 and 3): the correlation aligns to the common minimum, so effective N = 3.
+    seal_leaderboard_vintage(
+        &artifacts,
+        "a",
+        DataProvenance::Real,
+        Some(0.10),
+        0.7,
+        1,
+        vec![0.01, 0.02, 0.03, 0.04, 0.05],
+    );
+    seal_leaderboard_vintage(
+        &artifacts,
+        "b",
+        DataProvenance::Real,
+        Some(0.08),
+        0.7,
+        1,
+        vec![0.01, 0.02, 0.03],
+    );
+    let app = build_app_with_artifacts(&tmp, artifacts);
+
+    let (status, body) = send(&app, get_authed("/api/vintages/leaderboard")).await;
+    assert_eq!(status, StatusCode::OK, "body = {body}");
+
+    assert!(
+        body["cross_vintage_correlation"].is_number(),
+        "a QE-430-deflated cross-vintage correlation is surfaced: {body}"
+    );
+    assert!(
+        body["cross_vintage_correlation"].as_f64().unwrap() >= 0.0,
+        "the positive-mean deflated correlation is >= 0: {body}"
+    );
+    assert_eq!(
+        body["effective_n"], 3,
+        "effective N is the common (aligned) series length: {body}"
+    );
+    assert!(
+        body["effective_n_note"]
+            .as_str()
+            .is_some_and(|s| !s.is_empty()),
+        "the alignment caveat is stated: {body}"
+    );
+}
+
+#[tokio::test]
+async fn leaderboard_enforces_consultation_budget_demotes_and_escalates() {
+    let tmp = TempDir::new().unwrap();
+    let artifacts = tmp.path().join("artifacts");
+    // "over" has the BEST net-of-cost but its holdout was re-consulted (count 2 > budget 1). "clean" is
+    // within budget with a worse net. Enforcement: "clean" must still rank ABOVE "over", and "over"'s DSR
+    // bar is escalated — so re-running until the top slot improves is defeated, not rewarded.
+    seal_leaderboard_vintage(
+        &artifacts,
+        "over",
+        DataProvenance::Real,
+        Some(0.99),
+        0.95,
+        2,
+        vec![0.01, 0.02, 0.03],
+    );
+    seal_leaderboard_vintage(
+        &artifacts,
+        "clean",
+        DataProvenance::Real,
+        Some(0.10),
+        0.6,
+        1,
+        vec![0.01, 0.02, 0.03],
+    );
+    let app = build_app_with_artifacts(&tmp, artifacts);
+
+    let (status, body) = send(&app, get_authed("/api/vintages/leaderboard")).await;
+    assert_eq!(status, StatusCode::OK, "body = {body}");
+
+    let entries = body["entries"].as_array().unwrap();
+    assert_eq!(
+        entries[0]["id"], "clean",
+        "the within-budget vintage ranks first despite a worse net — enforcement, not display: {body}"
+    );
+    assert_eq!(entries[0]["over_consulted"], false);
+    assert_eq!(entries[0]["dsr_status"], "ok");
+    assert_eq!(
+        entries[1]["id"], "over",
+        "the over-consulted vintage is DEMOTED: {body}"
+    );
+    assert_eq!(entries[1]["over_consulted"], true);
+    assert_eq!(
+        entries[1]["dsr_status"], "escalated",
+        "the over-consulted vintage's DSR bar is escalated/greyed: {body}"
+    );
+
+    // The chosen enforcement posture is stated and machine-checkable.
+    assert_eq!(body["enforcement_posture"], "own-evidence-only");
+    assert_eq!(body["consultation_budget"], 1);
+}
+
+#[tokio::test]
+async fn leaderboard_is_read_only_and_rejects_mutating_verbs() {
+    let tmp = TempDir::new().unwrap();
+    let artifacts = tmp.path().join("artifacts");
+    seal_leaderboard_vintage(
+        &artifacts,
+        "v",
+        DataProvenance::Real,
+        Some(0.1),
+        0.7,
+        1,
+        vec![0.01],
+    );
+    let app = build_app_with_artifacts(&tmp, artifacts);
+
+    // A POST to the leaderboard path is METHOD NOT ALLOWED — no mutating (promote/select/seal/auto-run)
+    // handler is mounted; the surface is GET-only over sealed artefacts.
+    let (status, _) = send(&app, post_authed("/api/vintages/leaderboard")).await;
+    assert_eq!(
+        status,
+        StatusCode::METHOD_NOT_ALLOWED,
+        "the leaderboard mounts no mutating verb — read-only"
+    );
+}
+
+#[tokio::test]
+async fn leaderboard_exposes_no_promote_or_select_action_and_labels_not_paper_confirmed() {
+    let tmp = TempDir::new().unwrap();
+    let artifacts = tmp.path().join("artifacts");
+    seal_leaderboard_vintage(
+        &artifacts,
+        "v1",
+        DataProvenance::Real,
+        Some(0.1),
+        0.7,
+        1,
+        vec![0.01, 0.02],
+    );
+    seal_leaderboard_vintage(
+        &artifacts,
+        "v2",
+        DataProvenance::Real,
+        Some(0.2),
+        0.8,
+        1,
+        vec![0.03, 0.01],
+    );
+    let app = build_app_with_artifacts(&tmp, artifacts);
+
+    let (status, body) = send(&app, get_authed("/api/vintages/leaderboard")).await;
+    assert_eq!(status, StatusCode::OK, "body = {body}");
+
+    // No selection/promotion affordance anywhere in the payload.
+    for forbidden in ["promote", "select", "seal", "winner", "auto_run", "best"] {
+        assert!(
+            find_key(&body, forbidden).is_none(),
+            "a read-only inspection surface must expose no `{forbidden}` action/field: {body}"
+        );
+    }
+
+    // Every vintage carries the "backtest-holdout only — not paper-confirmed" label; the board too.
+    assert_eq!(body["not_paper_confirmed"], true);
+    for e in body["entries"].as_array().unwrap() {
+        assert_eq!(
+            e["not_paper_confirmed"], true,
+            "every entry is not-paper-confirmed: {body}"
+        );
+    }
+
+    // The standing best-of-N caveat is present.
+    assert!(
+        body["caveat"]
+            .as_str()
+            .is_some_and(|c| c.contains("best-of-N") && c.contains("INSPECTION")),
+        "the standing anti-selection caveat is stated: {body}"
+    );
+}
+
+#[tokio::test]
+async fn leaderboard_requires_a_session() {
+    let tmp = TempDir::new().unwrap();
+    let app = build_app(&tmp);
+
+    let (status, _) = send(&app, get_no_session("/api/vintages/leaderboard")).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "no session ⇒ 401");
+}
+
 /// Recursively search a JSON value for a key (used to prove the holdout `returns` array is never inlined).
 fn find_key<'a>(value: &'a Value, key: &str) -> Option<&'a Value> {
     match value {

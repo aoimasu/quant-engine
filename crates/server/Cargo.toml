@@ -39,6 +39,13 @@ qe-vintage.workspace = true
 # no new `qe-wfo`/`qe-ensemble`/`qe-runtime`/`qe-venue` edge — the firewall rule provably still covers it.
 qe-signal.workspace = true
 qe-risk.workspace = true
+# QE-466: the vintage leaderboard REUSES QE-430's R(N)/Fisher-z sample-size correlation deflation
+# (`pairwise_corr_penalty` / `CorrDeflation` / `CorrPenalty`, `crates/ensemble/src/objective.rs`) over the
+# PERSISTED net-of-cost holdout series to surface cross-vintage correlation + the effective N — it does not
+# reimplement it. `qe-ensemble` is NOT on the `qe-server` firewall forbidden list (crates/architecture/src/
+# lib.rs — the composition root may read portfolio/composition), and `qe-ensemble` itself reaches none of
+# the qe-server-forbidden crates, so this edge keeps crates/architecture/tests/firewall.rs green.
+qe-ensemble.workspace = true
 # QE-452 Phase B: the frozen formula-pool artefact + its durable governance lifecycle. A pure serde leaf
 # (no `qe-runtime`/`qe-venue` edge — runtime never loads a pool), so this edge is firewall-legal and the
 # `qe-server` firewall rule provably covers it (crates/architecture/tests/firewall.rs).

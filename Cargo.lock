@@ -1868,6 +1868,7 @@ dependencies = [
  "native-tls",
  "qe-config",
  "qe-determinism",
+ "qe-ensemble",
  "qe-formula-pool",
  "qe-risk",
  "qe-run-protocol",

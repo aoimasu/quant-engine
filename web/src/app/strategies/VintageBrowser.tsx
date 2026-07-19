@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Badge, Callout, Card, DataTable } from '../../design';
+import { Badge, Button, Callout, Card, DataTable, Icon } from '../../design';
 import type { Column } from '../../design';
 import { injectCss } from '../../design/injectCss';
 import { ApiError, listVintages, type VintageListItem } from '../../api/runs';
@@ -16,6 +16,8 @@ injectCss('qe-vb-css', CSS);
 
 export interface VintageBrowserProps {
   onOpen: (vintageId: string) => void;
+  /** Open the read-only QE-466 vintage leaderboard/comparison. Absent ⇒ no leaderboard entry point. */
+  onLeaderboard?: () => void;
 }
 
 /**
@@ -25,7 +27,7 @@ export interface VintageBrowserProps {
  * Vintages are human-paced (not live), so this fetches once on mount rather than polling. Provenance is a
  * detail-only field (the list summary does not carry it), so it is surfaced in the inspector, not here.
  */
-export function VintageBrowser({ onOpen }: VintageBrowserProps) {
+export function VintageBrowser({ onOpen, onLeaderboard }: VintageBrowserProps) {
   const [vintages, setVintages] = useState<VintageListItem[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -96,6 +98,16 @@ export function VintageBrowser({ onOpen }: VintageBrowserProps) {
             evidence, composition, and holdout regime coverage.
           </div>
         </div>
+        {onLeaderboard && (
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={onLeaderboard}
+            iconLeft={<Icon name="layout-dashboard" size={15} />}
+          >
+            Leaderboard
+          </Button>
+        )}
       </div>
 
       {error && (

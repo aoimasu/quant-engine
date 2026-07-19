@@ -12,6 +12,7 @@ use axum::extract::{Path, State};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{http::StatusCode, Json, Router};
+use qe_ensemble::{pairwise_corr_penalty, CorrDeflation, DEFAULT_SIGNIFICANCE_Z};
 use qe_risk::{CalibrationProfile, PortfolioSizer, SlippageCalibration};
 use qe_signal::{CatalogueConfig, CatalogueIdentity, FeatureSchema};
 use qe_vintage::{
@@ -31,6 +32,10 @@ use crate::ReadState;
 pub fn routes() -> Router<crate::AppState> {
     Router::new()
         .route("/vintages", get(list_vintages))
+        // QE-466: the read-only leaderboard/comparison. Registered as a static segment BEFORE `/vintages/{id}`
+        // — axum/matchit routes the literal `leaderboard` ahead of the `{id}` param, so it never collides
+        // with a vintage whose id is a hash. GET-only: no promote/select/seal/auto-run verb is mounted.
+        .route("/vintages/leaderboard", get(leaderboard))
         .route("/vintages/{id}", get(get_vintage))
         .route("/market-data/coverage", get(market_data_coverage))
 }
@@ -350,6 +355,219 @@ fn resolve_indicator(feature: u16, ids: &[String]) -> IndicatorRef {
             id: None,
             source: "evolved",
         },
+    }
+}
+
+// ---- QE-466 vintage leaderboard / comparison (informational, NOT a selector) -----------------------
+//
+// A read-only ranking of already-sealed vintages on the PERSISTED, tradable, deflation-honest metrics
+// QE-467 sealed — every number is READ from the sealed artefact, none recomputed. It is structurally
+// incapable of selecting/promoting: no promote/select/seal/auto-run verb is mounted, and the ranking
+// confers NO deflation credit beyond each vintage's own honest per-run G1 gate (design §9/§3/§11.1).
+
+/// The overlap-keyed holdout-consultation budget the leaderboard ENFORCES (design §4/§9). `consultation_count`
+/// is `1` for the single, honest consultation the backtest IS; `> BUDGET` means the *same* holdout was
+/// re-consulted by a prior overlapping run — silent campaign-level multiple-testing. `1` is the conservative
+/// default (design §4: "the backtest is the *single recorded consultation* of the holdout"). Product may lift
+/// it; nothing else depends on the exact value.
+pub const HOLDOUT_CONSULTATION_BUDGET: u64 = 1;
+
+/// The chosen enforcement posture (design §9): **rank only on each vintage's own already-deflated evidence,
+/// with NO fresh cross-vintage selection statistic on holdout verdicts.** The cross-vintage correlation is a
+/// diversity DIAGNOSTIC (effective N), never a rank input — so the leaderboard cannot manufacture new
+/// selection evidence over holdout verdicts (which posture (a), a max-statistic/SPA across the set, would).
+const ENFORCEMENT_POSTURE: &str = "own-evidence-only";
+
+/// The standing caveat every consumer of the ranking must read (design §9): cross-vintage ranking is
+/// inspection, and re-running until the top slot improves is the rejected best-of-N pattern (§3).
+const LEADERBOARD_CAVEAT: &str = "Cross-vintage ranking is INSPECTION, not selection. Each vintage already \
+     passed its own honest per-run G1 gate; this ordering confers no additional blessing and promotes \
+     nothing. Acting on the ranking by re-running until the top slot improves IS the rejected best-of-N \
+     pattern (design §3) — the outer selector that re-introduces the uncounted multiple-testing QE-430..454 \
+     killed. Every vintage is backtest-holdout only — not paper-confirmed (still owes G2/G3).";
+
+/// How each vintage's DSR bar is treated given its consultation budget (design §9).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DsrStatus {
+    /// Within the consultation budget — the DSR bar is shown normally.
+    Ok,
+    /// Over-consulted — the DSR bar is escalated/greyed and the vintage is demoted below every within-budget
+    /// vintage, so the top slot cannot be "improved" by re-running the holdout.
+    Escalated,
+}
+
+/// One ranked row of the QE-466 leaderboard — a projection of one sealed vintage's PERSISTED metrics. It
+/// carries **only** net-of-cost / tradability / deflation-basis numbers read from `SealEvidence`; there is no
+/// gross-Sharpe, equal-weight, lone-Sharpe, or in-sample field to rank on, and **no** promote/select action.
+#[derive(Debug, Clone, Serialize)]
+pub struct LeaderboardEntry {
+    /// 1-based display rank after sorting (within-budget vintages first, then by persisted net-of-cost).
+    pub rank: usize,
+    /// The vintage id.
+    pub id: String,
+    /// Human display label (currently the vintage id).
+    pub label: String,
+    /// The content hash pinning the sealed artefact.
+    pub content_hash: String,
+    /// The vintage artefact format version.
+    pub format_version: u16,
+    /// The sealed data provenance (`real` | `synthetic` | `mixed`).
+    pub data_provenance: DataProvenance,
+    /// **The ranking key** — the DEPLOYED capacity-capped, net-of-cost `min{1×,2×}` cost-stressed holdout
+    /// return (QE-467/438/431). `None` on a path that did not run the cost-stress sweep (ranked last within
+    /// its budget group). Never a gross / equal-weight / lone-Sharpe number.
+    pub cost_stress_net_min: Option<f64>,
+    /// Realised turnover of the DEPLOYED capacity-capped ensemble (QE-467).
+    pub realised_turnover: f64,
+    /// Modelled deployable capacity in USD at target AUM (QE-467).
+    pub capacity_usd: f64,
+    /// Deflated Sharpe Ratio (QE-131) — the demoted deflation basis (necessary, not sufficient). Rendered
+    /// with `dsr_status`, never as a lone health tile.
+    pub dsr: f64,
+    /// Whether the DSR bar is shown normally or escalated/greyed (over-consulted).
+    pub dsr_status: DsrStatus,
+    /// The overlap-keyed per-holdout consultation count (QE-467/QE-460).
+    pub consultation_count: u64,
+    /// `true` when `consultation_count > HOLDOUT_CONSULTATION_BUDGET` — the holdout was re-consulted, so the
+    /// vintage is demoted and its DSR bar escalated (ENFORCED, not merely displayed).
+    pub over_consulted: bool,
+    /// The length of the persisted net-of-cost holdout series (a count over sealed data; never re-run).
+    pub holdout_series_len: usize,
+    /// The steer/param diff the search recorded (QE-467/QE-458): indicator subset + budget + windows/folds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub steer_delta: Option<SteerDelta>,
+    /// The standing per-vintage label: this is a backtest-holdout verdict, still owing G2/G3 — never
+    /// paper- or live-confirmed.
+    pub not_paper_confirmed: bool,
+}
+
+/// The QE-466 leaderboard body — the ranked sealed vintages plus the cross-vintage diversity diagnostic and
+/// the standing anti-selection framing. **A read-only view over sealed artefacts**: it exposes no
+/// promote/select/seal/auto-run action, ranks on each vintage's OWN persisted already-deflated evidence, and
+/// computes NO fresh cross-vintage selection statistic on holdout verdicts (enforcement posture (b)).
+#[derive(Debug, Clone, Serialize)]
+pub struct Leaderboard {
+    /// The ranked vintages (within-budget first, then descending persisted net-of-cost).
+    pub entries: Vec<LeaderboardEntry>,
+    /// The QE-430 R(N)/Fisher-z sample-size-deflated positive-mean pairwise correlation over the PERSISTED
+    /// net-of-cost holdout series of the displayed set — a DIVERSITY DIAGNOSTIC (are these diverse, or the
+    /// same bet re-drawn?), **never** a rank input. `0.0` when fewer than two series are comparable.
+    pub cross_vintage_correlation: f64,
+    /// The effective N the correlation rested on — the common (aligned) series length across the set. Surfaced
+    /// so the operator sees how much data the diversity read stands on (the standard-error caveat made
+    /// explicit, mirroring QE-430's `effective_n`).
+    pub effective_n: usize,
+    /// How the persisted series were aligned before the correlation (the honest v1 limitation).
+    pub effective_n_note: String,
+    /// The enforcement posture in force (`own-evidence-only` = posture (b)).
+    pub enforcement_posture: String,
+    /// The consultation budget enforced (`HOLDOUT_CONSULTATION_BUDGET`).
+    pub consultation_budget: u64,
+    /// Always `true`: every vintage on the leaderboard is backtest-holdout only, still owing G2/G3.
+    pub not_paper_confirmed: bool,
+    /// The standing caveat (`LEADERBOARD_CAVEAT`).
+    pub caveat: String,
+}
+
+/// `GET /api/vintages/leaderboard` — rank the sealed vintages on their PERSISTED net-of-cost / capacity /
+/// turnover evidence (read, never recomputed), surface the QE-430-deflated cross-vintage correlation +
+/// effective N as a diversity diagnostic, and ENFORCE the consultation budget (over-consulted vintages are
+/// demoted + their DSR bar escalated). Read-only: recomputes no gate, seals/promotes/selects nothing.
+async fn leaderboard(State(read): State<Arc<ReadState>>) -> Response {
+    let repo = read.vintages.clone();
+    match tokio::task::spawn_blocking(move || repo.list().map(|vs| build_leaderboard(&vs))).await {
+        Ok(Ok(board)) => Json(board).into_response(),
+        Ok(Err(e)) => internal(format!("failed to list vintages: {e}")),
+        Err(_) => internal("vintage leaderboard task failed".to_owned()),
+    }
+}
+
+/// Build the leaderboard from the (already hash-verified) sealed vintages. Pure over the loaded artefacts —
+/// no gate recomputation, no holdout re-run — so it is unit-testable without a server. Ranking rule
+/// (posture (b)): within-budget vintages first; within a budget group, descending persisted
+/// `cost_stress_net_min` (net-of-cost), then descending DSR, then id — a deterministic ordering over
+/// independent already-deflated numbers, never a fresh cross-vintage statistic.
+fn build_leaderboard(vintages: &[Vintage]) -> Leaderboard {
+    // Cross-vintage correlation over the PERSISTED net-of-cost series (QE-430 R(N)/Fisher-z, reused). Align
+    // to the common minimum length first, since `pearson` returns 0 for unequal-length series and the
+    // persisted series carry no per-bar timestamps for an exact time alignment (documented v1 limitation).
+    let series: Vec<&Vec<f64>> = vintages
+        .iter()
+        .map(|v| &v.content.holdout_series.returns)
+        .collect();
+    let min_len = series.iter().map(|s| s.len()).min().unwrap_or(0);
+    let (cross_vintage_correlation, effective_n) = if series.len() < 2 || min_len == 0 {
+        (0.0, 0)
+    } else {
+        let aligned: Vec<Vec<f64>> = series.iter().map(|s| s[..min_len].to_vec()).collect();
+        let penalty = pairwise_corr_penalty(
+            &aligned,
+            CorrDeflation::SignificanceFloor {
+                z: DEFAULT_SIGNIFICANCE_Z,
+            },
+        );
+        (penalty.value, penalty.effective_n)
+    };
+
+    let mut entries: Vec<LeaderboardEntry> = vintages
+        .iter()
+        .map(|v| {
+            let c = &v.content;
+            let over_consulted = c.provenance.consultation_count > HOLDOUT_CONSULTATION_BUDGET;
+            LeaderboardEntry {
+                rank: 0, // assigned after the sort
+                id: c.vintage_id.clone(),
+                label: c.vintage_id.clone(),
+                content_hash: v.content_hash.clone(),
+                format_version: c.format_version,
+                data_provenance: c.provenance.data_provenance,
+                cost_stress_net_min: c.seal_evidence.cost_stress_net_min,
+                realised_turnover: c.seal_evidence.realised_turnover,
+                capacity_usd: c.seal_evidence.capacity_usd,
+                dsr: c.seal_evidence.dsr,
+                dsr_status: if over_consulted {
+                    DsrStatus::Escalated
+                } else {
+                    DsrStatus::Ok
+                },
+                consultation_count: c.provenance.consultation_count,
+                over_consulted,
+                holdout_series_len: c.holdout_series.returns.len(),
+                steer_delta: c.provenance.steer_delta.clone(),
+                not_paper_confirmed: true,
+            }
+        })
+        .collect();
+
+    // Enforcement (posture (b)): over-consulted vintages sort BELOW every within-budget vintage regardless of
+    // their (possibly holdout-shopped) net-of-cost number — so re-running until the top slot improves demotes
+    // rather than promotes. Within a budget group, rank on the vintage's OWN persisted net-of-cost, then DSR,
+    // then id (deterministic). `total_cmp` gives a total order over the `f64` keys (None → −∞ ranks last).
+    entries.sort_by(|a, b| {
+        let net = |e: &LeaderboardEntry| e.cost_stress_net_min.unwrap_or(f64::NEG_INFINITY);
+        a.over_consulted
+            .cmp(&b.over_consulted)
+            .then(net(b).total_cmp(&net(a)))
+            .then(b.dsr.total_cmp(&a.dsr))
+            .then(a.id.cmp(&b.id))
+    });
+    for (i, e) in entries.iter_mut().enumerate() {
+        e.rank = i + 1;
+    }
+
+    Leaderboard {
+        entries,
+        cross_vintage_correlation,
+        effective_n,
+        effective_n_note: "Persisted net-of-cost series aligned to the displayed-set minimum length (leading \
+             bars) before the QE-430 R(N)/Fisher-z deflation; the persisted series carry no per-bar \
+             timestamps for an exact time alignment (v1 limitation)."
+            .to_owned(),
+        enforcement_posture: ENFORCEMENT_POSTURE.to_owned(),
+        consultation_budget: HOLDOUT_CONSULTATION_BUDGET,
+        not_paper_confirmed: true,
+        caveat: LEADERBOARD_CAVEAT.to_owned(),
     }
 }
 
