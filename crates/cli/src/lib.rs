@@ -376,12 +376,24 @@ pub enum Command {
         end: String,
         /// Bar resolution to ingest (`1h`, `5m`, …).
         resolution: String,
+        /// Explicit instrument symbols to ingest (`--instrument`, repeated). Empty ⇒ the config universe
+        /// (or `--fetch-all`). QE-464.
+        instruments: Vec<String>,
+        /// Fetch **all** available instruments, resolved via the point-in-time universe machinery
+        /// (survivorship kill, QE-448/QE-464). Flagged `survivorship-unsafe` when the config carries no
+        /// listing dates.
+        fetch_all: bool,
         /// Generate a deterministic **OFFLINE synthetic** store instead of a real ingest (opt-in;
-        /// default `false`). Without it, `qe ingest` still errors (real ingest needs the unimplemented
-        /// `http` decoders). With it, a seeded generator populates the store from the config universe +
-        /// window — clearly labelled **GENERATED, NOT real market data** (stderr warning +
-        /// `"synthetic":true` in the terminal `done` line).
+        /// default `false`). Without it, `qe ingest` still errors (real ingest needs the `http`
+        /// decoders unless built with the feature). With it, a seeded generator populates the store from
+        /// the config universe + window — clearly labelled **GENERATED, NOT real market data** (stderr
+        /// warning + `"synthetic":true` in the terminal `done` line).
         synthetic: bool,
+        /// QE-464: run directory the supervised job writes `result.json` into (`--run-dir`); `None` for a
+        /// bare CLI invocation.
+        run_dir: Option<PathBuf>,
+        /// Emit JSON-line progress on stdout (`--json`).
+        json: bool,
     },
 }
 
@@ -587,16 +599,26 @@ where
             let mut start = String::new();
             let mut end = String::new();
             let mut resolution = String::new();
+            let mut instruments = Vec::new();
+            let mut fetch_all = false;
             let mut synthetic = false;
+            let mut run_dir = None;
+            let mut json = false;
             while let Some(flag) = it.next() {
                 match flag.as_str() {
                     "--config" => config = PathBuf::from(value(&mut it, "--config")?),
                     "--start" => start = value(&mut it, "--start")?,
                     "--end" => end = value(&mut it, "--end")?,
                     "--resolution" => resolution = value(&mut it, "--resolution")?,
+                    // Repeatable explicit instrument selector (QE-464).
+                    "--instrument" => instruments.push(value(&mut it, "--instrument")?),
+                    // Fetch the whole point-in-time universe (QE-464; boolean).
+                    "--fetch-all" => fetch_all = true,
                     // Opt-in offline synthetic generation (boolean; no value). Default off ⇒ the real
                     // ingest error is unchanged.
                     "--synthetic" => synthetic = true,
+                    "--run-dir" => run_dir = Some(PathBuf::from(value(&mut it, "--run-dir")?)),
+                    "--json" => json = true,
                     other => return Err(CliError::Usage(format!("unknown flag `{other}`"))),
                 }
             }
@@ -605,7 +627,11 @@ where
                 start,
                 end,
                 resolution,
+                instruments,
+                fetch_all,
                 synthetic,
+                run_dir,
+                json,
             })
         }
         other => Err(CliError::Usage(format!("unknown command `{other}`"))),
@@ -889,6 +915,13 @@ mod tests {
             "2021-02-01",
             "--resolution",
             "1h",
+            "--instrument",
+            "BTCUSDT",
+            "--instrument",
+            "ETHUSDT",
+            "--run-dir",
+            "/tmp/r",
+            "--json",
         ])
         .unwrap();
         assert_eq!(
@@ -898,10 +931,22 @@ mod tests {
                 start: "2021-01-01".into(),
                 end: "2021-02-01".into(),
                 resolution: "1h".into(),
+                instruments: vec!["BTCUSDT".into(), "ETHUSDT".into()],
+                fetch_all: false,
                 // `--synthetic` is opt-in: absent ⇒ false (behaviour unchanged from before the flag).
                 synthetic: false,
+                run_dir: Some(PathBuf::from("/tmp/r")),
+                json: true,
             }
         );
+        // `--fetch-all` toggles the whole-universe resolution (QE-464).
+        assert!(matches!(
+            parse_args(["ingest", "--fetch-all"]).unwrap(),
+            Command::Ingest {
+                fetch_all: true,
+                ..
+            }
+        ));
         // Bare `ingest` defaults the config path and leaves the window empty.
         assert_eq!(
             parse_args(["ingest"]).unwrap(),
@@ -910,7 +955,11 @@ mod tests {
                 start: String::new(),
                 end: String::new(),
                 resolution: String::new(),
+                instruments: Vec::new(),
+                fetch_all: false,
                 synthetic: false,
+                run_dir: None,
+                json: false,
             }
         );
     }
@@ -938,7 +987,11 @@ mod tests {
                 start: "2021-01-01".into(),
                 end: "2022-01-01".into(),
                 resolution: "1h".into(),
+                instruments: Vec::new(),
+                fetch_all: false,
                 synthetic: true,
+                run_dir: None,
+                json: false,
             }
         );
     }

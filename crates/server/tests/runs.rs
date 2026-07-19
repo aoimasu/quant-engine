@@ -1451,3 +1451,131 @@ async fn reconcile_fails_unsealed_orphan_flow_never_researched() {
         "a dead run is NEVER silently re-searched"
     );
 }
+
+// ---------------------------------------------------------------------------------------------------
+// QE-464: the `ingest` run-kind + `POST /api/ingest` trigger.
+// ---------------------------------------------------------------------------------------------------
+
+/// POST a body to `/api/ingest` (the QE-464 trigger — the body is the `ingest` params object directly).
+async fn post_ingest(app: &Router, body: &Value) -> (StatusCode, Value) {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/ingest")
+                .header("content-type", "application/json")
+                .header("cookie", common::session_cookie_header(TEST_EMAIL))
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .expect("router responds");
+    read_json(resp).await
+}
+
+/// `POST /api/ingest` launches a supervised ingest run that terminates with the standard `done` line and
+/// is recorded as `succeeded` with `type == "ingest"`. The fake job also records its argv so we prove the
+/// spawner built the real `ingest … --fetch-all --synthetic --run-dir … --json` command.
+#[tokio::test]
+async fn post_ingest_launches_supervised_run_and_succeeds() {
+    let tmp = TempDir::new().unwrap();
+    let argv = tmp.path().join("argv.txt");
+    let script = tmp.path().join("job_ingest.sh");
+    write_script(
+        &script,
+        &format!(
+            r#"#!/bin/sh
+printf '%s\n' "$@" > "{argv}"
+run_dir=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --run-dir) run_dir="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+printf '{{"t":"progress","pct":40,"stage":"fetch","msg":"fetching"}}\n'
+printf '{{"ok":true}}' > "$run_dir/result.json"
+printf '{{"t":"done","result":"result.json","synthetic":true}}\n'
+exit 0
+"#,
+            argv = argv.display()
+        ),
+    );
+    let app = app_with_script(tmp.path(), &script, 2);
+
+    let body = json!({
+        "start": "2021-01-01",
+        "end": "2021-02-01",
+        "resolution": "1h",
+        "fetch_all": true,
+        "synthetic": true
+    });
+    let (status, resp) = post_ingest(&app, &body).await;
+    assert_eq!(status, StatusCode::CREATED, "create returned {resp}");
+    let id = resp["id"].as_str().expect("id in response").to_owned();
+
+    let meta = poll_status(&app, &id, "succeeded", TIMEOUT).await;
+    assert_eq!(meta["type"], json!("ingest"));
+    assert_eq!(meta["exit"], json!(0));
+    assert_eq!(meta["artifacts"], json!(["result.json"]));
+
+    // The spawner built the real ingest argv (subcommand + the resolved flags).
+    let argv_text = std::fs::read_to_string(&argv).unwrap();
+    assert!(
+        argv_text.lines().any(|l| l == "ingest"),
+        "argv: {argv_text}"
+    );
+    assert!(
+        argv_text.lines().any(|l| l == "--fetch-all"),
+        "argv: {argv_text}"
+    );
+    assert!(
+        argv_text.lines().any(|l| l == "--synthetic"),
+        "argv: {argv_text}"
+    );
+    assert!(
+        argv_text.lines().any(|l| l == "--json"),
+        "argv: {argv_text}"
+    );
+}
+
+/// `POST /api/ingest` rejects an invalid request with a uniform `400`: a missing window field, or a run
+/// that names neither an explicit `instruments` list nor `fetch_all`.
+#[tokio::test]
+async fn post_ingest_rejects_invalid_requests_with_400() {
+    let tmp = TempDir::new().unwrap();
+    let script = tmp.path().join("noop.sh");
+    write_script(&script, "#!/bin/sh\nexit 0\n");
+    let app = app_with_script(tmp.path(), &script, 2);
+
+    // Neither instruments nor fetch_all ⇒ 400.
+    let neither = json!({ "start": "2021-01-01", "end": "2021-02-01", "resolution": "1h" });
+    let (status, _) = post_ingest(&app, &neither).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "no instruments + no fetch_all must 400"
+    );
+
+    // Missing resolution ⇒ 400 (uniform required-field enforcement).
+    let no_res = json!({ "start": "2021-01-01", "end": "2021-02-01", "instruments": ["BTCUSDT"] });
+    let (status, _) = post_ingest(&app, &no_res).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "missing resolution must 400"
+    );
+
+    // An explicit instrument list with a full window is accepted (201).
+    let ok = json!({
+        "start": "2021-01-01", "end": "2021-02-01", "resolution": "1h",
+        "instruments": ["BTCUSDT"]
+    });
+    let (status, _) = post_ingest(&app, &ok).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "a valid explicit-instrument ingest must 201"
+    );
+}

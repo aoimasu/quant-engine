@@ -666,6 +666,38 @@ impl FlowParams {
     }
 }
 
+/// Ingest parameters — the `params` object of a `type:"ingest"` create-run request (QE-464), persisted
+/// verbatim in `meta.json` and mapped onto the `qe-cli ingest` flags.
+///
+/// Like the other run DTOs, every field is `#[serde(default)]` so the body parses **leniently**; the
+/// required-ness (`start`/`end`/`resolution`, and either a non-empty `instruments` list **or**
+/// `fetch_all`) is enforced in one place (`qe_server::runs::manager::validate_ingest`) as a uniform
+/// `400`. `fetch_all` resolves the instrument set through the point-in-time universe machinery
+/// (survivorship kill, QE-448); `synthetic` selects the deterministic offline generator (tagged
+/// `synthetic`) instead of the real decoder (tagged `real`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct IngestParams {
+    /// Explicit instrument symbols to ingest (`--instrument`, repeated). Empty ⇒ requires `fetch_all`.
+    #[serde(default)]
+    pub instruments: Vec<String>,
+    /// Fetch **all** available instruments, resolved via the point-in-time universe (`--fetch-all`).
+    #[serde(default)]
+    pub fetch_all: bool,
+    /// Inclusive window start `YYYY-MM-DD` (required; `--start`).
+    #[serde(default)]
+    pub start: String,
+    /// Exclusive window end `YYYY-MM-DD` (required; `--end`).
+    #[serde(default)]
+    pub end: String,
+    /// Bar resolution (required; `--resolution`).
+    #[serde(default)]
+    pub resolution: String,
+    /// Generate a deterministic **offline synthetic** store instead of a real ingest (`--synthetic`);
+    /// every bar is tagged `synthetic` so no store reads as real.
+    #[serde(default)]
+    pub synthetic: bool,
+}
+
 /// One occupied MAP-Elites niche of an evolve run's archive — the heatmap cell the QE-453 CampaignMonitor's
 /// `ArchiveHeatmap` renders (design §13.4). The three descriptor axes are the pure-structural
 /// family/timescale/complexity bands (§4.5); `best_fitness` is the cell champion's fitness (`None` when

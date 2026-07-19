@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use qe_cli::jobs::ingest::{coverage, run_ingest, CoverageRow, IngestParams, SyntheticSource};
 use qe_domain::{Bar, InstrumentId, Price, Qty, Resolution, Timestamp};
 use qe_runtime::{BootstrapError, HistoricalSource, HistoricalWindow};
-use qe_storage::MarketStore;
+use qe_storage::{Calibration, MarketStore, Provenance};
 use rust_decimal::Decimal;
 
 /// Small LMDB map size — matches the fixture's writer (`backtest_job.rs`); ample for a handful of bars.
@@ -59,6 +59,9 @@ fn coverage_over_sample_store_reports_expected_rows() {
             from: START_MS,
             to: START_MS + 119 * HOUR_MS,
             bars: 120,
+            // The committed fixture predates provenance tagging ⇒ legacy `unknown` (documented default).
+            provenance: "unknown".to_owned(),
+            calibrated: false,
         }],
         "coverage over the committed sample store diverged"
     );
@@ -137,7 +140,14 @@ fn ingest_populates_store_from_in_memory_source() {
         instrument: "BTCUSDT".to_owned(),
     };
 
-    run_ingest(&params, &mut source, &mut |_, _, _| {}).unwrap();
+    run_ingest(
+        &params,
+        &mut source,
+        Provenance::Real,
+        Calibration::Uncalibrated,
+        &mut |_, _, _| {},
+    )
+    .unwrap();
 
     // Reopen and confirm via the coverage query.
     let store = MarketStore::open(&store_path, FIXTURE_MAP_SIZE).unwrap();
@@ -150,6 +160,9 @@ fn ingest_populates_store_from_in_memory_source() {
             from: START_MS,
             to: START_MS + 4 * HOUR_MS,
             bars: 5,
+            // A real ingest tags `real`; the klines-only slice is uncalibrated (QE-463 handoff).
+            provenance: "real".to_owned(),
+            calibrated: false,
         }]
     );
 
@@ -207,7 +220,14 @@ fn synthetic_ingest_populates_fresh_store_with_expected_coverage() {
             map_size: FIXTURE_MAP_SIZE,
             instrument: (*symbol).to_owned(),
         };
-        run_ingest(&params, &mut source, &mut |_, _, _| {}).unwrap();
+        run_ingest(
+            &params,
+            &mut source,
+            Provenance::Synthetic,
+            Calibration::Uncalibrated,
+            &mut |_, _, _| {},
+        )
+        .unwrap();
     }
 
     let store = MarketStore::open(&store_path, FIXTURE_MAP_SIZE).unwrap();
@@ -220,7 +240,8 @@ fn synthetic_ingest_populates_fresh_store_with_expected_coverage() {
     )
     .unwrap();
 
-    // One coverage row per instrument, each spanning the whole window with exactly `n` bars.
+    // One coverage row per instrument, each spanning the whole window with exactly `n` bars, tagged
+    // `synthetic` (the offline generator) — never silently real.
     assert_eq!(
         rows,
         vec![
@@ -230,6 +251,8 @@ fn synthetic_ingest_populates_fresh_store_with_expected_coverage() {
                 from: START_MS,
                 to: START_MS + (n - 1) * HOUR_MS,
                 bars: n as usize,
+                provenance: "synthetic".to_owned(),
+                calibrated: false,
             },
             CoverageRow {
                 symbol: "ETHUSDT".to_owned(),
@@ -237,6 +260,8 @@ fn synthetic_ingest_populates_fresh_store_with_expected_coverage() {
                 from: START_MS,
                 to: START_MS + (n - 1) * HOUR_MS,
                 bars: n as usize,
+                provenance: "synthetic".to_owned(),
+                calibrated: false,
             },
         ]
     );
@@ -312,5 +337,12 @@ fn ingest_rejects_invalid_instrument() {
         map_size: FIXTURE_MAP_SIZE,
         instrument: String::new(), // invalid
     };
-    assert!(run_ingest(&params, &mut source, &mut |_, _, _| {}).is_err());
+    assert!(run_ingest(
+        &params,
+        &mut source,
+        Provenance::Real,
+        Calibration::Uncalibrated,
+        &mut |_, _, _| {}
+    )
+    .is_err());
 }

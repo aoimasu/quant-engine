@@ -10,6 +10,7 @@ use qe_domain::{Bar, FundingRateSample, InstrumentId, Resolution, Timestamp};
 
 use crate::engine::{check_or_init_schema, open_env, read_schema_version, DB_META};
 use crate::key::{bar_key, bar_prefix, series_key, series_prefix, time_from_key};
+use crate::provenance::{Calibration, Provenance, ProvenanceSegment, ProvenanceSummary};
 use crate::records::{FuturesMetrics, PremiumSample};
 use crate::{StorageError, SCHEMA_VERSION};
 
@@ -20,6 +21,8 @@ const DB_BARS: &str = "bars";
 const DB_FUNDING: &str = "funding";
 const DB_PREMIUM: &str = "premium";
 const DB_FUTURES: &str = "futures_metrics";
+/// QE-464: per-run provenance segments, keyed identically to a bar key by the range start.
+const DB_PROVENANCE: &str = "provenance";
 
 /// An embedded LMDB store for the fused market corpus.
 ///
@@ -32,6 +35,7 @@ pub struct MarketStore {
     funding: Database<Bytes, SerdeJson<FundingRateSample>>,
     premium: Database<Bytes, SerdeJson<PremiumSample>>,
     futures: Database<Bytes, SerdeJson<FuturesMetrics>>,
+    provenance: Database<Bytes, SerdeJson<ProvenanceSegment>>,
     meta: Database<Str, Str>,
 }
 
@@ -62,6 +66,12 @@ impl MarketStore {
             env.create_database(&mut wtxn, Some(DB_PREMIUM))?;
         let futures: Database<Bytes, SerdeJson<FuturesMetrics>> =
             env.create_database(&mut wtxn, Some(DB_FUTURES))?;
+        // QE-464: the provenance index is created on open; a store written before this ticket simply has
+        // an empty `provenance` DB, so its bars read `unknown` (documented legacy default — no migration).
+        // Additive — no SCHEMA_VERSION bump and no bar key/value change, so already-ingested bars keep
+        // their identity (no input_snapshot_id drift).
+        let provenance: Database<Bytes, SerdeJson<ProvenanceSegment>> =
+            env.create_database(&mut wtxn, Some(DB_PROVENANCE))?;
 
         check_or_init_schema(&meta, &mut wtxn, SCHEMA_VERSION)?;
         wtxn.commit()?;
@@ -72,6 +82,7 @@ impl MarketStore {
             funding,
             premium,
             futures,
+            provenance,
             meta,
         })
     }
@@ -213,6 +224,135 @@ impl MarketStore {
                 count,
             )
         }))
+    }
+
+    /// Number of stored bars for `(instrument, resolution)` whose open-time falls in the **inclusive**
+    /// range `[from, to]`, counted from **keys only** (no `Bar` value decoded — QE-412), so the
+    /// per-provenance-segment coverage split stays key-only.
+    ///
+    /// # Errors
+    /// [`StorageError`] on an LMDB failure.
+    pub fn count_bars_in_range(
+        &self,
+        instrument: &InstrumentId,
+        resolution: Resolution,
+        from: Timestamp,
+        to: Timestamp,
+    ) -> Result<usize, StorageError> {
+        let rtxn = self.env.read_txn()?;
+        let prefix = bar_prefix(instrument, resolution);
+        let mut count = 0usize;
+        for item in self
+            .bars
+            .remap_data_type::<DecodeIgnore>()
+            .prefix_iter(&rtxn, &prefix)?
+        {
+            let (key, ()) = item?;
+            let t = time_from_key(key).millis();
+            if t >= from.millis() && t <= to.millis() {
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+
+    // ---- provenance (QE-464: per-run real/synthetic/calibration segments) --------------------
+
+    /// Insert `bars` for `instrument` and record their origin as one provenance segment spanning the
+    /// `[first, last]` open-time of the batch.
+    ///
+    /// The bars are written through the exact same path as [`Self::put_bars`] (so bar identity — and any
+    /// snapshot id over bar bytes — is unchanged); the segment is written to the **separate** provenance
+    /// index, keyed by the batch's first open-time. An empty batch writes nothing. Re-tagging a range
+    /// (writing a later segment) never touches bar keys/values, so already-ingested data does not drift.
+    ///
+    /// # Errors
+    /// [`StorageError`] on an LMDB failure.
+    pub fn put_bars_with_provenance(
+        &self,
+        instrument: &InstrumentId,
+        bars: &[Bar],
+        provenance: Provenance,
+        calibration: Calibration,
+    ) -> Result<(), StorageError> {
+        self.put_bars(instrument, bars)?;
+        // One segment per (instrument, resolution) present in the batch: bars can carry mixed resolutions.
+        let mut wtxn = self.env.write_txn()?;
+        for resolution in Resolution::ALL {
+            let times: Vec<Timestamp> = bars
+                .iter()
+                .filter(|b| b.resolution() == resolution)
+                .map(Bar::open_time)
+                .collect();
+            let (Some(first), Some(last)) = (times.iter().min(), times.iter().max()) else {
+                continue;
+            };
+            let seg = ProvenanceSegment {
+                end_ms: last.millis(),
+                provenance,
+                calibration,
+            };
+            self.provenance
+                .put(&mut wtxn, &bar_key(instrument, resolution, *first), &seg)?;
+        }
+        wtxn.commit()?;
+        Ok(())
+    }
+
+    /// The provenance segments recorded for one `(instrument, resolution)` pair, ascending by range start.
+    ///
+    /// Each entry is `(start_open_time, end_open_time, provenance, calibration)`. Prefix-scans the
+    /// provenance index by key (the bars DB is untouched, so [`Self::coverage_bounds`] stays key-only).
+    ///
+    /// # Errors
+    /// [`StorageError`] on an LMDB failure.
+    pub fn provenance_segments(
+        &self,
+        instrument: &InstrumentId,
+        resolution: Resolution,
+    ) -> Result<Vec<(Timestamp, Timestamp, Provenance, Calibration)>, StorageError> {
+        let rtxn = self.env.read_txn()?;
+        let prefix = bar_prefix(instrument, resolution);
+        let mut out = Vec::new();
+        for item in self.provenance.prefix_iter(&rtxn, &prefix)? {
+            let (key, seg) = item?;
+            out.push((
+                time_from_key(key),
+                Timestamp::from_millis(seg.end_ms),
+                seg.provenance,
+                seg.calibration,
+            ));
+        }
+        Ok(out)
+    }
+
+    /// Fold the provenance of every stored bar of `instruments` at `resolution` into a single
+    /// [`ProvenanceSummary`] (the verdict the train path maps onto `qe_vintage::DataProvenance`).
+    ///
+    /// A `(instrument, resolution)` that has bars but **no** provenance segment contributes an
+    /// [`Provenance::Unknown`] (legacy/untagged) so a partially-tagged store never reports as fully
+    /// real. Instruments with no bars contribute nothing.
+    ///
+    /// # Errors
+    /// [`StorageError`] on an LMDB failure.
+    pub fn store_provenance_summary(
+        &self,
+        instruments: &[InstrumentId],
+        resolution: Resolution,
+    ) -> Result<ProvenanceSummary, StorageError> {
+        let mut provenances = Vec::new();
+        for instrument in instruments {
+            let segments = self.provenance_segments(instrument, resolution)?;
+            if segments.is_empty() {
+                // Bars present but untagged → legacy unknown; no bars → contribute nothing.
+                if self.coverage_bounds(instrument, resolution)?.is_some() {
+                    provenances.push(Provenance::Unknown);
+                }
+            } else {
+                provenances.extend(segments.iter().map(|&(_, _, p, _)| p));
+            }
+        }
+        Ok(ProvenanceSummary::from_provenances(provenances))
     }
 
     // ---- funding (keyed by instrument + time) -----------------------------------------------
@@ -552,6 +692,9 @@ mod tests {
                 from: 100_000,
                 to: 200_000,
                 bars: 2,
+                // No provenance segment was written (raw `put_bars`) ⇒ legacy `unknown`.
+                provenance: "unknown".to_owned(),
+                calibrated: false,
             }],
         );
 
@@ -567,6 +710,113 @@ mod tests {
                 )
                 .is_err(),
             "scan_bars decodes Bar values and must fail on the planted garbage value",
+        );
+    }
+
+    #[test]
+    fn provenance_tags_survive_and_summarise() {
+        use crate::provenance::{Calibration, Provenance, ProvenanceSummary};
+        let dir = tempfile::tempdir().unwrap();
+        let store = open(dir.path());
+        let id = inst("BTCUSDT");
+        let res = Resolution::M5;
+
+        store
+            .put_bars_with_provenance(
+                &id,
+                &[bar(res, 100, 100), bar(res, 200, 110)],
+                Provenance::Synthetic,
+                Calibration::Uncalibrated,
+            )
+            .unwrap();
+
+        let segs = store.provenance_segments(&id, res).unwrap();
+        assert_eq!(segs.len(), 1);
+        assert_eq!(segs[0].2, Provenance::Synthetic);
+        assert_eq!(segs[0].3, Calibration::Uncalibrated);
+        // A synthetic store summarises Synthetic — never silently Real.
+        assert_eq!(
+            store
+                .store_provenance_summary(std::slice::from_ref(&id), res)
+                .unwrap(),
+            ProvenanceSummary::Synthetic
+        );
+        // Coverage exposes the tag; the bars scan is still key-only.
+        let rows = coverage(&store, std::slice::from_ref(&id)).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].provenance, "synthetic");
+        assert!(!rows[0].calibrated);
+        assert_eq!(rows[0].bars, 2);
+    }
+
+    #[test]
+    fn mixed_store_reports_multiple_contiguous_rows_never_blended() {
+        use crate::provenance::{Calibration, Provenance};
+        let dir = tempfile::tempdir().unwrap();
+        let store = open(dir.path());
+        let id = inst("BTCUSDT");
+        let res = Resolution::M5;
+
+        // Real run over [100,200], then a synthetic run over a later, disjoint range [300,400].
+        store
+            .put_bars_with_provenance(
+                &id,
+                &[bar(res, 100, 100), bar(res, 200, 110)],
+                Provenance::Real,
+                Calibration::Uncalibrated,
+            )
+            .unwrap();
+        store
+            .put_bars_with_provenance(
+                &id,
+                &[bar(res, 300, 120), bar(res, 400, 130)],
+                Provenance::Synthetic,
+                Calibration::Uncalibrated,
+            )
+            .unwrap();
+
+        let rows = coverage(&store, std::slice::from_ref(&id)).unwrap();
+        // Two contiguous per-provenance rows, one per run — never one blended row.
+        assert_eq!(rows.len(), 2, "mixed store must be multiple rows: {rows:?}");
+        assert_eq!(rows[0].provenance, "real");
+        assert_eq!(
+            (rows[0].from, rows[0].to, rows[0].bars),
+            (100_000, 200_000, 2)
+        );
+        assert_eq!(rows[1].provenance, "synthetic");
+        assert_eq!(
+            (rows[1].from, rows[1].to, rows[1].bars),
+            (300_000, 400_000, 2)
+        );
+
+        assert_eq!(
+            store.store_provenance_summary(&[id], res).unwrap(),
+            crate::provenance::ProvenanceSummary::Mixed
+        );
+    }
+
+    #[test]
+    fn retagging_provenance_does_not_drift_bar_identity() {
+        use crate::provenance::{Calibration, Provenance};
+        let dir = tempfile::tempdir().unwrap();
+        let store = open(dir.path());
+        let id = inst("BTCUSDT");
+        let res = Resolution::M5;
+
+        let bars = [bar(res, 100, 100), bar(res, 200, 110)];
+        store.put_bars(&id, &bars).unwrap();
+        let before = store.coverage_bounds(&id, res).unwrap();
+        let bar_before = store.get_bar(&id, res, Timestamp::from_secs(100)).unwrap();
+
+        // Re-tag the same range with provenance (rewrites the bars + writes a segment). Bar identity
+        // (key-derived bounds + the decoded bar value) must be unchanged — no input_snapshot_id drift.
+        store
+            .put_bars_with_provenance(&id, &bars, Provenance::Real, Calibration::Uncalibrated)
+            .unwrap();
+        assert_eq!(store.coverage_bounds(&id, res).unwrap(), before);
+        assert_eq!(
+            store.get_bar(&id, res, Timestamp::from_secs(100)).unwrap(),
+            bar_before
         );
     }
 }

@@ -40,7 +40,7 @@ pub struct Progress {
 /// existing `super::model::{BacktestParams, TrainParams}` import paths (and the `meta.params` wire
 /// shape they define) are unchanged. Their `#[serde(default)]` leniency and the CLI-mirroring defaults
 /// (`taker_fee_bps` / `slippage_model`) are preserved verbatim on the shared types.
-pub use qe_run_protocol::{BacktestParams, EvolveParams, FlowParams, TrainParams};
+pub use qe_run_protocol::{BacktestParams, EvolveParams, FlowParams, IngestParams, TrainParams};
 
 /// Typed, **non-serialized** run parameters that drive subprocess spawning. Built by `manager::create`
 /// from the validated request; the spawner matches on it to build either the `backtest` or `train`
@@ -60,6 +60,10 @@ pub enum RunSpec {
     /// with the just-sealed vintage id (a deterministic content-hash handoff). One run-store row, one status;
     /// the sub-run ids are recorded in [`RunMeta::flow`] (design §5).
     Flow(FlowParams),
+    /// A QE-464 **ingest** run — populates the market store from the real decoder or the offline synthetic
+    /// generator, tagging every bar's provenance (`real`/`synthetic`). Never writes a vintage; terminates
+    /// with the standard `ingest` `done` line.
+    Ingest(IngestParams),
 }
 
 impl RunSpec {
@@ -70,6 +74,7 @@ impl RunSpec {
             RunSpec::Train(_) => "train",
             RunSpec::Evolve(_) => "evolve",
             RunSpec::Flow(_) => "flow",
+            RunSpec::Ingest(_) => "ingest",
         }
     }
 
@@ -81,6 +86,7 @@ impl RunSpec {
             RunSpec::Train(p) => serde_json::to_value(p),
             RunSpec::Evolve(p) => serde_json::to_value(p),
             RunSpec::Flow(p) => serde_json::to_value(p),
+            RunSpec::Ingest(p) => serde_json::to_value(p),
         }
         .unwrap_or(Value::Null)
     }
@@ -92,6 +98,15 @@ impl RunSpec {
             RunSpec::Train(p) => format!("train {}→{}", p.start, p.end),
             RunSpec::Evolve(p) => format!("evolve {}→{} ({})", p.start, p.end, p.mode.as_str()),
             RunSpec::Flow(p) => format!("flow {}→{}", p.start, p.end),
+            RunSpec::Ingest(p) => {
+                let scope = if p.fetch_all {
+                    "fetch-all".to_owned()
+                } else {
+                    p.instruments.join(",")
+                };
+                let kind = if p.synthetic { "synthetic" } else { "real" };
+                format!("ingest {scope} {}→{} ({kind})", p.start, p.end)
+            }
         }
     }
 

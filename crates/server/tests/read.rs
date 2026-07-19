@@ -289,6 +289,9 @@ async fn coverage_returns_the_sample_store_rows_with_a_session() {
             "from": START_MS,
             "to": START_MS + 119 * HOUR_MS,
             "bars": 120,
+            // QE-464: the committed fixture predates provenance tagging ⇒ legacy `unknown` / uncalibrated.
+            "provenance": "unknown",
+            "calibrated": false,
         }]),
         "coverage over the committed sample store diverged"
     );

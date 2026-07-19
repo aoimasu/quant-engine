@@ -22,7 +22,8 @@ use tokio::task::JoinHandle;
 
 use super::model::{
     BacktestParams, CreateRunRequest, EnsembleSnapshot, EvolveParams, FlowParams, GateSnapshot,
-    GenSnapshot, IndexEntry, Progress, RunMeta, RunSpec, RunStatus, TrainParams, TrainProgress,
+    GenSnapshot, IndexEntry, IngestParams, Progress, RunMeta, RunSpec, RunStatus, TrainParams,
+    TrainProgress,
 };
 use super::spawn::JobSpawner;
 use super::store::RunStore;
@@ -484,8 +485,16 @@ fn build_spec(req: &CreateRunRequest) -> Result<RunSpec, CreateError> {
             validate_flow(&p)?;
             Ok(RunSpec::Flow(p))
         }
+        "ingest" => {
+            // QE-464: every field defaults (lenient parse); required-ness is enforced by `validate_ingest`
+            // as a uniform `400`.
+            let p: IngestParams = serde_json::from_value(params)
+                .map_err(|e| CreateError::Validation(format!("invalid ingest params: {e}")))?;
+            validate_ingest(&p)?;
+            Ok(RunSpec::Ingest(p))
+        }
         other => Err(CreateError::Validation(format!(
-            "unsupported run type `{other}` (expected `backtest`, `train`, `evolve`, or `flow`)"
+            "unsupported run type `{other}` (expected `backtest`, `train`, `evolve`, `flow`, or `ingest`)"
         ))),
     }
 }
@@ -579,6 +588,22 @@ fn validate_flow(p: &FlowParams) -> Result<(), CreateError> {
     // zero divergence. `seed` is already enforced-present by serde in `build_spec` (a missing seed is a
     // `400`), so a flow is byte-reproducible off its recorded seed.
     validate_train(&p.to_train_params())
+}
+
+/// Validate ingest params (QE-464): the window (`start`/`end`/`resolution`) is required, and the run must
+/// name **either** an explicit non-empty `instruments` list **or** `fetch_all` — never neither. Every
+/// failure is a uniform `400` (never a serde `422`), mirroring the other run kinds.
+fn validate_ingest(p: &IngestParams) -> Result<(), CreateError> {
+    require("start", &p.start)?;
+    require("end", &p.end)?;
+    require("resolution", &p.resolution)?;
+    let named = p.instruments.iter().any(|s| !s.trim().is_empty());
+    if !named && !p.fetch_all {
+        return Err(CreateError::Validation(
+            "ingest requires either a non-empty `instruments` list or `fetch_all: true`".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 /// Reject a non-steerable (blocklist) gate-decision knob that appears in the request at all (a `400`) —
@@ -806,6 +831,13 @@ async fn supervise(
                 };
             }
             RunSpec::Backtest(_) => {}
+            RunSpec::Ingest(_) => {
+                meta.progress = Progress {
+                    pct: 100,
+                    stage: "done".to_owned(),
+                    msg: "ingest complete".to_owned(),
+                };
+            }
             // A flow is sequenced by `supervise_flow` (returned early above) and never reaches this
             // single-child terminal path.
             RunSpec::Flow(_) => {}

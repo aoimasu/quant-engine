@@ -9,11 +9,13 @@
 pub mod coverage;
 mod engine;
 pub mod key;
+pub mod provenance;
 pub mod records;
 pub mod store;
 pub mod synthetic;
 
 pub use coverage::{coverage, coverage_all, CoverageRow};
+pub use provenance::{Calibration, Provenance, ProvenanceSegment, ProvenanceSummary};
 pub use records::{FuturesMetrics, PremiumSample};
 pub use store::{MarketStore, DEFAULT_MAP_SIZE};
 pub use synthetic::{IndicatorKey, SyntheticStore, SYNTHETIC_SCHEMA_VERSION};
