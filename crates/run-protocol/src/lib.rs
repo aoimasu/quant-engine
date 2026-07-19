@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 /// The run-protocol wire version. The CLI stamps it on the terminal [`ProgressLine::Done`] line and the
 /// server checks it (logging a warning on mismatch — see `qe_server::runs::manager`). Bump this on any
 /// backward-incompatible change to the wire shapes below.
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// The `protocol_version` a terminal `done` line that predates QE-406 (or any line that omits the
 /// field) deserializes to — distinct from every real [`PROTOCOL_VERSION`] so the server can detect and
@@ -537,6 +537,135 @@ pub struct EvolveParams {
     pub profile: Option<String>,
 }
 
+// ---- QE-460 composite flow run-spec (server-owned train→backtest over a frozen holdout) ----------
+
+/// Composite-flow parameters (QE-460) — the `params` object of a `type:"flow"` create-run request
+/// (design §5.1). A flow configures a steer-whitelisted `train` + its frozen OOS holdout **once**; the
+/// server then sequences `train`→`backtest` in one supervised, atomic run with a deterministic
+/// content-hash vintage handoff.
+///
+/// **`seed` is REQUIRED** (no serde default — mirrors [`EvolveParams::seed`], design §5.1: a flow verdict
+/// must stay byte-reproducible off the recorded seed). The window (`start`/`end`/`resolution`) is required
+/// too (enforced as a uniform `400` in `validate_flow`). **Every other field is `#[serde(default)]`** so the
+/// body parses leniently.
+///
+/// The flow embeds the QE-458 steer-whitelisted train block (`generations`/`population`/`indicator_subset`/
+/// `windows`/`folds`) + the blocklist probes + `holdout`/`embargo`/`purge` — it is a superset that yields a
+/// [`TrainParams`] via [`FlowParams::to_train_params`], so `validate_flow` can **reuse** `validate_train`
+/// verbatim (no duplicated/divergent whitelist). The instrument universe is config-derived like `train`; the
+/// backtest window is **not** operator-chosen — it is the server-frozen holdout the train phase carves and
+/// records (design §4 (a)/(b)).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct FlowParams {
+    /// Master flow seed (**required**; drives the train search seed + the deterministic backtest). A fixed
+    /// seed + pinned snapshot reproduces the flow vintage byte-identically (QE-006/QE-129).
+    pub seed: u64,
+    /// Inclusive flow-window start `YYYY-MM-DD` (required; the train window's start).
+    #[serde(default)]
+    pub start: String,
+    /// Exclusive flow-window end `YYYY-MM-DD` (required; the pinned snapshot's right edge — the holdout is
+    /// carved server-side from it, design §4 (b)).
+    #[serde(default)]
+    pub end: String,
+    /// Bar resolution (required; `1h`, …).
+    #[serde(default)]
+    pub resolution: String,
+    /// MAP-Elites search generations (`--generations`); omitted ⇒ the CLI default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generations: Option<usize>,
+    /// Variation steps per direction per generation (`--population`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub population: Option<usize>,
+    /// Final bars reserved as the frozen G1 holdout (`--holdout`; floored, design §4). Carved once here and
+    /// handed identically to both sub-runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub holdout: Option<usize>,
+    /// Embargo bars purged between the train window and the holdout (`--embargo`; floored, design §4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embargo: Option<usize>,
+    /// Optional config-file path override (`--config`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config: Option<String>,
+    /// Optional operating profile override (`--profile`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+
+    // ---- QE-458 whitelisted, gate-monotone steer knobs (design §6.1) ------------------------------
+    /// Indicator subset — catalogue-indicator ids in play (`None` ⇒ the full catalogue).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub indicator_subset: Option<Vec<String>>,
+    /// Evolved-pool source id (rejected by `validate_train`/`validate_flow` — not yet applied on the live
+    /// search; carried so a request naming it errors rather than silently running un-steered).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evolved_pool: Option<String>,
+    /// Evolved-formula subset (rejected, like `evolved_pool`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evolved_formulas: Option<Vec<String>>,
+    /// WFO windows the steered run scores over (`--windows`; floored ≥ `MIN_WFO_WINDOWS`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub windows: Option<usize>,
+    /// CV folds the steered run scores over (`--folds`; floored ≥ `MIN_WFO_FOLDS`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folds: Option<usize>,
+
+    // ---- QE-458 blocklist probes (design §6.2) — NOT steerable ------------------------------------
+    /// Cost-stress friction multiplier (blocklist; `validate_flow` rejects any set value).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_stress_multiplier: Option<f64>,
+    /// Max-turnover cap fraction (blocklist).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_turnover_frac: Option<f64>,
+    /// Capacity floor, USD (blocklist).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacity_floor_usd: Option<i64>,
+    /// DSR cutoff (blocklist).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dsr_cutoff: Option<f64>,
+    /// Uncensored-PBO cutoff (blocklist).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pbo_cutoff: Option<f64>,
+    /// IC / FDR discovery threshold (blocklist).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ic_fdr_threshold: Option<f64>,
+    /// Purge bars between train and holdout (blocklist; floored).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purge: Option<usize>,
+}
+
+impl FlowParams {
+    /// Project the flow's steer-whitelisted train block onto a [`TrainParams`] (design §5.1) — the single
+    /// source `validate_flow` validates and the flow supervisor spawns the `train` sub-job from, so the
+    /// QE-458 whitelist/blocklist/floor enforcement is **reused, never duplicated**. The flow `seed` becomes
+    /// the (required) train search seed.
+    #[must_use]
+    pub fn to_train_params(&self) -> TrainParams {
+        TrainParams {
+            start: self.start.clone(),
+            end: self.end.clone(),
+            resolution: self.resolution.clone(),
+            seed: Some(self.seed),
+            generations: self.generations,
+            population: self.population,
+            holdout: self.holdout,
+            embargo: self.embargo,
+            config: self.config.clone(),
+            profile: self.profile.clone(),
+            indicator_subset: self.indicator_subset.clone(),
+            evolved_pool: self.evolved_pool.clone(),
+            evolved_formulas: self.evolved_formulas.clone(),
+            windows: self.windows,
+            folds: self.folds,
+            cost_stress_multiplier: self.cost_stress_multiplier,
+            max_turnover_frac: self.max_turnover_frac,
+            capacity_floor_usd: self.capacity_floor_usd,
+            dsr_cutoff: self.dsr_cutoff,
+            pbo_cutoff: self.pbo_cutoff,
+            ic_fdr_threshold: self.ic_fdr_threshold,
+            purge: self.purge,
+        }
+    }
+}
+
 /// One occupied MAP-Elites niche of an evolve run's archive — the heatmap cell the QE-453 CampaignMonitor's
 /// `ArchiveHeatmap` renders (design §13.4). The three descriptor axes are the pure-structural
 /// family/timescale/complexity bands (§4.5); `best_fitness` is the cell champion's fitness (`None` when
@@ -622,7 +751,7 @@ mod tests {
         let mut lines = s.lines();
         assert_eq!(
             lines.next().unwrap(),
-            r#"{"t":"done","result":"result.json","protocol_version":2}"#
+            r#"{"t":"done","result":"result.json","protocol_version":3}"#
         );
         assert_eq!(lines.next().unwrap(), r#"{"t":"error","msg":"boom"}"#);
     }
@@ -635,8 +764,11 @@ mod tests {
     }
 
     #[test]
-    fn protocol_version_is_two() {
-        assert_eq!(PROTOCOL_VERSION, 2, "QE-452 bumped the run protocol 1 → 2");
+    fn protocol_version_is_three() {
+        assert_eq!(
+            PROTOCOL_VERSION, 3,
+            "QE-460 bumped the run protocol 2 → 3 for the new `flow` run-kind"
+        );
     }
 
     #[test]
@@ -646,7 +778,7 @@ mod tests {
         let s = String::from_utf8(buf).unwrap();
         assert_eq!(
             s.trim_end(),
-            r#"{"t":"done","result":"result.json","protocol_version":2,"pool":"pool-abc123"}"#
+            r#"{"t":"done","result":"result.json","protocol_version":3,"pool":"pool-abc123"}"#
         );
         // Round-trips back to a Done carrying the pool, no vintage.
         match serde_json::from_str::<ProgressLine>(s.trim_end()).unwrap() {
@@ -672,5 +804,40 @@ mod tests {
         // Unknown mode string is a serde reject → a clear 400 upstream.
         let bad = serde_json::from_str::<EvolveParams>(r#"{"seed":1,"mode":"prod"}"#);
         assert!(bad.is_err(), "unknown mode must reject");
+    }
+
+    #[test]
+    fn flow_params_requires_seed_but_defaults_the_rest() {
+        // A missing seed is a serde reject (seed is REQUIRED, mirroring EvolveParams).
+        let err = serde_json::from_str::<FlowParams>(r#"{"start":"2021-01-01"}"#).unwrap_err();
+        assert!(err.to_string().contains("seed"), "missing seed: {err}");
+        // With just a seed, every other field takes its default.
+        let p: FlowParams = serde_json::from_str(r#"{"seed":9}"#).unwrap();
+        assert_eq!(p.seed, 9);
+        assert!(p.start.is_empty());
+        assert_eq!(p.holdout, None);
+    }
+
+    #[test]
+    fn flow_to_train_params_carries_the_seed_window_and_steer_block() {
+        let p: FlowParams = serde_json::from_str(
+            r#"{"seed":9,"start":"2021-01-01","end":"2021-06-01","resolution":"1h",
+                "holdout":300,"embargo":24,"windows":6,"folds":3,
+                "indicator_subset":["rsi_14"]}"#,
+        )
+        .unwrap();
+        let t = p.to_train_params();
+        // The flow seed becomes the (required) train search seed, and the steer block is carried verbatim so
+        // `validate_train` can be reused with no divergence.
+        assert_eq!(t.seed, Some(9));
+        assert_eq!(t.start, "2021-01-01");
+        assert_eq!(t.holdout, Some(300));
+        assert_eq!(t.embargo, Some(24));
+        assert_eq!(t.windows, Some(6));
+        assert_eq!(t.folds, Some(3));
+        assert_eq!(
+            t.indicator_subset.as_deref(),
+            Some(&["rsi_14".to_owned()][..])
+        );
     }
 }

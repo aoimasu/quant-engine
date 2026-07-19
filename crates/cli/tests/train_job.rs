@@ -80,6 +80,8 @@ fn params(store_path: PathBuf, vintage_root: PathBuf, seed: u64) -> TrainParams 
         indicator_subset: None,
         windows: None,
         folds: None,
+        // Plain train (not a composite-flow sub-job) ⇒ no frozen-holdout lineage; byte-identical seal.
+        flow: false,
     }
 }
 
@@ -514,5 +516,219 @@ fn steered_run_with_an_unknown_indicator_errors_rather_than_running_unsteered() 
     assert!(
         !sealed_any,
         "no vintage may be sealed for an unknown-indicator steer"
+    );
+}
+
+// ---- QE-460 composite-flow train sub-job: frozen-holdout lineage recording -----------------------
+
+/// Build `--flow` train params over the fixture with a holdout large enough to span ≥ 2 regimes.
+fn flow_params(store_path: PathBuf, vintage_root: PathBuf, seed: u64) -> TrainParams {
+    TrainParams {
+        flow: true,
+        holdout: 60,
+        embargo: 2,
+        ..params(store_path, vintage_root, seed)
+    }
+}
+
+/// AC2/AC3: a `--flow` seal records the frozen holdout split + regime composition into the vintage lineage
+/// (QE-467 schema), and the resolved holdout window is the SINGLE consultation the flow's backtest runs on
+/// (the recorded holdout range), not a disjoint OOS window.
+#[test]
+fn flow_seal_records_frozen_holdout_split_and_regime_composition() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store_path = copy_store_to(tmp.path());
+    let root = tmp.path().join("artifacts/flow");
+    let outcome = run_train_job(&flow_params(store_path, root.clone(), 42), &mut |_| {})
+        .expect("flow train seals");
+    let v = VintageRepository::new(&root)
+        .load(&outcome.vintage_id)
+        .unwrap();
+    let prov = &v.content.provenance;
+
+    // The frozen split {holdout_range, train_range, embargo} is recorded.
+    let split = &prov.holdout_split;
+    assert!(split.holdout_range.is_some(), "holdout_range recorded");
+    assert!(split.train_range.is_some(), "train_range recorded");
+    assert_eq!(split.embargo_bars, 2);
+
+    // The holdout is regime-stratified: ≥ 2 distinct QE-125 regime labels, and the bar tallies reconcile.
+    assert!(
+        prov.regime_composition.len() >= 2,
+        "holdout spans ≥ 2 regimes: {:?}",
+        prov.regime_composition
+    );
+    assert!(prov.regime_composition.iter().all(|r| r.bars > 0));
+
+    // First-consultation of a fresh holdout ⇒ count == 1.
+    assert_eq!(prov.consultation_count, 1);
+
+    // AC2 single consultation: the flow's backtest window IS the recorded holdout (evaluates ON it). The
+    // handoff window's start is the calendar date of the recorded holdout range's first bar.
+    let hw = outcome
+        .result
+        .holdout_window
+        .expect("flow records the holdout window");
+    let holdout_start_ms: i64 = split.holdout_range.as_ref().unwrap().start.parse().unwrap();
+    let expect_day = {
+        // format_ymd(holdout_start_ms) — recompute the civil date the flow recorded.
+        let days = holdout_start_ms.div_euclid(86_400_000);
+        let z = days + 719_468;
+        let era = z / 146_097;
+        let doe = z - era * 146_097;
+        let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+        let y = yoe + era * 400;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let d = doy - (153 * mp + 2) / 5 + 1;
+        let m = if mp < 10 { mp + 3 } else { mp - 9 };
+        let y = y + i64::from(m <= 2);
+        format!("{y:04}-{m:02}-{d:02}")
+    };
+    assert_eq!(
+        hw.start, expect_day,
+        "backtest window start = the recorded holdout range's first bar"
+    );
+    assert_eq!(
+        hw.end, "2021-01-10",
+        "backtest window end = the flow-window (snapshot) right edge"
+    );
+}
+
+/// AC6 determinism: two `--flow` seals from the same seed + snapshot in FRESH repos reproduce the vintage
+/// byte-identically (content hash), including the frozen-holdout lineage.
+#[test]
+fn flow_seal_is_byte_identical_for_the_same_seed_in_a_fresh_repo() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store_path = copy_store_to(tmp.path());
+    let a = run_train_job(
+        &flow_params(store_path.clone(), tmp.path().join("art/a"), 42),
+        &mut |_| {},
+    )
+    .expect("flow a");
+    let b = run_train_job(
+        &flow_params(store_path, tmp.path().join("art/b"), 42),
+        &mut |_| {},
+    )
+    .expect("flow b");
+    assert_eq!(a.vintage_id, b.vintage_id, "same seed ⇒ same vintage id");
+    assert_eq!(
+        a.content_hash, b.content_hash,
+        "same seed + snapshot ⇒ byte-identical flow vintage (incl. frozen-holdout lineage)"
+    );
+}
+
+/// AC4: the consultation counter is overlap-keyed — a second flow whose holdout INTERSECTS a prior sealed
+/// flow's holdout (different sizes, so not exact equality) records `consultation_count == 2`.
+#[test]
+fn flow_consultation_counter_is_overlap_keyed_not_equality() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store_path = copy_store_to(tmp.path());
+    // Both flows seal into the SAME repo (a campaign) so the counter sees the prior vintage.
+    let root = tmp.path().join("artifacts/campaign");
+
+    // Flow A: holdout of 60 bars (the last 60).
+    let a = run_train_job(
+        &TrainParams {
+            flow: true,
+            holdout: 60,
+            embargo: 2,
+            ..params(store_path.clone(), root.clone(), 1)
+        },
+        &mut |_| {},
+    )
+    .expect("flow a");
+    let va = VintageRepository::new(&root).load(&a.vintage_id).unwrap();
+    assert_eq!(
+        va.content.provenance.consultation_count, 1,
+        "A is the first consultation"
+    );
+
+    // Flow B: holdout of 40 bars (the last 40) ⊂ A's holdout — a DIFFERENT range that still INTERSECTS A's,
+    // so the overlap-keyed counter (not exact equality) counts A.
+    let b = run_train_job(
+        &TrainParams {
+            flow: true,
+            holdout: 40,
+            embargo: 2,
+            ..params(store_path, root.clone(), 2)
+        },
+        &mut |_| {},
+    )
+    .expect("flow b");
+    let vb = VintageRepository::new(&root).load(&b.vintage_id).unwrap();
+    // The two holdout ranges are not equal (60 vs 40 bars) …
+    assert_ne!(
+        va.content.provenance.holdout_split.holdout_range,
+        vb.content.provenance.holdout_split.holdout_range,
+        "the two holdouts are different ranges (not exact equality)"
+    );
+    // … yet B counts A because their bars intersect (overlap-keyed budget).
+    assert_eq!(
+        vb.content.provenance.consultation_count, 2,
+        "B's holdout overlaps A's ⇒ count 2"
+    );
+}
+
+/// AC5 cost parity (the test that would have caught the 2-vs-5-bps bug): a `--flow` train records the EXACT
+/// taker fee the G1 gate priced the holdout with, and it EQUALS the gate's own `FeeSchedule::default().taker`
+/// (5 bps), NOT the standalone-CLI `BacktestParams` default (2 bps). The flow supervisor pins the holdout
+/// backtest to this recorded fee, so the flow's holdout backtest fee == the gate's fee.
+#[test]
+fn flow_records_the_gate_taker_fee_and_it_equals_the_gate_default() {
+    use qe_wfo::friction::FeeSchedule;
+    use rust_decimal::prelude::ToPrimitive;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let store_path = copy_store_to(tmp.path());
+    let root = tmp.path().join("artifacts/flow");
+    let outcome =
+        run_train_job(&flow_params(store_path, root, 42), &mut |_| {}).expect("flow train seals");
+
+    let recorded = outcome
+        .result
+        .gate_taker_fee_bps
+        .expect("a --flow train records the gate taker fee");
+    // The gate priced the G1 holdout with `BacktestConfig::default().friction` → `FeeSchedule::default().taker`.
+    let gate_fee_bps = FeeSchedule::default().taker.to_f64().unwrap() * 10_000.0;
+    assert!(
+        (recorded - gate_fee_bps).abs() < 1e-9,
+        "recorded gate fee {recorded} bps must equal the gate's FeeSchedule::default().taker {gate_fee_bps} bps"
+    );
+    assert!(
+        (recorded - 5.0).abs() < 1e-9,
+        "the gate fee is 5 bps (0.0005), NOT the 2 bps standalone-CLI default — got {recorded}"
+    );
+}
+
+/// A plain (non-flow) train leaves the frozen-holdout lineage EMPTY — un-flow vintages are unaffected by
+/// QE-460 (byte-identical seal, no golden move).
+#[test]
+fn plain_train_records_no_frozen_holdout_lineage() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store_path = copy_store_to(tmp.path());
+    let root = tmp.path().join("artifacts/plain");
+    let o = run_train_job(&params(store_path, root.clone(), 42), &mut |_| {}).expect("plain train");
+    let v = VintageRepository::new(&root).load(&o.vintage_id).unwrap();
+    let prov = &v.content.provenance;
+    assert!(
+        prov.holdout_split.holdout_range.is_none(),
+        "no holdout range on a plain train"
+    );
+    assert!(
+        prov.regime_composition.is_empty(),
+        "no regime composition on a plain train"
+    );
+    assert_eq!(
+        prov.consultation_count, 0,
+        "no consultation recorded on a plain train"
+    );
+    assert!(
+        o.result.holdout_window.is_none(),
+        "no holdout window on a plain train result"
+    );
+    assert!(
+        o.result.gate_taker_fee_bps.is_none(),
+        "no gate-fee handoff on a plain train result"
     );
 }

@@ -1072,3 +1072,96 @@ exit 0
     poll_status(&app, &id1, "succeeded", TIMEOUT).await;
     poll_status(&app, &id2, "succeeded", TIMEOUT).await;
 }
+
+// ---- QE-460 composite flow (train→backtest sequencing over a frozen holdout) ----------------------
+
+/// A `/bin/sh` fake `qe` CLI that dispatches on the sub-command: a `train` sub-job emits a G1 gate verdict
+/// (`promoted` from `$1` of the caller via the env-substituted literal), writes a `result.json` carrying the
+/// frozen holdout window + instrument handoff, and emits a terminal `done` with a sealed vintage id; a
+/// `backtest` sub-job writes a `result.json` and emits `done`. This exercises the REAL flow supervisor
+/// sequencing (train → read handoff → cost-parity guard → backtest) with no `qe-cli` build.
+fn flow_script_body(train_promoted: bool) -> String {
+    let promoted = if train_promoted { "true" } else { "false" };
+    format!(
+        r#"#!/bin/sh
+sub="$1"
+run_dir=""
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "--run-dir" ]; then run_dir="$a"; fi
+  prev="$a"
+done
+if [ "$sub" = "train" ]; then
+  printf '{{"t":"progress","pct":20,"stage":"features","msg":"train"}}\n'
+  printf '{{"t":"gate","pct":85,"stage":"gate","promoted":{promoted},"n_trials":10}}\n'
+  printf '%s\n' '{{"instrument":"BTCUSDT","gate_taker_fee_bps":5.0,"holdout_window":{{"start":"2021-01-05","end":"2021-01-10","resolution":"1h"}},"vintage_id":"vint-flow-1"}}' > "$run_dir/result.json"
+  printf '{{"t":"done","result":"result.json","protocol_version":3,"vintage":"vint-flow-1"}}\n'
+else
+  printf '{{"t":"progress","pct":50,"stage":"simulate","msg":"backtest"}}\n'
+  printf '{{}}\n' > "$run_dir/result.json"
+  printf '{{"t":"done","result":"result.json","protocol_version":3}}\n'
+fi
+"#
+    )
+}
+
+fn create_flow_body() -> Value {
+    json!({
+        "type": "flow",
+        "params": { "seed": 7, "start": "2021-01-01", "end": "2021-01-10", "resolution": "1h" }
+    })
+}
+
+/// AC1/AC5: a `type:"flow"` create sequences train→backtest atomically with a content-hash vintage handoff;
+/// the flow row carries one status and records both sub-run ids + the frozen holdout in `meta.flow`.
+#[tokio::test]
+async fn flow_sequences_train_then_backtest_and_records_sub_runs() {
+    let tmp = TempDir::new().unwrap();
+    let script = tmp.path().join("qe.sh");
+    write_script(&script, &flow_script_body(true));
+    let app = app_with_script(tmp.path(), &script, 2);
+
+    let (status, body) = post_run(&app, &create_flow_body()).await;
+    assert_eq!(status, StatusCode::CREATED, "flow create: {body}");
+    let id = body["id"].as_str().unwrap().to_owned();
+
+    let meta = poll_status(&app, &id, "succeeded", TIMEOUT).await;
+    assert_eq!(meta["type"], "flow");
+    // One row, one status, both sub-run ids + the frozen holdout recorded (design §5.2).
+    assert_eq!(meta["flow"]["train_run"], "train");
+    assert_eq!(meta["flow"]["backtest_run"], "backtest");
+    assert_eq!(meta["flow"]["vintage"], "vint-flow-1");
+    assert_eq!(meta["flow"]["holdout_start"], "2021-01-05");
+    assert_eq!(meta["flow"]["holdout_end"], "2021-01-10");
+}
+
+/// AC1: a flow whose train fails the G1 gate seals nothing that promotes and runs NO backtest — the flow
+/// fails atomically and never records a backtest sub-run.
+#[tokio::test]
+async fn flow_with_failed_g1_train_runs_no_backtest_and_fails() {
+    let tmp = TempDir::new().unwrap();
+    let script = tmp.path().join("qe.sh");
+    write_script(&script, &flow_script_body(false)); // train emits promoted:false
+    let app = app_with_script(tmp.path(), &script, 2);
+
+    let (status, body) = post_run(&app, &create_flow_body()).await;
+    assert_eq!(status, StatusCode::CREATED, "flow create: {body}");
+    let id = body["id"].as_str().unwrap().to_owned();
+
+    let meta = poll_status(&app, &id, "failed", TIMEOUT).await;
+    // The train sub-run was attempted, but the backtest sub-run was NEVER spawned (no backtest_run id).
+    assert_eq!(meta["flow"]["train_run"], "train");
+    assert!(
+        meta["flow"]["backtest_run"].is_null(),
+        "a failed-G1 train must run NO backtest: {meta}"
+    );
+    assert!(
+        meta["error"].as_str().unwrap_or_default().contains("G1"),
+        "failure reason names the G1 gate: {meta}"
+    );
+    // The backtest sub-run dir was never created.
+    assert!(
+        !tmp.path().join("runs").join(&id).join("backtest").exists(),
+        "no backtest sub-run dir may exist for a failed-G1 flow"
+    );
+}

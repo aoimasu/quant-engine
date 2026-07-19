@@ -84,7 +84,7 @@ fn ensemble_and_gate_wire_are_frozen() {
 
 #[test]
 fn done_and_error_wire_are_frozen() {
-    // Backtest form (no vintage, no pool) — carries the current protocol version (QE-452: 2).
+    // Backtest form (no vintage, no pool) — carries the current protocol version (QE-460: 3).
     assert_wire(
         &ProgressLine::Done {
             result: "result.json".to_owned(),
@@ -93,7 +93,7 @@ fn done_and_error_wire_are_frozen() {
             pool: None,
             synthetic: false,
         },
-        r#"{"t":"done","result":"result.json","protocol_version":2}"#,
+        r#"{"t":"done","result":"result.json","protocol_version":3}"#,
     );
     // Train form — names the sealed vintage.
     assert_wire(
@@ -104,7 +104,7 @@ fn done_and_error_wire_are_frozen() {
             pool: None,
             synthetic: false,
         },
-        r#"{"t":"done","result":"result.json","protocol_version":2,"vintage":"vintage-abc123"}"#,
+        r#"{"t":"done","result":"result.json","protocol_version":3,"vintage":"vintage-abc123"}"#,
     );
     // Evolve form (QE-452) — names the sealed formula pool, never a vintage.
     assert_wire(
@@ -115,7 +115,7 @@ fn done_and_error_wire_are_frozen() {
             pool: Some("pool-abc123".to_owned()),
             synthetic: false,
         },
-        r#"{"t":"done","result":"result.json","protocol_version":2,"pool":"pool-abc123"}"#,
+        r#"{"t":"done","result":"result.json","protocol_version":3,"pool":"pool-abc123"}"#,
     );
     // Synthetic ingest form (QE synthetic-ingest) — the loud `synthetic:true` marker; the only place
     // the field appears on the wire (absent-by-default everywhere else keeps PROTOCOL_VERSION at 2).
@@ -127,7 +127,7 @@ fn done_and_error_wire_are_frozen() {
             pool: None,
             synthetic: true,
         },
-        r#"{"t":"done","result":"synthetic-store","protocol_version":2,"synthetic":true}"#,
+        r#"{"t":"done","result":"synthetic-store","protocol_version":3,"synthetic":true}"#,
     );
     assert_wire(
         &ProgressLine::Error {
@@ -218,11 +218,11 @@ fn emit_helpers_match_the_frozen_wire() {
         lines,
         vec![
             r#"{"t":"progress","pct":5,"stage":"load","msg":"loading"}"#,
-            r#"{"t":"done","result":"result.json","protocol_version":2}"#,
-            r#"{"t":"done","result":"result.json","protocol_version":2,"vintage":"vintage-abc123"}"#,
-            r#"{"t":"done","result":"result.json","protocol_version":2,"pool":"pool-abc123"}"#,
-            r#"{"t":"done","result":"result.json","protocol_version":2}"#,
-            r#"{"t":"done","result":"synthetic-store","protocol_version":2,"synthetic":true}"#,
+            r#"{"t":"done","result":"result.json","protocol_version":3}"#,
+            r#"{"t":"done","result":"result.json","protocol_version":3,"vintage":"vintage-abc123"}"#,
+            r#"{"t":"done","result":"result.json","protocol_version":3,"pool":"pool-abc123"}"#,
+            r#"{"t":"done","result":"result.json","protocol_version":3}"#,
+            r#"{"t":"done","result":"synthetic-store","protocol_version":3,"synthetic":true}"#,
             r#"{"t":"error","msg":"boom"}"#,
         ]
     );

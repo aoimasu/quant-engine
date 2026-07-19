@@ -40,7 +40,7 @@ pub struct Progress {
 /// existing `super::model::{BacktestParams, TrainParams}` import paths (and the `meta.params` wire
 /// shape they define) are unchanged. Their `#[serde(default)]` leniency and the CLI-mirroring defaults
 /// (`taker_fee_bps` / `slippage_model`) are preserved verbatim on the shared types.
-pub use qe_run_protocol::{BacktestParams, EvolveParams, TrainParams};
+pub use qe_run_protocol::{BacktestParams, EvolveParams, FlowParams, TrainParams};
 
 /// Typed, **non-serialized** run parameters that drive subprocess spawning. Built by `manager::create`
 /// from the validated request; the spawner matches on it to build either the `backtest` or `train`
@@ -55,6 +55,11 @@ pub enum RunSpec {
     /// A QE-452 offline GP indicator-**evolution** campaign — produces a sealed **formula pool**, never a
     /// vintage (§13.3).
     Evolve(EvolveParams),
+    /// A QE-460 server-owned **composite flow** — sequences a `train` sub-job (sealing a vintage over a
+    /// frozen, regime-stratified OOS holdout carved once) then a `backtest` sub-job over that same holdout
+    /// with the just-sealed vintage id (a deterministic content-hash handoff). One run-store row, one status;
+    /// the sub-run ids are recorded in [`RunMeta::flow`] (design §5).
+    Flow(FlowParams),
 }
 
 impl RunSpec {
@@ -64,6 +69,7 @@ impl RunSpec {
             RunSpec::Backtest(_) => "backtest",
             RunSpec::Train(_) => "train",
             RunSpec::Evolve(_) => "evolve",
+            RunSpec::Flow(_) => "flow",
         }
     }
 
@@ -74,6 +80,7 @@ impl RunSpec {
             RunSpec::Backtest(p) => serde_json::to_value(p),
             RunSpec::Train(p) => serde_json::to_value(p),
             RunSpec::Evolve(p) => serde_json::to_value(p),
+            RunSpec::Flow(p) => serde_json::to_value(p),
         }
         .unwrap_or(Value::Null)
     }
@@ -84,6 +91,7 @@ impl RunSpec {
             RunSpec::Backtest(p) => p.vintage.clone(),
             RunSpec::Train(p) => format!("train {}→{}", p.start, p.end),
             RunSpec::Evolve(p) => format!("evolve {}→{} ({})", p.start, p.end, p.mode.as_str()),
+            RunSpec::Flow(p) => format!("flow {}→{}", p.start, p.end),
         }
     }
 
@@ -91,7 +99,7 @@ impl RunSpec {
     /// pool artefact only. This is the load-bearing lifecycle-separation predicate the supervisor asserts
     /// against the terminal `done` line.
     pub fn writes_vintage(&self) -> bool {
-        matches!(self, RunSpec::Train(_))
+        matches!(self, RunSpec::Train(_) | RunSpec::Flow(_))
     }
 }
 
@@ -199,6 +207,31 @@ pub struct TrainProgress {
     pub pool: Option<String>,
 }
 
+/// The composite-flow supervision record (QE-460) — the sub-run ids the flow supervisor sequenced and the
+/// frozen holdout it handed between them, recorded on the **single** flow `meta.json` (design §5.2: "one row
+/// in the run store with one status, its sub-run ids recorded in `meta.json`"). Present only on `flow` runs,
+/// so a backtest/train/evolve `meta.json` is unchanged (`skip_serializing_if`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct FlowProgress {
+    /// The `train` sub-run id (the nested run dir under the flow run dir). Set once the train phase starts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub train_run: Option<String>,
+    /// The `backtest` sub-run id. Set once the (holdout) backtest phase starts — absent if the train phase
+    /// failed G1 (no vintage ⇒ no backtest, design §5.2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backtest_run: Option<String>,
+    /// The sealed vintage id handed from the train phase to the backtest phase (the content-hash handoff).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vintage: Option<String>,
+    /// The frozen holdout window `[start,end)` the backtest consulted (server-derived from the pinned
+    /// snapshot's right edge; the single recorded holdout consultation, design §4 (a)/(b)).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub holdout_start: Option<String>,
+    /// Exclusive end of the frozen holdout window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub holdout_end: Option<String>,
+}
+
 /// A run's `meta.json` — the **authoritative** status + progress record (§6.1 / §8.2).
 ///
 /// Timestamps are wall-clock (`created_ms` etc.): `meta.json` is operational state, not the
@@ -220,6 +253,9 @@ pub struct RunMeta {
     /// Rich training progress (QE-261) — present only on `train` runs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub train: Option<TrainProgress>,
+    /// Composite-flow supervision record (QE-460) — present only on `flow` runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flow: Option<FlowProgress>,
     /// Creation time (epoch-ms).
     pub created_ms: u64,
     /// Time the run transitioned to `running` (epoch-ms), once started.

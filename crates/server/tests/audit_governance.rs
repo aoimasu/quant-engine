@@ -745,6 +745,7 @@ async fn the_run_bound_launch_entry_resolves_the_launcher_so_sod_fires_live() {
             pool: Some("pool-runbound".to_owned()),
             ..Default::default()
         }),
+        flow: None,
         created_ms: now_ms(),
         started_ms: Some(now_ms()),
         finished_ms: Some(now_ms()),
