@@ -22,6 +22,7 @@
 #[cfg(feature = "arrow")]
 pub mod arrow;
 pub mod backfill;
+pub mod binance;
 pub mod cache;
 pub mod canonical;
 pub mod checksum;
@@ -45,6 +46,11 @@ pub mod source;
 
 pub use backfill::{
     BackfillRequest, BackfillResult, Backfiller, RealSleeper, RetryPolicy, Sleeper,
+};
+pub use binance::{
+    closed_funding, closed_klines, decode_funding, decode_funding_row, decode_kline_row,
+    decode_klines, plan_missing, BinanceHistorical, CalibrationSource, IngestedWindow,
+    WindowRequest, FUNDING_INTERVAL_MS,
 };
 pub use cache::RawCache;
 pub use canonical::CanonicalSeries;

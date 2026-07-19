@@ -11,9 +11,10 @@ publish.workspace = true
 workspace = true
 
 [features]
-# Default-off: the real Binance market-data decoders / live `HistoricalSource` for `qe ingest` live
-# behind this feature (QE-253 ships only the scaffold + in-memory-tested job). Future work fills it in.
-http = []
+# Default-off: the real Binance USDT-M market-data decoder + live `HistoricalSource` for `qe ingest`
+# (QE-463) live behind this feature; it forwards to `qe-ingest/http` (the `ureq` transport). The
+# default build — and CI — stays offline. Wiring the CLI command/trigger to it is QE-464.
+http = ["qe-ingest/http"]
 
 # The user-facing binary is `qe` (the package/lib is `qe-cli`/`qe_cli`); the Dockerfile and docs
 # invoke `qe`.
