@@ -7,7 +7,7 @@ use std::process::Stdio;
 
 use tokio::process::{Child, Command};
 
-use super::model::{BacktestParams, EvolveParams, RunSpec, TrainParams};
+use super::model::{BacktestParams, EvolveParams, IngestParams, RunSpec, TrainParams};
 
 /// Environment variable naming the `qe-cli` binary to spawn.
 pub const ENV_CLI_BIN: &str = "QE_SERVER_CLI_BIN";
@@ -77,6 +77,7 @@ impl JobSpawner for CliJobSpawner {
             RunSpec::Backtest(params) => backtest_args(&mut cmd, params, run_dir),
             RunSpec::Train(params) => train_args(&mut cmd, params, run_dir, false),
             RunSpec::Evolve(params) => evolve_args(&mut cmd, params, run_dir),
+            RunSpec::Ingest(params) => ingest_args(&mut cmd, params, run_dir),
             // A composite flow is never spawned as a single process — the supervisor sequences its `train`
             // (via `spawn_flow_train`) and `backtest` sub-jobs. A direct spawn is a programming error.
             RunSpec::Flow(_) => {
@@ -226,6 +227,30 @@ fn evolve_args(cmd: &mut Command, params: &EvolveParams, run_dir: &Path) {
     }
     if let Some(k) = params.k {
         cmd.arg("--k").arg(k.to_string());
+    }
+    cmd.arg("--run-dir").arg(run_dir).arg("--json");
+}
+
+/// Build the `ingest … --run-dir <dir> --json` argv (QE-464). The store path + universe come from the
+/// config file (`--config`, pinned via `QE_CONFIG`), not flags: `--instrument` (repeated) names explicit
+/// symbols, `--fetch-all` resolves the whole point-in-time universe, and `--synthetic` selects the
+/// offline generator. The window is `--start`/`--end`/`--resolution`.
+fn ingest_args(cmd: &mut Command, params: &IngestParams, run_dir: &Path) {
+    cmd.arg("ingest")
+        .arg("--start")
+        .arg(&params.start)
+        .arg("--end")
+        .arg(&params.end)
+        .arg("--resolution")
+        .arg(&params.resolution);
+    for symbol in &params.instruments {
+        cmd.arg("--instrument").arg(symbol);
+    }
+    if params.fetch_all {
+        cmd.arg("--fetch-all");
+    }
+    if params.synthetic {
+        cmd.arg("--synthetic");
     }
     cmd.arg("--run-dir").arg(run_dir).arg("--json");
 }

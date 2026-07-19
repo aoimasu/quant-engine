@@ -51,6 +51,10 @@ pub fn routes() -> Router<crate::AppState> {
         .route("/runs", post(create_run).get(list_runs))
         .route("/runs/{id}", get(get_run))
         .route("/runs/{id}/result", get(get_result))
+        // QE-464: the dedicated ingest trigger. Its body is the `ingest` params object directly; the
+        // handler wraps it as a `type:"ingest"` create-run so it is supervised exactly like every other
+        // run (run store, subprocess, terminal `done` line).
+        .route("/ingest", post(create_ingest))
         .layer(DefaultBodyLimit::max(RUN_SPEC_BODY_LIMIT))
 }
 
@@ -82,6 +86,37 @@ async fn create_run(
             (StatusCode::BAD_REQUEST, Json(json!({ "error": msg }))).into_response()
         }
         // QE-407: the server has begun shutting down and no longer accepts runs.
+        Err(err @ CreateError::ShuttingDown) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": err.to_string() })),
+        )
+            .into_response(),
+        Err(CreateError::Io(e)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("failed to create run: {e}") })),
+        )
+            .into_response(),
+    }
+}
+
+/// `POST /api/ingest` (QE-464) — launch a supervised **ingest** run. The JSON body is the `ingest`
+/// params object (`instruments` / `fetch_all`, `start` / `end` / `resolution`, `synthetic`); it is
+/// wrapped as a `type:"ingest"` create-run so it flows through the identical validate→create→spawn path
+/// as every other run kind (uniform `400` on invalid params via `validate_ingest`). `201` with
+/// `{ "id": … }` on success.
+async fn create_ingest(
+    State(manager): State<Arc<RunManager>>,
+    Json(params): Json<serde_json::Value>,
+) -> Response {
+    let req = CreateRunRequest {
+        run_type: "ingest".to_owned(),
+        params,
+    };
+    match manager.create(req).await {
+        Ok(id) => (StatusCode::CREATED, Json(json!({ "id": id }))).into_response(),
+        Err(CreateError::Validation(msg)) => {
+            (StatusCode::BAD_REQUEST, Json(json!({ "error": msg }))).into_response()
+        }
         Err(err @ CreateError::ShuttingDown) => (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({ "error": err.to_string() })),

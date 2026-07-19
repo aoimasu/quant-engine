@@ -13,7 +13,7 @@ use qe_domain::{
     Bar, FundingRate, FundingRateSample, InstrumentId, Price, Qty, Resolution, Timestamp,
 };
 use qe_runtime::{BootstrapError, HistoricalSource, HistoricalWindow};
-use qe_storage::{MarketStore, PremiumSample};
+use qe_storage::{Calibration, MarketStore, PremiumSample, Provenance};
 use rand_core::RngCore;
 use rust_decimal::Decimal;
 
@@ -44,12 +44,20 @@ pub struct IngestParams {
 /// under `params.instrument` at their own resolution. Open-interest / mark-price are not persisted (the
 /// store has no matching single-value slot and the backtest job does not scan them).
 ///
+/// QE-464: the caller declares the batch's `provenance` (`real` for the QE-463 decoder, `synthetic` for
+/// the offline generator) and `calibration` (the QE-463 klines-only slice is `Uncalibrated` — its
+/// asserted [`qe_ingest::CalibrationSource::Uncalibrated`] marker threaded here so an uncalibrated real
+/// ingest reads as such, not as default-calibrated). The bars are tagged in the store's provenance
+/// index so nobody trains on synthetic bars believing they are real.
+///
 /// # Errors
 /// [`RunError::Instrument`] on an invalid symbol, [`RunError::Ingest`] on a source fetch failure, or
 /// [`RunError::Storage`] on a write failure.
 pub fn run_ingest(
     params: &IngestParams,
     source: &mut impl HistoricalSource,
+    provenance: Provenance,
+    calibration: Calibration,
     progress: &mut impl FnMut(u8, &str, &str),
 ) -> Result<(), RunError> {
     progress(10, "load", "opening store");
@@ -66,7 +74,7 @@ pub fn run_ingest(
         .map_err(|e| RunError::Ingest(e.to_string()))?;
 
     progress(80, "write", "writing bars, funding and premium");
-    store.put_bars(&instrument, &window.bars)?;
+    store.put_bars_with_provenance(&instrument, &window.bars, provenance, calibration)?;
 
     let funding: Vec<FundingRateSample> = window
         .funding
@@ -436,7 +444,15 @@ mod http_tests {
         };
         let mut src = source;
         let mut progress = |_p: u8, _s: &str, _m: &str| {};
-        run_ingest(&params, &mut src, &mut progress).unwrap();
+        // The real klines-only slice is `(Real, Uncalibrated)` — QE-463's asserted marker threaded here.
+        run_ingest(
+            &params,
+            &mut src,
+            Provenance::Real,
+            Calibration::Uncalibrated,
+            &mut progress,
+        )
+        .unwrap();
 
         // The decoded bars + funding landed in the store via the real write path.
         let store = MarketStore::open(&params.store_path, params.map_size).unwrap();

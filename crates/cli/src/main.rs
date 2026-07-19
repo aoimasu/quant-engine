@@ -181,9 +181,36 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             start,
             end,
             resolution,
+            instruments,
+            fetch_all,
             synthetic,
-        } => run_ingest_command(&config, &start, &end, &resolution, synthetic),
+            run_dir,
+            json,
+        } => run_ingest_command(IngestCommand {
+            config: &config,
+            start: &start,
+            end: &end,
+            resolution: &resolution,
+            instruments: &instruments,
+            fetch_all,
+            synthetic,
+            run_dir: run_dir.as_deref(),
+            json,
+        }),
     }
+}
+
+/// The parsed `ingest` command, one-to-one with [`Command::Ingest`] (QE-464).
+struct IngestCommand<'a> {
+    config: &'a Path,
+    start: &'a str,
+    end: &'a str,
+    resolution: &'a str,
+    instruments: &'a [String],
+    fetch_all: bool,
+    synthetic: bool,
+    run_dir: Option<&'a Path>,
+    json: bool,
 }
 
 /// The parsed `backtest` command, one-to-one with [`Command::Backtest`].
@@ -467,110 +494,90 @@ fn describe(line: &ProgressLine) -> String {
     }
 }
 
-/// Dispatch `Command::Ingest`: stream a terminal JSON-line outcome on stdout and set the exit code.
+/// The `result.json` an ingest run writes into its `--run-dir` (QE-464), so the supervisor records a
+/// successful run and the SPA (QE-465) can render what was ingested + its provenance/liquidity flags.
+#[derive(Debug, serde::Serialize)]
+struct IngestOutcome {
+    /// `synthetic` (offline generator) or `real` (the QE-463 decoder).
+    mode: &'static str,
+    /// The ingest window + resolution.
+    start: String,
+    end: String,
+    resolution: String,
+    /// The resolved instruments actually ingested (config order).
+    instruments: Vec<String>,
+    /// Total bars written across all instruments.
+    bars: usize,
+    /// `true` when a fetch-all resolved through a universe with no listing dates — the store is flagged
+    /// **survivorship-unsafe** rather than trusted as point-in-time (QE-448/QE-464).
+    survivorship_unsafe: bool,
+    /// Names the liquidity screen flags as NOT admissible as tradable at size (thin or uncalibrated,
+    /// QE-440/QE-447) — recorded so fetch-all never silently admits an illiquid alt at the major floor.
+    liquidity_flagged: Vec<String>,
+}
+
+/// Dispatch `Command::Ingest`: stream a terminal JSON-line outcome on stdout, write `result.json` into
+/// the `--run-dir` (so a supervised run reports success), and set the exit code.
 ///
 /// Two modes:
-/// * **default** (no `--synthetic`): real market-data decoders live behind the default-off `http`
-///   feature, so with no live `HistoricalSource` this reports the missing source as a terminal
-///   `{"t":"error"}` line and exits non-zero — unchanged from before the flag.
 /// * **`--synthetic`**: populate the store from a deterministic **OFFLINE synthetic** generator
-///   ([`SyntheticSource`]) over the config universe + window, reusing the in-memory-tested
-///   [`run_ingest`] job. The data is **GENERATED, NOT real market data**, so the run is loudly
-///   labelled: a stderr warning plus a `"synthetic":true` marker in the terminal `done` line.
-fn run_ingest_command(
-    config: &Path,
-    start: &str,
-    end: &str,
-    resolution: &str,
-    synthetic: bool,
-) -> Result<ExitCode, Box<dyn std::error::Error>> {
+///   ([`SyntheticSource`]) over the resolved instrument set + window, reusing the in-memory-tested
+///   [`run_ingest`] job (bars tagged `synthetic`). Loudly labelled (stderr warning + `"synthetic":true`
+///   in the terminal `done` line).
+/// * **default** (real): under the `http` feature, the QE-463 decoder fetches each resolved instrument
+///   (bars tagged `real` / `uncalibrated`, the klines-only slice's asserted marker); without it, this
+///   reports the missing decoder as a terminal `{"t":"error"}` line and exits non-zero.
+fn run_ingest_command(cmd: IngestCommand<'_>) -> Result<ExitCode, Box<dyn std::error::Error>> {
     // QE-413: a top-level stage span so a CLI run emits structured telemetry (to stderr).
-    let _span = tracing::info_span!("cli.ingest", resolution = %resolution, synthetic).entered();
-    tracing::info!(start = %start, end = %end, "ingest command started");
+    let _span = tracing::info_span!(
+        "cli.ingest",
+        resolution = %cmd.resolution,
+        synthetic = cmd.synthetic,
+        fetch_all = cmd.fetch_all,
+        json = cmd.json,
+    )
+    .entered();
+    tracing::info!(start = %cmd.start, end = %cmd.end, "ingest command started");
 
-    if synthetic {
-        return run_synthetic_ingest(config, start, end, resolution);
+    if cmd.synthetic {
+        return run_synthetic_ingest(&cmd);
     }
-
-    let detail = format!("window {start}..{end} at {resolution}");
-    #[cfg(feature = "http")]
-    let msg = format!(
-        "ingest ({detail}): the `http` market-data decoders are not yet implemented \
-         — QE-253 ships the scaffold + in-memory-tested run_ingest; real ingestion is future work \
-         (use `--synthetic` for a deterministic offline dev store)"
-    );
-    #[cfg(not(feature = "http"))]
-    let msg = format!(
-        "ingest ({detail}): real market-data ingestion requires the `http` feature \
-         (out of scope for QE-253 — run_ingest is exercised with an in-memory source in tests); \
-         use `--synthetic` for a deterministic offline dev store"
-    );
-    let mut out = io::stdout().lock();
-    emit_error(&mut out, &msg)?;
-    out.flush()?;
-    Ok(ExitCode::FAILURE)
+    run_real_ingest(&cmd)
 }
 
-/// Outcome summary of a synthetic ingest — for the human stderr report only.
-struct SyntheticSummary {
-    store_path: PathBuf,
-    instruments: usize,
-    bars: usize,
-}
-
-/// Run the offline synthetic ingest: emit the loud warning, populate the store, and stream the terminal
-/// line. Errors are surfaced as a terminal `{"t":"error"}` line + non-zero exit (protocol-consistent
-/// with the real path), never a panic.
-fn run_synthetic_ingest(
-    config: &Path,
-    start: &str,
-    end: &str,
-    resolution: &str,
-) -> Result<ExitCode, Box<dyn std::error::Error>> {
-    // A loud, honest, impossible-to-miss warning BEFORE any work — this store is not real data.
-    eprintln!(
-        "WARNING: `qe ingest --synthetic` generates DETERMINISTIC SYNTHETIC market data. \
-         The resulting store holds GENERATED bars, NOT real market prices — never treat it as real."
-    );
-
-    match generate_synthetic_store(config, start, end, resolution) {
-        Ok(summary) => {
-            // Terminal JSON-line outcome carries the loud `"synthetic":true` marker.
-            let mut out = io::stdout().lock();
-            emit_ingest_done(&mut out, "synthetic-store", true)?;
-            out.flush()?;
-            eprintln!(
-                "synthetic: populated {} with {} instrument(s), {} bar(s) total — \
-                 SYNTHETIC DATA (not real market prices)",
-                summary.store_path.display(),
-                summary.instruments,
-                summary.bars,
-            );
-            Ok(ExitCode::SUCCESS)
-        }
-        Err(e) => {
-            let mut out = io::stdout().lock();
-            let _ = emit_error(&mut out, &e.to_string());
-            let _ = out.flush();
-            eprintln!("error: {e}");
-            Ok(ExitCode::FAILURE)
-        }
+/// Resolve the instruments to ingest: `--fetch-all` resolves the whole point-in-time universe (with a
+/// survivorship-safety verdict); explicit `--instrument`s are used verbatim; otherwise the config's flat
+/// `instruments` roster (still checked for survivorship-safety when it feeds a whole-store ingest).
+fn resolve_ingest_instruments(
+    cfg: &Config,
+    explicit: &[String],
+    fetch_all: bool,
+) -> Result<(Vec<String>, bool), Box<dyn std::error::Error>> {
+    if fetch_all {
+        let universe = cfg.universe()?;
+        let resolved = qe_ingest::resolve_fetch_all(&universe);
+        let instruments = resolved
+            .instruments
+            .iter()
+            .map(|i| i.as_str().to_owned())
+            .collect();
+        Ok((instruments, resolved.survivorship_unsafe))
+    } else if explicit.iter().any(|s| !s.trim().is_empty()) {
+        // An explicit, operator-chosen list is not a "fetch all" — survivorship framing does not apply.
+        Ok((explicit.to_vec(), false))
+    } else {
+        let universe = cfg.universe()?;
+        let survivorship_unsafe = qe_ingest::resolve_fetch_all(&universe).survivorship_unsafe;
+        Ok((cfg.instruments.clone(), survivorship_unsafe))
     }
 }
 
-/// Build the [`SyntheticSource`] for each config-universe instrument over the `[start, end)` window at
-/// `resolution` and drive the tested [`run_ingest`] job to persist its bars into the config store.
-///
-/// The generator is seeded from `config.determinism.seed`, decorrelated per instrument by its index, so
-/// the same config + window + resolution always reproduces identical bars.
-fn generate_synthetic_store(
-    config: &Path,
+/// Parse + validate the ingest window, returning `(resolution, start_ms, end_ms)`.
+fn parse_ingest_window(
+    resolution: &str,
     start: &str,
     end: &str,
-    resolution: &str,
-) -> Result<SyntheticSummary, Box<dyn std::error::Error>> {
-    let cfg = Config::load(Profile::RuntimeSim, config)?;
-
+) -> Result<(Resolution, i64, i64), Box<dyn std::error::Error>> {
     let res: Resolution = resolution.parse().map_err(|_| {
         format!("invalid --resolution `{resolution}` (expected 1m/5m/15m/1h/4h/1d)")
     })?;
@@ -583,10 +590,97 @@ fn generate_synthetic_store(
             format!("empty window: --start {start} must be strictly before --end {end}").into(),
         );
     }
+    Ok((res, start_ms, end_ms))
+}
+
+/// Write the ingest `result.json` into `run_dir` (if supervised), so the run is recorded as succeeded.
+fn write_ingest_result(
+    run_dir: Option<&Path>,
+    outcome: &IngestOutcome,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(dir) = run_dir {
+        std::fs::create_dir_all(dir)?;
+        std::fs::write(dir.join("result.json"), serde_json::to_vec_pretty(outcome)?)?;
+    }
+    Ok(())
+}
+
+/// Emit the terminal `done` line + the human stderr report shared by both ingest modes.
+fn finish_ingest(
+    outcome: &IngestOutcome,
+    run_dir: Option<&Path>,
+    synthetic: bool,
+) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    write_ingest_result(run_dir, outcome)?;
+    let mut out = io::stdout().lock();
+    let result = if synthetic {
+        "synthetic-store"
+    } else {
+        "real-store"
+    };
+    emit_ingest_done(&mut out, result, synthetic)?;
+    out.flush()?;
+    if outcome.survivorship_unsafe {
+        eprintln!(
+            "WARNING: fetch-all resolved a universe with NO listing dates — the resulting store is \
+             flagged SURVIVORSHIP-UNSAFE (add `[[universe]]` listed/delisted dates for a point-in-time \
+             roster)."
+        );
+    }
+    if !outcome.liquidity_flagged.is_empty() {
+        eprintln!(
+            "liquidity: {} name(s) flagged NOT tradable-at-size (thin/uncalibrated — QE-440/QE-447): {}",
+            outcome.liquidity_flagged.len(),
+            outcome.liquidity_flagged.join(", "),
+        );
+    }
+    eprintln!(
+        "ingest: populated {} instrument(s), {} bar(s) total ({})",
+        outcome.instruments.len(),
+        outcome.bars,
+        outcome.mode,
+    );
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Run the offline synthetic ingest: emit the loud warning, populate the store, and stream the terminal
+/// line. Errors are surfaced as a terminal `{"t":"error"}` line + non-zero exit (protocol-consistent
+/// with the real path), never a panic.
+fn run_synthetic_ingest(cmd: &IngestCommand<'_>) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    // A loud, honest, impossible-to-miss warning BEFORE any work — this store is not real data.
+    eprintln!(
+        "WARNING: `qe ingest --synthetic` generates DETERMINISTIC SYNTHETIC market data. \
+         The resulting store holds GENERATED bars, NOT real market prices — never treat it as real."
+    );
+
+    match generate_synthetic_store(cmd) {
+        Ok(outcome) => finish_ingest(&outcome, cmd.run_dir, true),
+        Err(e) => {
+            let mut out = io::stdout().lock();
+            let _ = emit_error(&mut out, &e.to_string());
+            let _ = out.flush();
+            eprintln!("error: {e}");
+            Ok(ExitCode::FAILURE)
+        }
+    }
+}
+
+/// Build the [`SyntheticSource`] for each resolved instrument over the `[start, end)` window at
+/// `resolution` and drive the tested [`run_ingest`] job to persist its bars into the config store.
+///
+/// The generator is seeded from `config.determinism.seed`, decorrelated per instrument by its index, so
+/// the same config + window + resolution always reproduces identical bars.
+fn generate_synthetic_store(
+    cmd: &IngestCommand<'_>,
+) -> Result<IngestOutcome, Box<dyn std::error::Error>> {
+    let cfg = Config::load(Profile::RuntimeSim, cmd.config)?;
+    let (res, start_ms, end_ms) = parse_ingest_window(cmd.resolution, cmd.start, cmd.end)?;
+    let (instruments, survivorship_unsafe) =
+        resolve_ingest_instruments(&cfg, cmd.instruments, cmd.fetch_all)?;
 
     let store_path = PathBuf::from(&cfg.storage.market_dir);
     let mut total_bars = 0usize;
-    for (idx, symbol) in cfg.instruments.iter().enumerate() {
+    for (idx, symbol) in instruments.iter().enumerate() {
         let mut source =
             SyntheticSource::new(res, start_ms, end_ms, cfg.determinism.seed, idx as u64);
         let bars = source.bar_count();
@@ -598,14 +692,165 @@ fn generate_synthetic_store(
         let mut progress = |pct: u8, stage: &str, msg: &str| {
             eprintln!("[{pct:>3}%] {symbol} (synthetic) {stage}: {msg}");
         };
-        run_ingest(&params, &mut source, &mut progress)?;
+        // `--synthetic` tags every bar `synthetic` / `uncalibrated` so no store reads as real.
+        run_ingest(
+            &params,
+            &mut source,
+            qe_storage::Provenance::Synthetic,
+            qe_storage::Calibration::Uncalibrated,
+            &mut progress,
+        )?;
         total_bars += bars;
-        eprintln!("synthetic: {symbol}: generated {bars} {resolution} bar(s)");
+        eprintln!(
+            "synthetic: {symbol}: generated {bars} {cmd_res} bar(s)",
+            cmd_res = cmd.resolution
+        );
     }
 
-    Ok(SyntheticSummary {
-        store_path,
-        instruments: cfg.instruments.len(),
+    Ok(IngestOutcome {
+        mode: "synthetic",
+        start: cmd.start.to_owned(),
+        end: cmd.end.to_owned(),
+        resolution: cmd.resolution.to_owned(),
+        // Synthetic bars carry no measured ADV/impact ⇒ every name is uncalibrated (not tradable at
+        // size). Record the flags so a synthetic store never reads as capacity-eligible.
+        liquidity_flagged: instruments.clone(),
+        instruments,
         bars: total_bars,
+        survivorship_unsafe,
     })
+}
+
+/// The liquidity flags for a klines-only real ingest: no ADV/impact is measured, so every name screens
+/// [`qe_ingest::LiquidityVerdict::Uncalibrated`] — recorded so fetch-all never silently admits an alt as
+/// tradable at size (QE-440/QE-447). Deployments that later fit ADV feed real inputs.
+#[cfg(feature = "http")]
+fn liquidity_flags_uncalibrated(instruments: &[String]) -> Vec<String> {
+    let candidates: Vec<qe_ingest::LiquidityInput> = instruments
+        .iter()
+        .filter_map(|s| {
+            qe_domain::InstrumentId::new(s)
+                .ok()
+                .map(|instrument| qe_ingest::LiquidityInput {
+                    instrument,
+                    rolling_adv_usd: None, // klines-only ingest measures no ADV (QE-440 is a follow-up)
+                })
+        })
+        .collect();
+    let screened = qe_ingest::screen_liquidity(
+        &candidates,
+        rust_decimal::Decimal::from(qe_ingest::DEFAULT_MIN_ADV_USD),
+    );
+    screened
+        .iter()
+        .filter(|s| !s.verdict.is_tradable())
+        .map(|s| s.instrument.as_str().to_owned())
+        .collect()
+}
+
+/// Run the real market-data ingest (the QE-463 Binance USDT-M decoder, behind the `http` feature).
+///
+/// Resolves the instrument set (explicit / fetch-all via the point-in-time universe), fetches each
+/// instrument's missing closed klines + funding, and persists them tagged `real` / `uncalibrated` (the
+/// klines-only slice's asserted [`qe_ingest::CalibrationSource::Uncalibrated`] marker). Without the
+/// `http` feature the decoder is unavailable, so this reports a terminal error + non-zero exit.
+#[cfg(feature = "http")]
+fn run_real_ingest(cmd: &IngestCommand<'_>) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    use qe_cli::jobs::ingest::BinanceHistoricalSource;
+
+    let run = || -> Result<IngestOutcome, Box<dyn std::error::Error>> {
+        let cfg = Config::load(Profile::RuntimeSim, cmd.config)?;
+        let (res, start_ms, end_ms) = parse_ingest_window(cmd.resolution, cmd.start, cmd.end)?;
+        let (instruments, survivorship_unsafe) =
+            resolve_ingest_instruments(&cfg, cmd.instruments, cmd.fetch_all)?;
+        let store_path = PathBuf::from(&cfg.storage.market_dir);
+        // Wall-clock now (ingest is a P1 stage — not determinism-bound), for the closed-window filter.
+        let now_ms = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0),
+        )
+        .unwrap_or(i64::MAX);
+
+        let mut total_bars = 0usize;
+        for symbol in &instruments {
+            let instrument = qe_domain::InstrumentId::new(symbol)
+                .map_err(|e| format!("invalid instrument `{symbol}`: {e}"))?;
+            let request = qe_ingest::WindowRequest {
+                symbol: instrument.clone(),
+                resolution: res,
+                from_ms: start_ms,
+                to_ms: end_ms,
+                now_ms,
+                limit: 1000,
+            };
+            // Fetch the whole window (present-set empty ⇒ the decoder fills gaps); tagged real/uncalibrated.
+            let mut source = BinanceHistoricalSource::live(
+                qe_ingest::DEFAULT_REST_BASE,
+                request,
+                std::collections::BTreeSet::new(),
+                std::collections::BTreeSet::new(),
+            );
+            let params = IngestParams {
+                store_path: store_path.clone(),
+                map_size: qe_storage::DEFAULT_MAP_SIZE,
+                instrument: symbol.clone(),
+            };
+            let mut progress = |pct: u8, stage: &str, msg: &str| {
+                eprintln!("[{pct:>3}%] {symbol} (real) {stage}: {msg}");
+            };
+            run_ingest(
+                &params,
+                &mut source,
+                qe_storage::Provenance::Real,
+                qe_storage::Calibration::Uncalibrated,
+                &mut progress,
+            )?;
+            if let Ok(store) =
+                qe_storage::MarketStore::open(&store_path, qe_storage::DEFAULT_MAP_SIZE)
+            {
+                if let Ok(Some((_, _, bars))) = store.coverage_bounds(&instrument, res) {
+                    total_bars = total_bars.max(bars);
+                }
+            }
+        }
+
+        Ok(IngestOutcome {
+            mode: "real",
+            start: cmd.start.to_owned(),
+            end: cmd.end.to_owned(),
+            resolution: cmd.resolution.to_owned(),
+            liquidity_flagged: liquidity_flags_uncalibrated(&instruments),
+            instruments,
+            bars: total_bars,
+            survivorship_unsafe,
+        })
+    };
+
+    match run() {
+        Ok(outcome) => finish_ingest(&outcome, cmd.run_dir, false),
+        Err(e) => {
+            let mut out = io::stdout().lock();
+            let _ = emit_error(&mut out, &e.to_string());
+            let _ = out.flush();
+            eprintln!("error: {e}");
+            Ok(ExitCode::FAILURE)
+        }
+    }
+}
+
+/// Without the `http` feature the real decoder is unavailable — report it as a terminal error line +
+/// non-zero exit (unchanged from before this ticket); `--synthetic` is the offline path.
+#[cfg(not(feature = "http"))]
+fn run_real_ingest(cmd: &IngestCommand<'_>) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    let detail = format!("window {}..{} at {}", cmd.start, cmd.end, cmd.resolution);
+    let msg = format!(
+        "ingest ({detail}): real market-data ingestion requires the `http` feature \
+         (QE-463 decoder); use `--synthetic` for a deterministic offline dev store"
+    );
+    let mut out = io::stdout().lock();
+    emit_error(&mut out, &msg)?;
+    out.flush()?;
+    Ok(ExitCode::FAILURE)
 }

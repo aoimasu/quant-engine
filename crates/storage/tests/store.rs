@@ -103,6 +103,8 @@ fn bar_instruments_dedupes_and_coverage_reports_all_instruments() {
         from: 100_000, // secs → open_time millis
         to: 300_000,
         bars: 3,
+        provenance: "unknown".to_owned(),
+        calibrated: false,
     };
     let btc_h1 = CoverageRow {
         symbol: "BTCUSDT".to_owned(),
@@ -110,6 +112,8 @@ fn bar_instruments_dedupes_and_coverage_reports_all_instruments() {
         from: 3_600_000,
         to: 7_200_000,
         bars: 2,
+        provenance: "unknown".to_owned(),
+        calibrated: false,
     };
     let eth_m5 = CoverageRow {
         symbol: "ETHUSDT".to_owned(),
@@ -117,6 +121,8 @@ fn bar_instruments_dedupes_and_coverage_reports_all_instruments() {
         from: 100_000,
         to: 200_000,
         bars: 2,
+        provenance: "unknown".to_owned(),
+        calibrated: false,
     };
 
     // `coverage_all` enumerates instruments ascending, then Resolution::ALL ascending (M5 before H1).
