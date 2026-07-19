@@ -73,7 +73,15 @@ export interface EvolveParams {
   profile?: string;
 }
 
-/** Training parameters — the `params` object of a `type:"train"` create-run request (QE-261). */
+/**
+ * Training parameters — the `params` object of a `type:"train"` create-run request (QE-261), extended with
+ * QE-458's **whitelisted, gate-monotone steer knobs** (QE-459). Kept **hand-in-lockstep** with
+ * `crates/run-protocol/src/lib.rs::TrainParams` (the source of truth). Only the *whitelisted* fields the
+ * server's `validate_train` accepts appear here: `indicator_subset` / `windows` / `folds` are applied live by
+ * `run_train_job`; the **blocklisted** gate-decision knobs (cost-stress / turnover / capacity / DSR / PBO /
+ * IC-FDR) and the **not-yet-supported** `evolved_pool` / `evolved_formulas` are deliberately **absent** — the
+ * form has no control that can submit them (a request naming any is a hard `400`).
+ */
 export interface TrainParams {
   start: string;
   end: string;
@@ -83,6 +91,16 @@ export interface TrainParams {
   population?: number;
   holdout?: number;
   embargo?: number;
+  /**
+   * **Indicator subset** (QE-458 whitelist) — the catalogue-indicator ids the steered search may reference;
+   * omitted ⇒ the full catalogue. A strict subset is a *smaller* hypothesis space (strictly safer); the count
+   * feeds the distinct-trial basis `N`, so a wider subset only *raises* the deflation bar.
+   */
+  indicator_subset?: string[];
+  /** **WFO windows** (QE-458 whitelist) — more/longer windows raise `T_eff`; server floor `≥ 4`. */
+  windows?: number;
+  /** **CV folds** (QE-458 whitelist) — more folds make the in-window CV harder to pass; server floor `≥ 2`. */
+  folds?: number;
   config?: string;
   profile?: string;
 }
