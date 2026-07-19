@@ -139,6 +139,29 @@ export interface FlowParams {
 }
 
 /**
+ * Ingest parameters (QE-464) — the body of a `POST /api/ingest` create-run request. Kept
+ * **hand-in-lockstep** with `crates/run-protocol/src/lib.rs::IngestParams` (the source of truth). The
+ * run must name **either** a non-empty `instruments` list **or** `fetch_all: true` (never neither —
+ * `validate_ingest` is the enforcement point); the window (`start`/`end`/`resolution`) is required.
+ * `synthetic` selects the deterministic offline generator (tagged `synthetic`) — the operator ingest
+ * trigger always sends `false` (real ingest), so no store the SPA populates ever reads as unambiguous.
+ */
+export interface IngestParams {
+  /** Explicit instrument symbols to ingest (`--instrument`, repeated). Empty ⇒ requires `fetch_all`. */
+  instruments: string[];
+  /** Fetch **all** available instruments, resolved via the point-in-time universe (`--fetch-all`). */
+  fetch_all: boolean;
+  /** Inclusive window start `YYYY-MM-DD` (required). */
+  start: string;
+  /** Exclusive window end `YYYY-MM-DD` (required). */
+  end: string;
+  /** Bar resolution (required; `1h`, …). */
+  resolution: string;
+  /** Deterministic offline synthetic store instead of a real ingest; the trigger form always sends `false`. */
+  synthetic: boolean;
+}
+
+/**
  * The composite-flow supervision record (QE-460) — mirrors `qe_server::runs::model::FlowProgress`. Present
  * only on `flow` runs (the single flow `meta.json` records its sub-run ids + the frozen holdout it handed
  * between them). Per-phase progress is derived from which fields are set + the run status.
@@ -218,7 +241,7 @@ export interface RunMetaBase {
  * update both together. Narrow on `meta.type` at each consumer instead of casting, so a train run can
  * no longer be statically read as a backtest (and vice-versa).
  */
-export type RunMeta = BacktestRunMeta | TrainRunMeta | EvolveRunMeta | FlowRunMeta;
+export type RunMeta = BacktestRunMeta | TrainRunMeta | EvolveRunMeta | FlowRunMeta | IngestRunMeta;
 
 /** A `type:"backtest"` run — its `params` is a {@link BacktestParams}. */
 export interface BacktestRunMeta extends RunMetaBase {
@@ -248,9 +271,20 @@ export interface FlowRunMeta extends RunMetaBase {
   flow?: FlowProgress;
 }
 
+/** A `type:"ingest"` run (QE-464) — its `params` is an {@link IngestParams}. Never writes a vintage. */
+export interface IngestRunMeta extends RunMetaBase {
+  type: 'ingest';
+  params: IngestParams;
+}
+
 /** Type-predicate narrowing a {@link RunMeta} to the `flow` variant (for `.filter(isFlowRun)`). */
 export function isFlowRun(run: RunMeta): run is FlowRunMeta {
   return run.type === 'flow';
+}
+
+/** Type-predicate narrowing a {@link RunMeta} to the `ingest` variant (QE-465 monitor). */
+export function isIngestRun(run: RunMeta): run is IngestRunMeta {
+  return run.type === 'ingest';
 }
 
 /** Type-predicate narrowing a {@link RunMeta} to the `train` variant (for `.filter(isTrainRun)`). */
@@ -432,7 +466,23 @@ export interface VintageDetail {
   primary_run?: string;
 }
 
-/** One market-data coverage row from `GET /api/market-data/coverage` (QE-257). */
+/**
+ * Data provenance of a single contiguous coverage run (QE-464). Kept in lockstep with
+ * `qe_storage::provenance::Provenance` (`#[serde(rename_all = "lowercase")]`). `unknown` is a legacy
+ * untagged run (pre-QE-464 bars) — **never** softened to `real` in the UI (design §8.2: nobody trains
+ * on synthetic — or unverified — data believing it is real). Distinct from {@link DataProvenance}
+ * (`mixed`), which is a *vintage-level* rollup; at the coverage-row level a mix is split into one row
+ * per run, so a row is always exactly one of these three.
+ */
+export type CoverageProvenance = 'real' | 'synthetic' | 'unknown';
+
+/**
+ * One market-data coverage row from `GET /api/market-data/coverage` (QE-257). Kept **hand-in-lockstep**
+ * with `qe_storage::coverage::CoverageRow` (the source of truth). QE-464 tags each row with its
+ * `provenance` + `calibrated`: a store mixing real + synthetic bars for one `(symbol, resolution)` is
+ * reported as **multiple contiguous rows — one per provenance run** — never a single blended range, so
+ * the SPA marks each row and does no client-side merging.
+ */
 export interface CoverageRow {
   symbol: string;
   resolution: string;
@@ -441,6 +491,10 @@ export interface CoverageRow {
   /** Latest stored bar open_time, epoch-ms (inclusive). */
   to: number;
   bars: number;
+  /** Provenance of this contiguous run (QE-464). `#[serde(default)]` server-side ⇒ legacy ⇒ `unknown`. */
+  provenance: CoverageProvenance;
+  /** Whether this run's tradability inputs were measured (`false` for klines-only / synthetic; QE-464). */
+  calibrated: boolean;
 }
 
 /** An API error carrying the HTTP status and the server's `{ error }` message when present. */
@@ -596,17 +650,27 @@ export function getCoverage(): Promise<CoverageRow[]> {
   return getJson<CoverageRow[]>('/api/market-data/coverage');
 }
 
-/** POST a create-run request and resolve to the new run id; throws {@link ApiError} on a 400. */
-async function postRun(type: string, params: unknown): Promise<string> {
-  const res = await fetch('/api/runs', {
+/**
+ * The single create-run POST choke point: POST `body` as JSON to `url`, run the shared
+ * {@link throwForResponse} error/401 handling, and resolve to the new run's `{ id }`. Every run-kind
+ * create ({@link postRun} for the `{type,params}` `/api/runs` kinds, and {@link createIngestRun} for the
+ * bare-params `/api/ingest` endpoint) funnels through here so their error handling never diverges.
+ */
+async function postCreateRun(url: string, body: unknown): Promise<string> {
+  const res = await fetch(url, {
     method: 'POST',
     credentials: 'same-origin',
     headers: { ...JSON_HEADERS, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ type, params }),
+    body: JSON.stringify(body),
   });
   if (!res.ok) await throwForResponse(res);
-  const body = (await res.json()) as { id: string };
-  return body.id;
+  const parsed = (await res.json()) as { id: string };
+  return parsed.id;
+}
+
+/** POST a `{type, params}` create-run to `/api/runs`; resolves to the new run id; throws on a 400. */
+function postRun(type: string, params: unknown): Promise<string> {
+  return postCreateRun('/api/runs', { type, params });
 }
 
 /** Create + spawn a backtest run. Resolves to the new run id; throws {@link ApiError} on a 400. */
@@ -627,6 +691,17 @@ export function createTrainRun(params: TrainParams): Promise<string> {
  */
 export function createFlowRun(params: FlowParams): Promise<string> {
   return postRun('flow', params);
+}
+
+/**
+ * Create + spawn an `ingest` run (QE-464) via the dedicated **`POST /api/ingest`** endpoint. Unlike the
+ * other create wrappers, the body is the {@link IngestParams} object **directly** (not a `{type,params}`
+ * envelope) — the server wraps it as a `type:"ingest"` create-run internally. Resolves to the new run
+ * id; throws {@link ApiError} on a `400` (a missing window, or neither `instruments` nor `fetch_all`).
+ * Shares the {@link postCreateRun} choke point so its error/401 handling matches every other run kind.
+ */
+export function createIngestRun(params: IngestParams): Promise<string> {
+  return postCreateRun('/api/ingest', params);
 }
 
 /**
