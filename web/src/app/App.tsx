@@ -29,10 +29,14 @@ export function App() {
   // A pending cross-area deep-link: a sealed vintage to preselect in the New-backtest flow (QE-261).
   // Set when the training monitor's "Backtest this vintage" is clicked; consumed when Backtests mounts.
   const [backtestVintage, setBacktestVintage] = useState<string | undefined>(undefined);
+  // A pending cross-area deep-link: a sealed vintage to open in the Strategies Vintage Inspector (QE-462).
+  // Set when the composite-flow monitor's "Open in Vintage Inspector" is clicked; consumed by Strategies.
+  const [inspectVintage, setInspectVintage] = useState<string | undefined>(undefined);
 
-  // Manual nav clears any pending deep-link seed so a later plain visit to Backtests isn't re-seeded.
+  // Manual nav clears any pending deep-link seed so a later plain visit isn't re-seeded.
   const navigate = (id: string) => {
     setBacktestVintage(undefined);
+    setInspectVintage(undefined);
     setActive(id);
   };
 
@@ -40,6 +44,12 @@ export function App() {
   const openBacktestForVintage = (vintage: string) => {
     setBacktestVintage(vintage);
     setActive('backtest');
+  };
+
+  // Programmatic deep-link from the composite-flow monitor → Strategies Vintage Inspector (QE-462).
+  const openInspectorForVintage = (vintage: string) => {
+    setInspectVintage(vintage);
+    setActive('strategies');
   };
 
   useEffect(() => {
@@ -115,9 +125,12 @@ export function App() {
         {active === 'data' ? (
           <MarketData />
         ) : active === 'strategies' ? (
-          <StrategiesArea />
+          <StrategiesArea initialVintage={inspectVintage} />
         ) : active === 'training' ? (
-          <TrainingArea onBacktestVintage={openBacktestForVintage} />
+          <TrainingArea
+            onBacktestVintage={openBacktestForVintage}
+            onInspectVintage={openInspectorForVintage}
+          />
         ) : active === 'evolve' ? (
           <EvolveArea />
         ) : (
