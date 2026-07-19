@@ -62,6 +62,16 @@ pub fn year_month(millis: i64) -> (i32, u32) {
     (y, m)
 }
 
+/// The strict `YYYY-MM-DD` (UTC calendar-date) label of an epoch-millisecond instant — the inverse of
+/// [`parse_ymd_to_millis`] truncated to the day (QE-460: the flow's server-derived holdout-window edge). It
+/// round-trips: `parse_ymd_to_millis(&format_ymd(ms))` is the UTC-midnight of `ms`.
+#[must_use]
+pub fn format_ymd(millis: i64) -> String {
+    let days = millis.div_euclid(MS_PER_DAY);
+    let (y, m, d) = civil_from_days(days);
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -86,6 +96,22 @@ mod tests {
         assert_eq!(parse_ymd_to_millis("2021/01/01"), None);
         assert_eq!(parse_ymd_to_millis("2021-01"), None);
         assert_eq!(parse_ymd_to_millis("2021-01-01-01"), None);
+    }
+
+    #[test]
+    fn format_ymd_inverts_parse() {
+        for s in [
+            "1970-01-01",
+            "2021-01-01",
+            "2021-05-03",
+            "2000-02-29",
+            "2024-12-31",
+        ] {
+            let ms = parse_ymd_to_millis(s).unwrap();
+            assert_eq!(format_ymd(ms), s);
+            // Idempotent through a mid-day offset (truncates to the civil date).
+            assert_eq!(format_ymd(ms + 3_600_000 * 13), s);
+        }
     }
 
     #[test]

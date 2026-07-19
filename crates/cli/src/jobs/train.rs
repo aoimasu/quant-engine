@@ -29,12 +29,16 @@ use qe_risk::{
     calibrate_threshold, calibrate_thresholds, default_calibration_margin, quantize_calibration,
     CalibrationProfile, PortfolioSizer, DEFAULT_FAST_QUANTILE, DEFAULT_FAST_WINDOW,
 };
+use qe_signal::{label_regimes, Regime, RegimeConfig, TrendState, VolState};
 use qe_validation::{
     assess, available_feature_space, buy_and_hold_returns, coverage_floor_ok, effective_trials,
     effective_trials_with_features, sharpe_ratio, RobustnessReport, SpaConfig, VintageStats,
     MIN_OCCUPIED_NICHES,
 };
-use qe_vintage::{SteerDelta, Vintage, VintageContent, VintageRepository, VINTAGE_FORMAT_VERSION};
+use qe_vintage::{
+    HoldoutSplit, RegimeShare, ResearchProvenance, SteerDelta, TimeRange, Vintage, VintageContent,
+    VintageRepository, VINTAGE_FORMAT_VERSION,
+};
 use qe_wfo::backtest::{backtest, BacktestConfig, Bar as DecisionBar};
 use qe_wfo::cv_fitness::{
     fold_isolation_fitness, fold_test_ranges, selection_kfold, DEFAULT_LABEL_HORIZON,
@@ -48,7 +52,7 @@ use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use serde::Serialize;
 
-use super::datetime::parse_ymd_to_millis;
+use super::datetime::{format_ymd, parse_ymd_to_millis};
 use super::features::{catalogue_schema, check_schema, to_decision_bars};
 use super::{ProgressLine, RunError};
 
@@ -69,6 +73,14 @@ const MAX_POOL: usize = 10;
 
 /// Binance USDT-M funding cadence: one stamp every 8 hours (QE-403 coverage grid).
 const FUNDING_PERIOD_MS: i64 = 8 * 60 * 60 * 1_000;
+
+/// QE-460 (design §4 (b)): the minimum distinct QE-125 regime labels a composite-flow frozen holdout must
+/// span — the regime-stratification floor `K`. Conservative default (four regimes exist: `{Calm,Volatile}` ×
+/// `{Trending,Choppy}`), so a single-regime trailing window is rejected. **FLAGGED for product
+/// confirmation** (the ticket left `K` undefined in-repo); keyed on named regimes **and** the holdout-bar
+/// floor (`HOLDOUT_FLOOR`, enforced in `validate_flow`), which closes QE-458's deferred AC(d)
+/// stress-regime/OOS-span enforcement for the flow path.
+const MIN_HOLDOUT_REGIMES: usize = 2;
 
 /// Target book AUM (USD) the QE-128 capacity model caps the sealed ensemble weights against (QE-416). A
 /// documented default book size — a member whose modelled capacity at this AUM is below its equal-weight
@@ -111,6 +123,180 @@ fn enforce_coverage_floor(is_steered: bool, occupied_niches: usize) -> Result<()
         });
     }
     Ok(())
+}
+
+/// QE-460 — the frozen-holdout lineage a composite-flow (`--flow`) train carves once and records: the
+/// split, the regime composition, and the overlap-keyed consultation count that **populate** QE-467's
+/// `ResearchProvenance` slots, plus the resolved holdout window the flow supervisor reads for the backtest.
+struct FlowLineage {
+    /// The frozen split `{holdout_range, train_range, embargo}` (bar-timestamp labels).
+    holdout_split: HoldoutSplit,
+    /// The holdout regime composition (QE-125), sorted by regime label (deterministic).
+    regime_composition: Vec<RegimeShare>,
+    /// The overlap-keyed per-holdout consultation count (design §4/§11.3): `1 + prior sealed vintages whose
+    /// holdout intersects this one (or whose training window covers it)`.
+    consultation_count: u64,
+    /// The resolved holdout window `[start,end)` (dates) — the server-derived backtest window.
+    holdout_window: TrainWindow,
+}
+
+/// The QE-125 regime composition of the frozen holdout slice `holdout_idx` of `ohlcv`: the per-regime bar
+/// tally as `(Vec<RegimeShare> sorted by label, labelled_bars)`. Deterministic (a BTreeMap keyed by the
+/// canonical [`regime_label`]). `ohlcv` aligns 1:1 with the decision bars, so the decision-bar holdout
+/// indices slice the same series the labeller ran over.
+fn holdout_regime_composition(
+    ohlcv: &[qe_domain::Bar],
+    holdout_idx: &std::ops::Range<usize>,
+) -> (Vec<RegimeShare>, usize) {
+    let labels = label_regimes(ohlcv, &RegimeConfig::with_defaults());
+    let hi = holdout_idx.start.min(labels.len())..holdout_idx.end.min(labels.len());
+    let mut by_regime: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
+    let mut labelled = 0usize;
+    for regime in labels[hi].iter().flatten() {
+        *by_regime.entry(regime_label(*regime)).or_insert(0) += 1;
+        labelled += 1;
+    }
+    let composition = by_regime
+        .into_iter()
+        .map(|(regime, bars)| RegimeShare { regime, bars })
+        .collect();
+    (composition, labelled)
+}
+
+/// The canonical, deterministic label of a QE-125 [`Regime`] (`"<vol>-<trend>"`, e.g. `"calm-trending"`) —
+/// the string recorded per [`RegimeShare`] in the sealed holdout regime composition.
+fn regime_label(r: Regime) -> String {
+    let vol = match r.vol {
+        VolState::Calm => "calm",
+        VolState::Volatile => "volatile",
+    };
+    let trend = match r.trend {
+        TrendState::Trending => "trending",
+        TrendState::Choppy => "choppy",
+    };
+    format!("{vol}-{trend}")
+}
+
+/// Count prior sealed vintages whose recorded holdout **overlaps** `[start_ms,end_ms)` — the overlap-keyed
+/// consultation budget (QE-460 (c), design §4/§11.3): a vintage counts if its holdout **intersects** this
+/// run's holdout (half-open interval overlap) OR its **training window covers** this holdout — NOT exact
+/// range equality, so campaign-level partial re-use of the same protected bars is still counted. Vintages
+/// with no recorded holdout (a plain, non-flow train) are skipped. Best-effort read of the repo: an
+/// unreadable/legacy vintage is skipped, never fatal.
+fn count_overlapping_consultations(
+    vintage_root: &std::path::Path,
+    start_ms: i64,
+    end_ms: i64,
+) -> u64 {
+    let repo = VintageRepository::new(vintage_root);
+    let vintages = repo.list().unwrap_or_default();
+    let mut overlaps = 0u64;
+    for v in &vintages {
+        let split = &v.content.provenance.holdout_split;
+        let prior_holdout = range_ms(split.holdout_range.as_ref());
+        let prior_train = range_ms(split.train_range.as_ref());
+        if consultation_overlaps(prior_holdout, prior_train, start_ms, end_ms) {
+            overlaps += 1;
+        }
+    }
+    overlaps
+}
+
+/// Parse a `TimeRange` of epoch-ms string labels into an `(start,end)` `i64` pair (`None` if absent or a
+/// non-flow vintage with no recorded holdout).
+fn range_ms(range: Option<&TimeRange>) -> Option<(i64, i64)> {
+    let r = range?;
+    Some((r.start.parse::<i64>().ok()?, r.end.parse::<i64>().ok()?))
+}
+
+/// The overlap-keying predicate (QE-460 (c), design §4/§11.3): a prior sealed vintage consults the same
+/// protected holdout bars as `[start,end)` if its **holdout intersects** this one (half-open interval
+/// overlap: `prior.start < end && start < prior.end`) OR its **training window covers** this holdout
+/// (`prior.start ≤ start && end ≤ prior.end`) — NOT exact range equality, so partial re-use is still counted.
+fn consultation_overlaps(
+    prior_holdout: Option<(i64, i64)>,
+    prior_train: Option<(i64, i64)>,
+    start: i64,
+    end: i64,
+) -> bool {
+    if let Some((ps, pe)) = prior_holdout {
+        if ps < end && start < pe {
+            return true;
+        }
+    }
+    if let Some((ts, te)) = prior_train {
+        if ts <= start && end <= te {
+            return true;
+        }
+    }
+    false
+}
+
+/// Carve + record the composite-flow frozen-holdout lineage (QE-460). `bars` aligns 1:1 with the decision
+/// bars, so the decision-bar `holdout_idx` / `train_idx` slice it for QE-125 regime labelling and for the
+/// concrete bar-timestamp split boundaries. Asserts the holdout spans **≥ [`MIN_HOLDOUT_REGIMES`]** distinct
+/// regime labels (a single-regime trailing window is rejected — design §4 (b)).
+///
+/// # Errors
+/// [`RunError::HoldoutRegimeCoverage`] if the frozen holdout spans fewer than the minimum distinct regimes.
+fn build_flow_lineage(
+    params: &TrainParams,
+    bars: &[DecisionBar],
+    ohlcv: &[qe_domain::Bar],
+    train_idx: &std::ops::Range<usize>,
+    holdout_idx: &std::ops::Range<usize>,
+) -> Result<FlowLineage, RunError> {
+    let embargo = params.embargo;
+    let flow_end = params.end.as_str();
+    let resolution = params.resolution.as_str();
+    let vintage_root = params.vintage_root.as_path();
+    // QE-125 regime labelling over the frozen holdout slice, then the regime-stratification floor.
+    let (regime_composition, labelled) = holdout_regime_composition(ohlcv, holdout_idx);
+    let distinct = regime_composition.len();
+    if distinct < MIN_HOLDOUT_REGIMES {
+        return Err(RunError::HoldoutRegimeCoverage {
+            labels: distinct,
+            bars: labelled,
+            floor: MIN_HOLDOUT_REGIMES,
+        });
+    }
+
+    // Concrete bar-timestamp split boundaries (opaque epoch-ms labels — the audit trail QE-467 records).
+    let ms = |i: usize| bars[i].features.time_ms;
+    let holdout_start_ms = ms(holdout_idx.start);
+    let holdout_end_ms = ms(holdout_idx.end - 1);
+    let holdout_range = TimeRange {
+        start: holdout_start_ms.to_string(),
+        end: holdout_end_ms.to_string(),
+    };
+    let train_range = TimeRange {
+        start: ms(train_idx.start).to_string(),
+        end: ms(train_idx.end - 1).to_string(),
+    };
+    let holdout_split = HoldoutSplit {
+        holdout_range: Some(holdout_range),
+        train_range: Some(train_range),
+        embargo_bars: embargo as u64,
+    };
+
+    // Overlap-keyed consultation count (this run is the current consultation).
+    let consultation_count =
+        1 + count_overlapping_consultations(vintage_root, holdout_start_ms, holdout_end_ms);
+
+    // The server-derived holdout backtest window: from the first holdout bar's date to the flow-window end
+    // (the pinned snapshot's right edge). Date granularity is a documented v1 limitation.
+    let holdout_window = TrainWindow {
+        start: format_ymd(holdout_start_ms),
+        end: flow_end.to_owned(),
+        resolution: resolution.to_owned(),
+    };
+
+    Ok(FlowLineage {
+        holdout_split,
+        regime_composition,
+        consultation_count,
+        holdout_window,
+    })
 }
 
 /// Funding coverage over a decision-bar series: `(present, expected)` where `present` counts bars carrying
@@ -192,6 +378,13 @@ pub struct TrainParams {
     /// **CV folds** override for the steered selection fitness (`None` ⇒ `cv_folds`). More folds make the
     /// in-window CV harder to pass.
     pub folds: Option<usize>,
+
+    /// QE-460 — this train is the **train sub-job of a composite flow** (`--flow`). When `true` the seal
+    /// **populates** QE-467's frozen-holdout lineage (holdout split + regime composition + overlap-keyed
+    /// consultation count) and the result records the resolved holdout window for the server handoff. When
+    /// `false` (a plain train) the provenance holdout fields stay default (empty) ⇒ the sealed vintage is
+    /// **byte-identical** to the pre-QE-460 seal (no golden move, un-flow vintages unaffected).
+    pub flow: bool,
 }
 
 /// The training window recorded in the result sidecar.
@@ -218,6 +411,11 @@ pub struct TrainResultDoc {
     pub instrument: String,
     /// The training window.
     pub window: TrainWindow,
+    /// QE-460: the **frozen holdout window** the flow's backtest sub-job consults (present only on a `--flow`
+    /// train; `None` otherwise so a plain train's `result.json` is unchanged). Server-derived from the pinned
+    /// snapshot's right edge — the flow supervisor reads it to build the holdout backtest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub holdout_window: Option<TrainWindow>,
     /// The master search seed.
     pub seed: u64,
     /// MAP-Elites generations run.
@@ -366,11 +564,33 @@ pub fn run_train_job(
     // The holdout is the final `holdout` bars; `embargo` purges the boundary so no train information
     // leaks into the untouched G1 slice.
     let split = split_with_embargo(decision_bars.len(), params.holdout, params.embargo);
+    // QE-460: capture the train/holdout bar-index ranges before `split.holdout` is consumed by indexing, so
+    // the flow seal can record the frozen split's concrete bar boundaries in lineage.
+    let train_idx = split.train.clone();
+    let holdout_idx = split.holdout.clone();
     let train_bars = &decision_bars[split.train.clone()];
     let holdout_bars = &decision_bars[split.holdout];
     if train_bars.len() < 2 {
         return Err(RunError::TrainWindowTooShort);
     }
+
+    // QE-460 (design §4 (a)/(b)): a composite-flow (`--flow`) train carves + records the frozen, regime-
+    // stratified OOS holdout ONCE, here — before the search — and the SAME split feeds both flow sub-runs
+    // (this train seals over it; the flow supervisor's backtest re-surfaces it as the single consultation).
+    // `bars` (from `scan_bars`) aligns 1:1 with `decision_bars` (`to_decision_bars` zips one feature vector
+    // per bar), so the decision-bar holdout indices slice `bars` directly for QE-125 regime labelling. A
+    // plain train skips all of this and seals byte-identically.
+    let flow_lineage = if params.flow {
+        Some(build_flow_lineage(
+            params,
+            &decision_bars,
+            &bars,
+            &train_idx,
+            &holdout_idx,
+        )?)
+    } else {
+        None
+    };
 
     // Small-budget backtest config: a low min-trade gate so short fixture series produce finite fitness.
     // The *sealed* genomes are still evolved fully net-of-cost (QE-109 friction is unchanged).
@@ -706,10 +926,24 @@ pub fn run_train_job(
     } else {
         None
     };
-    let provenance = qe_vintage::ResearchProvenance {
+    // QE-460: a composite-flow (`--flow`) train POPULATES QE-467's frozen-holdout lineage slots (split +
+    // regime composition + overlap-keyed consultation count) computed once above. A plain train leaves them
+    // default (empty) ⇒ the un-flow vintage is byte-identical (no golden move, no VINTAGE_FORMAT_VERSION
+    // bump — the fields ride QE-467's 7→8 bump; this only fills them).
+    let (holdout_split, regime_composition, consultation_count) = match flow_lineage.as_ref() {
+        Some(f) => (
+            f.holdout_split.clone(),
+            f.regime_composition.clone(),
+            f.consultation_count,
+        ),
+        None => (HoldoutSplit::default(), Vec::new(), 0),
+    };
+    let provenance = ResearchProvenance {
         data_provenance: qe_vintage::DataProvenance::Real,
+        holdout_split,
+        regime_composition,
+        consultation_count,
         steer_delta,
-        ..qe_vintage::ResearchProvenance::default()
     };
 
     let content = VintageContent {
@@ -753,6 +987,9 @@ pub fn run_train_job(
             end: params.end.clone(),
             resolution: params.resolution.clone(),
         },
+        // QE-460: the frozen holdout window the flow supervisor reads to build the holdout backtest (present
+        // only on a `--flow` train; `None` otherwise so a plain train's `result.json` is unchanged).
+        holdout_window: flow_lineage.as_ref().map(|f| f.holdout_window.clone()),
         seed: params.seed,
         generations,
         population,
@@ -1121,6 +1358,114 @@ mod tests {
         assert_eq!(search_pct(0, 8), 20);
         assert_eq!(search_pct(8, 8), 70);
         assert!((20..=70).contains(&search_pct(4, 8)));
+    }
+
+    #[test]
+    fn regime_label_is_the_canonical_vol_trend_string() {
+        assert_eq!(
+            regime_label(Regime::new(VolState::Calm, TrendState::Trending)),
+            "calm-trending"
+        );
+        assert_eq!(
+            regime_label(Regime::new(VolState::Volatile, TrendState::Choppy)),
+            "volatile-choppy"
+        );
+    }
+
+    #[test]
+    fn consultation_overlap_is_keyed_on_intersection_not_equality() {
+        // QE-460 (c): a prior holdout [100,200) is counted for any INTERSECTING run holdout — even when the
+        // ranges are not equal — but NOT for a disjoint or merely-touching (half-open) one.
+        let prior = Some((100, 200));
+        assert!(
+            consultation_overlaps(prior, None, 150, 250),
+            "partial overlap counts"
+        );
+        assert!(
+            consultation_overlaps(prior, None, 100, 200),
+            "exact match counts"
+        );
+        assert!(
+            consultation_overlaps(prior, None, 120, 180),
+            "containment counts"
+        );
+        assert!(
+            !consultation_overlaps(prior, None, 200, 300),
+            "touching at the half-open edge does not"
+        );
+        assert!(
+            !consultation_overlaps(prior, None, 300, 400),
+            "disjoint does not"
+        );
+        // A prior TRAINING window that covers this holdout also counts (the search saw these bars).
+        assert!(consultation_overlaps(None, Some((0, 500)), 300, 400));
+        assert!(
+            !consultation_overlaps(None, Some((0, 350)), 300, 400),
+            "train window not covering does not"
+        );
+        // A vintage with no recorded holdout (a plain, non-flow train) never counts.
+        assert!(!consultation_overlaps(None, None, 300, 400));
+    }
+
+    /// A flat bar at index `i` (all OHLC = `price`) for regime-composition unit tests.
+    fn flat_bar(i: usize, price: f64) -> qe_domain::Bar {
+        use qe_domain::{Price, Qty, Resolution, Timestamp};
+        let p = Price::new(Decimal::try_from(price).unwrap()).unwrap();
+        qe_domain::Bar::new(
+            Timestamp::from_millis(i as i64 * 3_600_000),
+            Resolution::H1,
+            p,
+            p,
+            p,
+            p,
+            Qty::new(Decimal::ONE).unwrap(),
+            1,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn holdout_regime_composition_collapses_to_one_regime_on_a_constant_series() {
+        // A constant-price series has zero volatility + zero net move ⇒ every labelled bar is the SAME
+        // regime (`calm-choppy`), so the composition has a single label — below `MIN_HOLDOUT_REGIMES`, which
+        // is exactly the geometry the flow rejects (design §4 (b)).
+        let bars: Vec<qe_domain::Bar> = (0..80).map(|i| flat_bar(i, 100.0)).collect();
+        let (composition, labelled) = holdout_regime_composition(&bars, &(40..80));
+        assert_eq!(
+            composition.len(),
+            1,
+            "constant series ⇒ one regime: {composition:?}"
+        );
+        assert!(
+            composition.len() < MIN_HOLDOUT_REGIMES,
+            "one regime is below the floor"
+        );
+        assert!(labelled > 0);
+    }
+
+    #[test]
+    fn holdout_regime_composition_spans_multiple_regimes_on_a_varied_series() {
+        // A calm uptrend then a volatile chop makes the holdout span ≥ 2 distinct regimes (the median-vol
+        // split + the trend axis both flip), clearing the floor.
+        let mut closes: Vec<f64> = Vec::new();
+        let mut p = 100.0;
+        for _ in 0..60 {
+            closes.push(p);
+            p *= 1.002; // calm uptrend
+        }
+        for i in 0..60 {
+            closes.push(if i % 2 == 0 { 100.0 } else { 140.0 }); // volatile chop
+        }
+        let bars: Vec<qe_domain::Bar> = closes
+            .iter()
+            .enumerate()
+            .map(|(i, &c)| flat_bar(i, c))
+            .collect();
+        let (composition, _) = holdout_regime_composition(&bars, &(0..bars.len()));
+        assert!(
+            composition.len() >= MIN_HOLDOUT_REGIMES,
+            "a varied series spans ≥ {MIN_HOLDOUT_REGIMES} regimes: {composition:?}"
+        );
     }
 
     #[test]

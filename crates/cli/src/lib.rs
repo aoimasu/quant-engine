@@ -80,6 +80,10 @@ pub struct TrainOptions {
     pub windows: Option<usize>,
     /// QE-458 steer — CV folds override (`--folds`); `None` ⇒ `config.selection.cv_folds`.
     pub folds: Option<usize>,
+    /// QE-460 — this train is the **train sub-job of a composite flow** (`--flow`). When set the seal
+    /// records the frozen-holdout lineage (holdout split + regime composition + overlap-keyed consultation
+    /// count) and the resolved holdout window into `result.json`. Off (a plain train) ⇒ byte-identical seal.
+    pub flow: bool,
 }
 
 /// Run the training-search pipeline for `cfg`, sealing a vintage under the configured artefacts
@@ -154,6 +158,8 @@ pub fn run_train(
         indicator_subset: opts.indicator_subset.clone(),
         windows: opts.windows,
         folds: opts.folds,
+        // QE-460 composite-flow marker: record the frozen-holdout lineage. Off ⇒ byte-identical seal.
+        flow: opts.flow,
     };
 
     Ok(run_train_job(&params, emit)?)
@@ -297,6 +303,9 @@ pub enum Command {
         windows: Option<usize>,
         /// QE-458 steer — CV folds override (`--folds`).
         folds: Option<usize>,
+        /// QE-460 — train sub-job of a composite flow (`--flow`): record the frozen-holdout lineage + the
+        /// resolved holdout window. Off ⇒ a plain train (byte-identical seal).
+        flow: bool,
     },
     /// Run the offline GP evolve pipeline (QE-452): illuminate → deflation → freeze → **seal a formula
     /// pool** (never a vintage).
@@ -410,6 +419,8 @@ where
             let mut indicators: Vec<String> = Vec::new();
             let mut windows: Option<usize> = None;
             let mut folds: Option<usize> = None;
+            // QE-460 composite-flow train sub-job marker (records the frozen-holdout lineage).
+            let mut flow = false;
             while let Some(flag) = it.next() {
                 match flag.as_str() {
                     "--config" => config = PathBuf::from(value(&mut it, "--config")?),
@@ -429,6 +440,7 @@ where
                     "--indicator" => indicators.push(value(&mut it, "--indicator")?),
                     "--windows" => windows = Some(parse_usize_flag(&mut it, "--windows")?),
                     "--folds" => folds = Some(parse_usize_flag(&mut it, "--folds")?),
+                    "--flow" => flow = true,
                     other => {
                         return Err(CliError::Usage(format!("unknown flag `{other}`")));
                     }
@@ -450,6 +462,7 @@ where
                 indicator_subset: (!indicators.is_empty()).then_some(indicators),
                 windows,
                 folds,
+                flow,
             })
         }
         "evolve" => {
@@ -693,6 +706,7 @@ mod tests {
                 indicator_subset: None,
                 windows: None,
                 folds: None,
+                flow: false,
             }
         );
         // Every flag overridden.
@@ -730,6 +744,7 @@ mod tests {
             "6",
             "--folds",
             "4",
+            "--flow",
         ])
         .unwrap();
         assert_eq!(
@@ -750,6 +765,7 @@ mod tests {
                 indicator_subset: Some(vec!["rsi_14".to_owned(), "atr_pct".to_owned()]),
                 windows: Some(6),
                 folds: Some(4),
+                flow: true,
             }
         );
     }

@@ -21,8 +21,8 @@ use tokio::sync::{Mutex, Semaphore};
 use tokio::task::JoinHandle;
 
 use super::model::{
-    BacktestParams, CreateRunRequest, EnsembleSnapshot, EvolveParams, GateSnapshot, GenSnapshot,
-    IndexEntry, Progress, RunMeta, RunSpec, RunStatus, TrainParams, TrainProgress,
+    BacktestParams, CreateRunRequest, EnsembleSnapshot, EvolveParams, FlowParams, GateSnapshot,
+    GenSnapshot, IndexEntry, Progress, RunMeta, RunSpec, RunStatus, TrainParams, TrainProgress,
 };
 use super::spawn::JobSpawner;
 use super::store::RunStore;
@@ -169,6 +169,7 @@ impl RunManager {
             params: spec.params_value(),
             progress: Progress::default(),
             train: None,
+            flow: None,
             created_ms,
             started_ms: None,
             finished_ms: None,
@@ -382,8 +383,16 @@ fn build_spec(req: &CreateRunRequest) -> Result<RunSpec, CreateError> {
             validate_evolve(&p)?;
             Ok(RunSpec::Evolve(p))
         }
+        "flow" => {
+            // QE-460: `seed` is REQUIRED (no serde default, mirroring `evolve`), so a body missing it fails
+            // here with a clear message — a flow verdict must stay byte-reproducible off the recorded seed.
+            let p: FlowParams = serde_json::from_value(params)
+                .map_err(|e| CreateError::Validation(format!("invalid flow params: {e}")))?;
+            validate_flow(&p)?;
+            Ok(RunSpec::Flow(p))
+        }
         other => Err(CreateError::Validation(format!(
-            "unsupported run type `{other}` (expected `backtest`, `train`, or `evolve`)"
+            "unsupported run type `{other}` (expected `backtest`, `train`, `evolve`, or `flow`)"
         ))),
     }
 }
@@ -465,6 +474,18 @@ fn validate_train(p: &TrainParams) -> Result<(), CreateError> {
         ));
     }
     Ok(())
+}
+
+/// Validate composite-flow params (QE-460, design §5.2/§4): the flow window + a serde-required `seed`, then
+/// the **exact same** QE-458 steer-whitelist / blocklist / holdout-embargo-floor enforcement `validate_train`
+/// applies — **reused** via [`FlowParams::to_train_params`], never duplicated or diverged (so a flow can
+/// never steer past a gate floor a `train` could not). A uniform `400` on any violation.
+fn validate_flow(p: &FlowParams) -> Result<(), CreateError> {
+    // The train sub-run derived from the flow carries the required window + the steer block; validating it
+    // reuses the whitelist/blocklist + the holdout/embargo/purge/windows/folds floors (design §4/§6.2) with
+    // zero divergence. `seed` is already enforced-present by serde in `build_spec` (a missing seed is a
+    // `400`), so a flow is byte-reproducible off its recorded seed.
+    validate_train(&p.to_train_params())
 }
 
 /// Reject a non-steerable (blocklist) gate-decision knob that appears in the request at all (a `400`) —
@@ -601,6 +622,14 @@ async fn supervise(
     meta.started_ms = Some(now_ms());
     let _ = store.write_meta(&meta);
 
+    // QE-460: a composite flow is not a single subprocess — the supervisor SEQUENCES the existing `train`
+    // and `backtest` CLI sub-jobs under one run-store row. Delegate to the flow supervisor (which holds the
+    // pool permit `_permit` for the whole sequence) and return.
+    if let RunSpec::Flow(params) = &spec {
+        supervise_flow(&store, spawner.as_ref(), run_deadline, &mut meta, params).await;
+        return;
+    }
+
     let run_dir = store.run_dir(&meta.id);
     let mut child = match spawner.spawn(&run_dir, &spec) {
         Ok(child) => child,
@@ -662,6 +691,9 @@ async fn supervise(
                 };
             }
             RunSpec::Backtest(_) => {}
+            // A flow is sequenced by `supervise_flow` (returned early above) and never reaches this
+            // single-child terminal path.
+            RunSpec::Flow(_) => {}
         }
         let _ = store.write_meta(&meta);
     } else if done_seen && exit == Some(0) {
@@ -681,6 +713,300 @@ async fn supervise(
         };
         finish_failed(&store, &mut meta, exit, msg);
     }
+}
+
+/// The pinned taker fee (bps) the flow's holdout backtest re-costs with — equal to the run-protocol
+/// `BacktestParams` default the train gate priced selection with (`BacktestConfig::default().friction`), so
+/// the backtest cannot re-cost the holdout under a friendlier friction model than the gate used (QE-460 (d),
+/// maxdama #6 cost parity).
+const FLOW_TAKER_FEE_BPS: f64 = 2.0;
+/// The pinned slippage-model label the flow's holdout backtest re-costs with — equal to the train gate's
+/// sealed selection cost model (QE-460 (d)).
+const FLOW_SLIPPAGE_MODEL: &str = "square-root-impact";
+/// QE-460 (a): the flow's backtest re-surfaces the gate's holdout verdict — it is the SINGLE recorded
+/// consultation, not a fresh OOS look — so it confers no independent deflation credit.
+const FLOW_SINGLE_CONSULTATION_NOTE: &str =
+    "flow backtest evaluates ON the frozen holdout (single recorded consultation, no independent credit)";
+
+/// Build the flow's holdout-backtest params, **pinned to the sealed default cost model** (QE-460 (d)): the
+/// vintage handoff (content hash), the frozen holdout window `[start,end)`, and the config-derived
+/// instrument the train sub-job trained over. The operator cannot choose the backtest window or a friendlier
+/// friction model — both are server-derived.
+fn flow_backtest_params(
+    vintage: String,
+    start: String,
+    end: String,
+    resolution: String,
+    instrument: String,
+) -> BacktestParams {
+    BacktestParams {
+        vintage,
+        strategy: None,
+        start,
+        end,
+        resolution,
+        universe: vec![instrument],
+        taker_fee_bps: FLOW_TAKER_FEE_BPS,
+        slippage_model: FLOW_SLIPPAGE_MODEL.to_owned(),
+    }
+}
+
+/// Cost-parity guard (QE-460 (d), maxdama #6): the flow's holdout backtest must re-cost under the **same**
+/// sealed cost calibration the train gate used — the pinned default taker fee + slippage model. Returns
+/// `false` if the params carry a friendlier (or any different) friction model, which fails the flow rather
+/// than letting the backtest re-cost the holdout cheaper than the gate.
+fn flow_cost_parity_ok(bp: &BacktestParams) -> bool {
+    (bp.taker_fee_bps - FLOW_TAKER_FEE_BPS).abs() < f64::EPSILON
+        && bp.slippage_model == FLOW_SLIPPAGE_MODEL
+}
+
+/// The train→backtest handoff the flow supervisor reads from the train sub-run's `result.json` (parsed as an
+/// opaque `serde_json::Value`, so no `qe-cli` crate edge is added — the firewall stays green): the frozen
+/// holdout window the train sub-job carved + the config-derived instrument it trained over.
+struct TrainHandoff {
+    holdout_start: String,
+    holdout_end: String,
+    resolution: String,
+    instrument: String,
+}
+
+/// Parse the train sub-run's `result.json` for the frozen-holdout handoff (QE-460): the resolved holdout
+/// window (`holdout_window.{start,end,resolution}`) the train phase carved from the pinned snapshot's right
+/// edge, and the `instrument` it trained over (the config-derived backtest universe). `None` if the file is
+/// missing/unparseable or lacks the fields.
+fn read_train_handoff(result_path: &std::path::Path) -> Option<TrainHandoff> {
+    let bytes = std::fs::read(result_path).ok()?;
+    let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let hw = v.get("holdout_window")?;
+    Some(TrainHandoff {
+        holdout_start: hw.get("start")?.as_str()?.to_owned(),
+        holdout_end: hw.get("end")?.as_str()?.to_owned(),
+        resolution: hw.get("resolution")?.as_str()?.to_owned(),
+        instrument: v.get("instrument")?.as_str()?.to_owned(),
+    })
+}
+
+/// Spawn + tail one already-spawned sub-job `Child` to completion under the per-run wall-clock deadline,
+/// folding its stdout progress into the flow `meta` (shared coarse progress + `stdout.log`) exactly like the
+/// single-child supervisor. Returns `(done_seen, exit_code, stderr_tail, deadline_exceeded)`.
+async fn drain_child(
+    mut child: tokio::process::Child,
+    store: &RunStore,
+    meta: &mut RunMeta,
+    spec: &RunSpec,
+    run_deadline: Duration,
+) -> (bool, Option<i32>, String, bool) {
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let drain = async {
+        let stdout_fut = drain_stdout(stdout, store, meta, spec);
+        let stderr_fut = drain_stderr_tail(stderr);
+        tokio::join!(stdout_fut, stderr_fut)
+    };
+    let (done_seen, err_tail, deadline_exceeded) =
+        match tokio::time::timeout(run_deadline, drain).await {
+            Ok((done_seen, err_tail)) => (done_seen, err_tail, false),
+            Err(_) => {
+                let _ = child.start_kill();
+                (false, String::new(), true)
+            }
+        };
+    let exit = child.wait().await.ok().and_then(|s| s.code());
+    (done_seen, exit, err_tail, deadline_exceeded)
+}
+
+/// QE-460 — supervise a composite flow: sequence the `train` sub-job (sealing a vintage over the frozen,
+/// regime-stratified OOS holdout carved once) then the `backtest` sub-job over that same holdout with the
+/// just-sealed vintage id. **Atomic**: the flow succeeds only if both sub-runs succeed and a vintage sealed;
+/// a train that fails G1 seals nothing and runs **no** backtest (design §5.2). One run-store row, one
+/// status; the sub-run ids + the frozen holdout are recorded in `meta.flow`.
+async fn supervise_flow(
+    store: &RunStore,
+    spawner: &dyn JobSpawner,
+    run_deadline: Duration,
+    meta: &mut RunMeta,
+    params: &FlowParams,
+) {
+    use super::model::FlowProgress;
+
+    let flow_dir = store.run_dir(&meta.id);
+    let train_dir = flow_dir.join("train");
+    if let Err(e) = std::fs::create_dir_all(&train_dir) {
+        finish_failed(
+            store,
+            meta,
+            None,
+            format!("failed to create flow train dir: {e}"),
+        );
+        return;
+    }
+    let mut flow = FlowProgress {
+        train_run: Some("train".to_owned()),
+        ..FlowProgress::default()
+    };
+    meta.flow = Some(flow.clone());
+    meta.progress = Progress {
+        pct: 5,
+        stage: "flow-train".to_owned(),
+        msg: "flow: training over the frozen holdout".to_owned(),
+    };
+    let _ = store.write_meta(meta);
+
+    // ---- train phase (carves + seals over the frozen holdout, records the lineage) ------------------
+    let train_params = params.to_train_params();
+    let child = match spawner.spawn_flow_train(&train_dir, &train_params) {
+        Ok(child) => child,
+        Err(e) => {
+            finish_failed(
+                store,
+                meta,
+                None,
+                format!("failed to spawn flow train: {e}"),
+            );
+            return;
+        }
+    };
+    // `drain_stdout` folds the train sub-run's terminal `done` vintage + its G1 gate verdict into
+    // `meta.train`.
+    let train_spec = RunSpec::Train(train_params);
+    let (done, exit, err_tail, deadline) =
+        drain_child(child, store, meta, &train_spec, run_deadline).await;
+    let vintage = meta.train.as_ref().and_then(|t| t.vintage.clone());
+    // The G1 verdict the train sub-run emitted (`gate.promoted`). The flow's atomic verdict rides it: a
+    // train that fails G1 fails the flow and runs NO backtest (design §5.2), even though the CLI seal itself
+    // is untouched (a train always seals its vintage; the flow — not the seal — enforces the gate here).
+    let promoted = meta
+        .train
+        .as_ref()
+        .and_then(|t| t.gate.as_ref())
+        .map(|g| g.promoted)
+        .unwrap_or(false);
+    let sealed_ok = !deadline
+        && done
+        && exit == Some(0)
+        && train_dir.join("result.json").exists()
+        && vintage.is_some();
+    if !sealed_ok || !promoted {
+        let reason = if deadline {
+            RUN_DEADLINE_REASON.to_owned()
+        } else if sealed_ok && !promoted {
+            "flow train failed the G1 gate — nothing promoted, no backtest run".to_owned()
+        } else if done && exit == Some(0) && vintage.is_none() {
+            "flow train sealed no vintage — no backtest run".to_owned()
+        } else if !err_tail.trim().is_empty() {
+            err_tail
+        } else {
+            format!("flow train sub-job failed (exit {exit:?})")
+        };
+        finish_failed(store, meta, exit, reason);
+        return;
+    }
+    let vintage = vintage.expect("checked Some above");
+    flow.vintage = Some(vintage.clone());
+
+    // ---- read the frozen holdout window + instrument the train phase resolved -----------------------
+    let handoff = match read_train_handoff(&train_dir.join("result.json")) {
+        Some(h) => h,
+        None => {
+            finish_failed(
+                store,
+                meta,
+                exit,
+                "flow train result.json missing the holdout handoff (holdout_window/instrument)"
+                    .to_owned(),
+            );
+            return;
+        }
+    };
+    flow.holdout_start = Some(handoff.holdout_start.clone());
+    flow.holdout_end = Some(handoff.holdout_end.clone());
+
+    // ---- cost-parity guard (maxdama #6): pin the sealed default cost model --------------------------
+    let bp = flow_backtest_params(
+        vintage.clone(),
+        handoff.holdout_start.clone(),
+        handoff.holdout_end.clone(),
+        handoff.resolution.clone(),
+        handoff.instrument.clone(),
+    );
+    if !flow_cost_parity_ok(&bp) {
+        finish_failed(
+            store,
+            meta,
+            exit,
+            "flow backtest cost model diverged from the sealed gate calibration (cost-parity breach)"
+                .to_owned(),
+        );
+        return;
+    }
+
+    // ---- backtest phase over the FROZEN holdout (the single recorded consultation) ------------------
+    let backtest_dir = flow_dir.join("backtest");
+    if let Err(e) = std::fs::create_dir_all(&backtest_dir) {
+        finish_failed(
+            store,
+            meta,
+            exit,
+            format!("failed to create flow backtest dir: {e}"),
+        );
+        return;
+    }
+    flow.backtest_run = Some("backtest".to_owned());
+    meta.flow = Some(flow.clone());
+    meta.progress = Progress {
+        pct: 90,
+        stage: "flow-backtest".to_owned(),
+        msg: format!(
+            "flow: backtesting sealed vintage on the holdout ({FLOW_SINGLE_CONSULTATION_NOTE})"
+        ),
+    };
+    let _ = store.write_meta(meta);
+
+    let bt_spec = RunSpec::Backtest(bp);
+    let child = match spawner.spawn(&backtest_dir, &bt_spec) {
+        Ok(child) => child,
+        Err(e) => {
+            finish_failed(
+                store,
+                meta,
+                exit,
+                format!("failed to spawn flow backtest: {e}"),
+            );
+            return;
+        }
+    };
+    let (bt_done, bt_exit, bt_err, bt_deadline) =
+        drain_child(child, store, meta, &bt_spec, run_deadline).await;
+    let bt_ok =
+        !bt_deadline && bt_done && bt_exit == Some(0) && backtest_dir.join("result.json").exists();
+    if !bt_ok {
+        let reason = if bt_deadline {
+            RUN_DEADLINE_REASON.to_owned()
+        } else if !bt_err.trim().is_empty() {
+            bt_err
+        } else {
+            format!("flow backtest sub-job failed (exit {bt_exit:?})")
+        };
+        finish_failed(store, meta, bt_exit, reason);
+        return;
+    }
+
+    // ---- atomic success: both sub-runs succeeded and the vintage sealed ------------------------------
+    meta.status = RunStatus::Succeeded;
+    meta.error = None;
+    meta.exit = Some(0);
+    meta.finished_ms = Some(now_ms());
+    meta.artifacts = vec![
+        "train/result.json".to_owned(),
+        "backtest/result.json".to_owned(),
+    ];
+    meta.progress = Progress {
+        pct: 100,
+        stage: "done".to_owned(),
+        msg: "flow complete: train sealed + holdout backtest".to_owned(),
+    };
+    meta.flow = Some(flow);
+    let _ = store.write_meta(meta);
 }
 
 /// Read subprocess stdout line by line: append each raw line to `stdout.log` and, on a `progress`
@@ -1102,5 +1428,168 @@ mod tests {
             "start": "2021-01-01", "end": "2021-06-01", "resolution": "1h",
             "windows": 4, "folds": 2
         }));
+    }
+
+    // ---- QE-460 validate_flow (reuses the QE-458 whitelist via `to_train_params`) ---------------------
+
+    fn flow_req(params: serde_json::Value) -> CreateRunRequest {
+        CreateRunRequest {
+            run_type: "flow".to_owned(),
+            params,
+        }
+    }
+
+    fn valid_flow_params() -> serde_json::Value {
+        json!({ "seed": 7, "start": "2021-01-01", "end": "2021-06-01", "resolution": "1h" })
+    }
+
+    fn assert_flow_rejected(key: &str, value: serde_json::Value, needle: &str) {
+        let mut params = valid_flow_params();
+        params[key] = value;
+        let err = build_spec(&flow_req(params)).expect_err("flow request must reject");
+        match err {
+            CreateError::Validation(msg) => assert!(
+                msg.contains(needle),
+                "expected rejection mentioning `{needle}`, got: {msg}"
+            ),
+            other => panic!("expected Validation error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_spec_accepts_a_valid_flow_request() {
+        let spec = build_spec(&flow_req(valid_flow_params())).expect("valid flow spec");
+        match spec {
+            RunSpec::Flow(p) => {
+                assert_eq!(p.seed, 7);
+                assert_eq!(p.start, "2021-01-01");
+                // A flow always writes a vintage (its train phase seals one).
+                assert!(RunSpec::Flow(p).writes_vintage());
+            }
+            other => panic!("expected Flow, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_flow_requires_seed() {
+        // Missing seed is a serde reject wrapped as a clear `400` (a flow must be byte-reproducible).
+        let err = build_spec(&flow_req(
+            json!({ "start": "2021-01-01", "end": "2021-06-01", "resolution": "1h" }),
+        ))
+        .expect_err("missing seed must reject");
+        match err {
+            CreateError::Validation(msg) => assert!(msg.contains("seed"), "message: {msg}"),
+            other => panic!("expected Validation error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_flow_requires_the_window() {
+        assert_flow_rejected("start", json!(""), "start");
+        assert_flow_rejected("end", json!(""), "end");
+        assert_flow_rejected("resolution", json!(""), "resolution");
+    }
+
+    #[test]
+    fn validate_flow_accepts_the_whitelisted_steer_knobs() {
+        build_spec(&flow_req(json!({
+            "seed": 7, "start": "2021-01-01", "end": "2021-06-01", "resolution": "1h",
+            "generations": 80, "population": 24,
+            "indicator_subset": ["rsi_14", "atr_pct"],
+            "windows": 6, "folds": 4, "holdout": 300, "embargo": 24
+        })))
+        .expect("whitelisted steer knobs at/above their floors must be accepted");
+    }
+
+    #[test]
+    fn validate_flow_rejects_gate_decision_knobs_and_sub_floor_holdout_embargo() {
+        // The blocklist + floors are enforced verbatim by the reused `validate_train` — a flow can NEVER
+        // steer past a gate floor a `train` could not (design §4/§6.2).
+        assert_flow_rejected("pbo_cutoff", json!(0.9), "pbo_cutoff");
+        assert_flow_rejected(
+            "cost_stress_multiplier",
+            json!(0.5),
+            "cost_stress_multiplier",
+        );
+        assert_flow_rejected("holdout", json!(10), "holdout");
+        assert_flow_rejected("embargo", json!(0), "embargo");
+        assert_flow_rejected("windows", json!(2), "windows");
+        assert_flow_rejected("evolved_pool", json!("pool-abc"), "evolved-pool");
+    }
+
+    // ---- QE-460 (d) cost-parity guard ----------------------------------------------------------------
+
+    #[test]
+    fn flow_backtest_params_pin_the_sealed_cost_model_and_pass_parity() {
+        let bp = flow_backtest_params(
+            "vint-abc".to_owned(),
+            "2021-05-01".to_owned(),
+            "2021-06-01".to_owned(),
+            "1h".to_owned(),
+            "BTCUSDT".to_owned(),
+        );
+        // The flow pins the sealed default cost model (= the model the train gate priced with), the frozen
+        // holdout window, and the config-derived instrument as the backtest universe.
+        assert_eq!(bp.taker_fee_bps, FLOW_TAKER_FEE_BPS);
+        assert_eq!(bp.slippage_model, FLOW_SLIPPAGE_MODEL);
+        assert_eq!(bp.universe, vec!["BTCUSDT".to_owned()]);
+        assert_eq!(bp.vintage, "vint-abc");
+        assert!(
+            flow_cost_parity_ok(&bp),
+            "the pinned model must pass the parity guard"
+        );
+    }
+
+    #[test]
+    fn flow_cost_parity_rejects_a_friendlier_friction_model() {
+        // A backtest re-costing the holdout under a cheaper fee (or a different slippage model) than the gate
+        // used is a cost-parity breach (maxdama #6) — the guard fails it.
+        let mut bp = flow_backtest_params(
+            "v".to_owned(),
+            "a".to_owned(),
+            "b".to_owned(),
+            "1h".to_owned(),
+            "BTCUSDT".to_owned(),
+        );
+        bp.taker_fee_bps = 0.5; // friendlier than the sealed 2.0
+        assert!(!flow_cost_parity_ok(&bp));
+        let mut bp2 = flow_backtest_params(
+            "v".to_owned(),
+            "a".to_owned(),
+            "b".to_owned(),
+            "1h".to_owned(),
+            "BTCUSDT".to_owned(),
+        );
+        bp2.slippage_model = "zero-impact".to_owned();
+        assert!(!flow_cost_parity_ok(&bp2));
+    }
+
+    #[test]
+    fn read_train_handoff_parses_the_holdout_window_and_instrument() {
+        let dir = std::env::temp_dir().join(format!("qe460-handoff-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("result.json");
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&json!({
+                "instrument": "BTCUSDT",
+                "holdout_window": { "start": "2021-05-20", "end": "2021-06-01", "resolution": "1h" }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let h = read_train_handoff(&path).expect("handoff parses");
+        assert_eq!(h.instrument, "BTCUSDT");
+        assert_eq!(h.holdout_start, "2021-05-20");
+        assert_eq!(h.holdout_end, "2021-06-01");
+        assert_eq!(h.resolution, "1h");
+        // A result.json missing the holdout window yields None (the flow then fails cleanly).
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&json!({ "instrument": "X" })).unwrap(),
+        )
+        .unwrap();
+        assert!(read_train_handoff(&path).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

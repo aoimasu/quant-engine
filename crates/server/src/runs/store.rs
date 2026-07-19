@@ -234,6 +234,7 @@ mod tests {
             .expect("serialize backtest params"),
             progress: Progress::default(),
             train: None,
+            flow: None,
             created_ms: 123,
             started_ms: None,
             finished_ms: None,

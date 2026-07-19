@@ -22,6 +22,16 @@ pub trait JobSpawner: Send + Sync + 'static {
     /// # Errors
     /// Any OS error spawning the process (e.g. the binary does not exist).
     fn spawn(&self, run_dir: &Path, spec: &RunSpec) -> std::io::Result<Child>;
+
+    /// QE-460: spawn the **`train` sub-job of a composite flow** — identical to a `train` spawn but with the
+    /// `--flow` marker, so the CLI seal populates QE-467's frozen-holdout lineage (holdout split + regime
+    /// composition + overlap-keyed consultation count). A plain `train` run leaves the marker off and seals
+    /// byte-identically. The flow supervisor calls this for the train phase and then sequences a normal
+    /// [`Self::spawn`] `backtest` over the frozen holdout.
+    ///
+    /// # Errors
+    /// Any OS error spawning the process.
+    fn spawn_flow_train(&self, run_dir: &Path, params: &TrainParams) -> std::io::Result<Child>;
 }
 
 /// Production spawner: builds `<bin> <subcommand> … --run-dir <dir> --json` and spawns it with stdout +
@@ -65,9 +75,32 @@ impl JobSpawner for CliJobSpawner {
         let mut cmd = Command::new(&self.bin);
         match spec {
             RunSpec::Backtest(params) => backtest_args(&mut cmd, params, run_dir),
-            RunSpec::Train(params) => train_args(&mut cmd, params, run_dir),
+            RunSpec::Train(params) => train_args(&mut cmd, params, run_dir, false),
             RunSpec::Evolve(params) => evolve_args(&mut cmd, params, run_dir),
+            // A composite flow is never spawned as a single process — the supervisor sequences its `train`
+            // (via `spawn_flow_train`) and `backtest` sub-jobs. A direct spawn is a programming error.
+            RunSpec::Flow(_) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "a composite `flow` run is sequenced by the supervisor, not spawned as one process",
+                ));
+            }
         }
+        self.finish_spawn(cmd)
+    }
+
+    fn spawn_flow_train(&self, run_dir: &Path, params: &TrainParams) -> std::io::Result<Child> {
+        let mut cmd = Command::new(&self.bin);
+        // The `--flow` marker makes the CLI seal record the frozen-holdout lineage (QE-460); the argv is
+        // otherwise identical to a plain `train` spawn.
+        train_args(&mut cmd, params, run_dir, true);
+        self.finish_spawn(cmd)
+    }
+}
+
+impl CliJobSpawner {
+    /// Apply the shared child wiring (QE-419 config pin + piped stdio + `kill_on_drop`) and spawn.
+    fn finish_spawn(&self, mut cmd: Command) -> std::io::Result<Child> {
         // QE-419: pin the child to the server's config file so it reads the same `[storage]` dirs.
         if let Some(config_path) = &self.config_path {
             cmd.env(crate::config::ENV_CONFIG, config_path);
@@ -110,8 +143,14 @@ fn backtest_args(cmd: &mut Command, params: &BacktestParams, run_dir: &Path) {
 /// Build the `train … --run-dir <dir> --json` argv (QE-260/QE-261). The instrument/universe + store +
 /// artefacts roots come from the config file (`--config`, defaulted by the CLI), not flags; the budget
 /// knobs are only passed when the request set them, so the CLI's own defaults otherwise apply.
-fn train_args(cmd: &mut Command, params: &TrainParams, run_dir: &Path) {
+fn train_args(cmd: &mut Command, params: &TrainParams, run_dir: &Path, flow: bool) {
     cmd.arg("train");
+    // QE-460: the composite flow's train sub-job carries `--flow` so the seal records the frozen-holdout
+    // lineage (holdout split + regime composition + overlap-keyed consultation count). A plain train run
+    // passes `false` and its argv + sealed vintage are byte-identical to pre-QE-460.
+    if flow {
+        cmd.arg("--flow");
+    }
     if let Some(config) = &params.config {
         cmd.arg("--config").arg(config);
     }

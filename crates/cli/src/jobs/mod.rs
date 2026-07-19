@@ -112,6 +112,24 @@ pub enum RunError {
         floor: usize,
     },
 
+    /// QE-460 (design §4 (b)): a composite-flow (`--flow`) train carved a frozen holdout that spans fewer
+    /// than the minimum distinct QE-125 regime labels — a single-regime holdout is a lucky trailing window,
+    /// not a regime-stratified OOS verdict. Surfaced as a hard error (never silently sealed) so the holdout
+    /// geometry stays regime-diverse — widen the flow window or lower the holdout size.
+    #[error(
+        "flow holdout spans {labels} distinct regime label(s) over {bars} bars, below the required \
+         minimum {floor}: the frozen holdout is not regime-stratified — widen the flow window so the \
+         holdout covers more market regimes (QE-125)"
+    )]
+    HoldoutRegimeCoverage {
+        /// Distinct QE-125 regime labels the holdout spanned.
+        labels: usize,
+        /// Labelled holdout bars.
+        bars: usize,
+        /// The compiled minimum distinct-regime floor (`MIN_HOLDOUT_REGIMES`).
+        floor: usize,
+    },
+
     /// Funding coverage over the training window is below the configured floor (QE-403). Selecting,
     /// validating, and G1-gating on funding-free returns would admit exactly the funding-negative
     /// strategies QE-109 exists to reject, so the job refuses to seal.
