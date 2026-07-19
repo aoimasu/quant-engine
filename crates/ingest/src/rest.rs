@@ -141,11 +141,15 @@ pub fn parse_klines_json(bytes: &[u8]) -> Result<Vec<TimedRow>, RestError> {
                 .first()
                 .and_then(serde_json::Value::as_i64)
                 .ok_or_else(|| RestError::Fatal("kline row missing open_time".to_owned()))?,
-            // `/futures/data` object form: a `timestamp` field.
+            // Object form: `/futures/data` uses `timestamp`; `/fapi/v1/fundingRate` uses `fundingTime`
+            // (QE-463). Accept either so the same pager drives klines, metrics, and funding.
             serde_json::Value::Object(map) => map
                 .get("timestamp")
+                .or_else(|| map.get("fundingTime"))
                 .and_then(serde_json::Value::as_i64)
-                .ok_or_else(|| RestError::Fatal("data row missing timestamp".to_owned()))?,
+                .ok_or_else(|| {
+                    RestError::Fatal("data row missing timestamp/fundingTime".to_owned())
+                })?,
             _ => return Err(RestError::Fatal("unexpected row shape".to_owned())),
         };
         out.push(TimedRow {

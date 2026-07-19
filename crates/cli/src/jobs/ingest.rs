@@ -252,3 +252,201 @@ impl HistoricalSource for SyntheticSource {
         })
     }
 }
+
+// ---------------------------------------------------------------------------------------------------
+// Real Binance USDT-M `HistoricalSource` (QE-463) — behind the default-off `http` feature.
+//
+// The composition-root adapter between the `qe-ingest` decoder (`BinanceHistorical`: plan-missing →
+// paginate → decode klines+funding → closed-window filter) and the runtime `HistoricalSource` seam
+// `run_ingest` writes through. It maps the decoder's `IngestedWindow` onto `HistoricalWindow`, filling
+// bars + funding and leaving premium/open-interest/mark-price EMPTY: this is the **klines-only**
+// calibration-honest slice (`CalibrationSource::Uncalibrated`) — no premium/impact/ADV inputs are
+// fabricated. (`run_ingest` discards open-interest/mark-price anyway.)
+//
+// All real-network code stays here behind `#[cfg(feature = "http")]`; the default build, the
+// `--synthetic` path, and the in-memory test sources above are untouched. Wiring the CLI command /
+// trigger to construct this from store coverage is QE-464.
+// ---------------------------------------------------------------------------------------------------
+
+/// A live Binance USDT-M `HistoricalSource`: fetches the missing, closed klines + funding for one
+/// instrument/window against current store coverage, generic over the REST transport so it is offline
+/// testable. `present_bars` / `present_funding` are the open-times the store already covers (supplied by
+/// the QE-464 trigger from a `coverage_bounds` scan).
+#[cfg(feature = "http")]
+pub struct BinanceHistoricalSource<S, Sl = qe_ingest::RealSleeper>
+where
+    S: qe_ingest::RestSource,
+    Sl: qe_ingest::Sleeper,
+{
+    inner: qe_ingest::BinanceHistorical<S, Sl>,
+    request: qe_ingest::WindowRequest,
+    present_bars: std::collections::BTreeSet<i64>,
+    present_funding: std::collections::BTreeSet<i64>,
+}
+
+#[cfg(feature = "http")]
+impl<S, Sl> BinanceHistoricalSource<S, Sl>
+where
+    S: qe_ingest::RestSource,
+    Sl: qe_ingest::Sleeper,
+{
+    /// Wrap a configured [`qe_ingest::BinanceHistorical`] over a window request + the store's current
+    /// coverage (the open-times already present, so covered/gap ranges are handled incrementally).
+    #[must_use]
+    pub fn new(
+        inner: qe_ingest::BinanceHistorical<S, Sl>,
+        request: qe_ingest::WindowRequest,
+        present_bars: std::collections::BTreeSet<i64>,
+        present_funding: std::collections::BTreeSet<i64>,
+    ) -> Self {
+        Self {
+            inner,
+            request,
+            present_bars,
+            present_funding,
+        }
+    }
+}
+
+#[cfg(feature = "http")]
+impl BinanceHistoricalSource<qe_ingest::HttpRestSource, qe_ingest::RealSleeper> {
+    /// A live source against `base` (e.g. [`qe_ingest::DEFAULT_REST_BASE`]) with the default retry policy.
+    #[must_use]
+    pub fn live(
+        base: impl Into<String>,
+        request: qe_ingest::WindowRequest,
+        present_bars: std::collections::BTreeSet<i64>,
+        present_funding: std::collections::BTreeSet<i64>,
+    ) -> Self {
+        let backfiller = qe_ingest::Backfiller::new(
+            qe_ingest::HttpRestSource::new(base),
+            qe_ingest::RetryPolicy::default(),
+        );
+        Self::new(
+            qe_ingest::BinanceHistorical::new(backfiller),
+            request,
+            present_bars,
+            present_funding,
+        )
+    }
+}
+
+#[cfg(feature = "http")]
+impl<S, Sl> HistoricalSource for BinanceHistoricalSource<S, Sl>
+where
+    S: qe_ingest::RestSource,
+    Sl: qe_ingest::Sleeper,
+{
+    fn fetch(&mut self) -> Result<HistoricalWindow, BootstrapError> {
+        let window = self
+            .inner
+            .fetch_window(&self.request, &self.present_bars, &self.present_funding)
+            .map_err(|e| BootstrapError::Decode(e.to_string()))?;
+        // Klines-only calibration slice: premium / open-interest / mark-price stay empty (never faked).
+        debug_assert_eq!(
+            window.calibration_source,
+            qe_ingest::CalibrationSource::Uncalibrated
+        );
+        Ok(HistoricalWindow {
+            base: window.base,
+            bars: window.bars,
+            funding: window.funding,
+            open_interest: Vec::new(),
+            premium: Vec::new(),
+            mark_price: Vec::new(),
+        })
+    }
+}
+
+#[cfg(all(test, feature = "http"))]
+mod http_tests {
+    use super::*;
+    use qe_ingest::{
+        Backfiller, BinanceHistorical, PageRequest, RestEndpoint, RestError, RestSource,
+        RetryPolicy, TimedRow, WindowRequest,
+    };
+    use std::collections::BTreeSet;
+
+    const M5: i64 = 5 * 60_000;
+
+    /// An offline fake USDT-M REST source: serves flat-OHLC kline rows and one funding row, dispatched
+    /// by endpoint. No network — proves the adapter + `run_ingest` end-to-end without live calls.
+    struct FakeRest {
+        klines: Vec<TimedRow>,
+        funding: Vec<TimedRow>,
+    }
+    impl RestSource for FakeRest {
+        fn fetch_page(&self, req: &PageRequest) -> Result<Vec<TimedRow>, RestError> {
+            let rows = match req.endpoint {
+                RestEndpoint::Klines(_) => &self.klines,
+                RestEndpoint::FundingRate => &self.funding,
+                _ => return Ok(Vec::new()),
+            };
+            Ok(rows
+                .iter()
+                .filter(|r| r.open_time_ms >= req.start_ms)
+                .take(req.limit as usize)
+                .cloned()
+                .collect())
+        }
+    }
+
+    #[test]
+    fn binance_source_plugs_into_run_ingest() {
+        // Five 5m klines + one funding settlement, all closed relative to `now`.
+        let klines: Vec<TimedRow> = (0..5)
+            .map(|i| {
+                let t = i * M5;
+                TimedRow {
+                    open_time_ms: t,
+                    raw: format!(
+                        r#"[{t},"100.0","101.0","99.0","100.5","1.0",{},"100.0",3]"#,
+                        t + M5 - 1
+                    ),
+                }
+            })
+            .collect();
+        let funding = vec![TimedRow {
+            open_time_ms: 0,
+            raw: r#"{"symbol":"BTCUSDT","fundingTime":0,"fundingRate":"0.00010000"}"#.to_owned(),
+        }];
+
+        let source = BinanceHistoricalSource::new(
+            BinanceHistorical::new(Backfiller::new(
+                FakeRest { klines, funding },
+                RetryPolicy::default(),
+            )),
+            WindowRequest {
+                symbol: InstrumentId::new("BTCUSDT").unwrap(),
+                resolution: Resolution::M5,
+                from_ms: 0,
+                to_ms: 4 * M5,
+                now_ms: 100 * M5, // everything closed
+                limit: 10,
+            },
+            BTreeSet::new(),
+            BTreeSet::new(),
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let params = IngestParams {
+            store_path: dir.path().join("store"),
+            map_size: 64 * 1024 * 1024,
+            instrument: "BTCUSDT".to_owned(),
+        };
+        let mut src = source;
+        let mut progress = |_p: u8, _s: &str, _m: &str| {};
+        run_ingest(&params, &mut src, &mut progress).unwrap();
+
+        // The decoded bars + funding landed in the store via the real write path.
+        let store = MarketStore::open(&params.store_path, params.map_size).unwrap();
+        let inst = InstrumentId::new("BTCUSDT").unwrap();
+        let (first, last, bars) = store
+            .coverage_bounds(&inst, Resolution::M5)
+            .unwrap()
+            .expect("bars were written");
+        assert_eq!(bars, 5);
+        assert_eq!(first.millis(), 0);
+        assert_eq!(last.millis(), 4 * M5);
+    }
+}
