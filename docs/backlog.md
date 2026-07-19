@@ -354,7 +354,6 @@ _All sixteen delivered — see [`reviewed/`](mds/reviewed/) (qe-434..449)._
 
 | Ticket | Title | Depends on | Status |
 |--------|-------|------------|:------:|
-| [QE-460](./mds/tickets/QE-460.md) | `RunSpec::Flow` composite run-kind: server-owned train→backtest sequencing, deterministic vintage handoff, **collapsed holdout contract** (backtest IS the single recorded consultation), **regime-aware/walk-forward** holdout, **overlap-keyed** consultation counter, **cost-calibration parity** across sub-runs, `PROTOCOL_VERSION` 2→3 (lineage rides QE-467's bump)  *(R2 · run-protocol/server)* | QE-467, QE-452, QE-419, QE-458, QE-117, QE-125 | — |
 | [QE-461](./mds/tickets/QE-461.md) | Flow supervision: dedicated concurrency lane + resume-from-sealed-vintage checkpoint + authorised halt (runs are terminal 4-state today)  *(R2 · backend/orchestration)* | QE-460, QE-407 | — |
 | [QE-462](./mds/tickets/QE-462.md) | SPA single stepped Flow page (configure train+backtest+steer once → run)  *(R2 · frontend)* | QE-460, QE-459 | — |
 | [QE-463](./mds/tickets/QE-463.md) | Real `http` ingest decoder for one exchange (Binance USDT-M): incremental / resumable / idempotent historical download behind the default-off `http` feature  *(R3 · ingest — the long pole)* | QE-253 | — |
