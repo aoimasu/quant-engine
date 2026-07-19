@@ -17,6 +17,8 @@ injectCss('qe-tl-css', CSS);
 export interface TrainingListProps {
   onOpen: (id: string) => void;
   onNew: () => void;
+  /** Open the stepped composite-flow form (QE-462). */
+  onNewFlow: () => void;
   /** Live-poll cadence while any row is queued/running (ms). Overridable for tests. */
   pollMs?: number;
 }
@@ -28,7 +30,7 @@ export interface TrainingListProps {
  * terminal. The window column reads the server's slim `label`; Generation/G1 read the live `train`
  * progress; the heavy `params` are deferred to the monitor.
  */
-export function TrainingList({ onOpen, onNew, pollMs }: TrainingListProps) {
+export function TrainingList({ onOpen, onNew, onNewFlow, pollMs }: TrainingListProps) {
   const { runs: allRuns, error } = useRunListPolling({ type: 'train', pollMs });
   const runs = allRuns?.filter((r) => r.type === 'train') ?? null;
 
@@ -98,9 +100,14 @@ export function TrainingList({ onOpen, onNew, pollMs }: TrainingListProps) {
             verdict.
           </div>
         </div>
-        <Button variant="primary" onClick={onNew} iconLeft={<Icon name="plus" size={15} />}>
-          New training run
-        </Button>
+        <div style={{ display: 'flex', gap: 10 }}>
+          <Button variant="secondary" onClick={onNewFlow} iconLeft={<Icon name="git-branch" size={15} />}>
+            New flow run
+          </Button>
+          <Button variant="primary" onClick={onNew} iconLeft={<Icon name="plus" size={15} />}>
+            New training run
+          </Button>
+        </div>
       </div>
 
       {error && (

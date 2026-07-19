@@ -354,7 +354,6 @@ _All sixteen delivered — see [`reviewed/`](mds/reviewed/) (qe-434..449)._
 
 | Ticket | Title | Depends on | Status |
 |--------|-------|------------|:------:|
-| [QE-462](./mds/tickets/QE-462.md) | SPA single stepped Flow page (configure train+backtest+steer once → run)  *(R2 · frontend)* | QE-460, QE-459 | — |
 | [QE-463](./mds/tickets/QE-463.md) | Real `http` ingest decoder for one exchange (Binance USDT-M): incremental / resumable / idempotent historical download behind the default-off `http` feature  *(R3 · ingest — the long pole)* | QE-253 | — |
 | [QE-464](./mds/tickets/QE-464.md) | `ingest` run-kind + `POST /api/ingest` (instruments / range / fetch-all via the **as-of universe machinery** — survivorship kill) + **real-vs-synthetic-vs-mixed provenance** into store/coverage (key-only) + `VintageContent.lineage` (QE-467) + **liquidity screen** (per-instrument ADV/impact, QE-440/447); no `PROTOCOL_VERSION` bump  *(R3 · server/storage/ingest)* | QE-463, QE-467, QE-257, QE-440 | — |
 | [QE-465](./mds/tickets/QE-465.md) | SPA ingest-trigger screen + **provenance column** in MarketData  *(R3 · frontend)* | QE-464 | — |

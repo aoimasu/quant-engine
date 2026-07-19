@@ -105,6 +105,57 @@ export interface TrainParams {
   profile?: string;
 }
 
+/**
+ * Composite-flow parameters (QE-460) — the `params` object of a `type:"flow"` create-run request. Kept
+ * **hand-in-lockstep** with `crates/run-protocol/src/lib.rs::FlowParams` (the source of truth). A flow
+ * configures a steer-whitelisted train + its frozen OOS holdout **once**; the server sequences
+ * `train`→`backtest` in one supervised run. **`seed` is REQUIRED** (mirrors {@link EvolveParams}); the
+ * window (`start`/`end`/`resolution`) is required too. Only the QE-458 *whitelisted* steer fields appear
+ * here — the blocklisted gate-decision knobs (cost-stress / turnover / capacity / DSR / PBO / IC-FDR /
+ * purge) and the not-yet-supported `evolved_pool`/`evolved_formulas` are deliberately **absent** (the form
+ * has no control that can submit them; the server's `validate_flow` rejects any as a hard `400`). The
+ * backtest window is **not** operator-chosen — it is the server-frozen holdout the train phase carves.
+ */
+export interface FlowParams {
+  /** Master flow seed (**required**) — drives the train search seed + the deterministic backtest. */
+  seed: number;
+  start: string;
+  end: string;
+  resolution: string;
+  generations?: number;
+  population?: number;
+  /** Final bars reserved as the frozen G1 holdout (server floor `≥ 250`). */
+  holdout?: number;
+  /** Embargo bars purged between the train window and the holdout (server floor `≥ 1`). */
+  embargo?: number;
+  /** Indicator subset (QE-458 whitelist) — omitted ⇒ the full catalogue. */
+  indicator_subset?: string[];
+  /** WFO windows (QE-458 whitelist) — server floor `≥ 4`. */
+  windows?: number;
+  /** CV folds (QE-458 whitelist) — server floor `≥ 2`. */
+  folds?: number;
+  config?: string;
+  profile?: string;
+}
+
+/**
+ * The composite-flow supervision record (QE-460) — mirrors `qe_server::runs::model::FlowProgress`. Present
+ * only on `flow` runs (the single flow `meta.json` records its sub-run ids + the frozen holdout it handed
+ * between them). Per-phase progress is derived from which fields are set + the run status.
+ */
+export interface FlowProgress {
+  /** The `train` sub-run id — set once the train phase starts. */
+  train_run?: string;
+  /** The `backtest` sub-run id — set once the holdout backtest phase starts (absent if train failed G1). */
+  backtest_run?: string;
+  /** The sealed vintage id handed from train → backtest (the content-hash handoff; Inspector deep-link). */
+  vintage?: string;
+  /** Inclusive start of the frozen holdout window the backtest consulted. */
+  holdout_start?: string;
+  /** Exclusive end of the frozen holdout window. */
+  holdout_end?: string;
+}
+
 /** Latest MAP-Elites search-generation snapshot (QE-260 `gen` line). */
 export interface GenSnapshot {
   generation: number;
@@ -167,7 +218,7 @@ export interface RunMetaBase {
  * update both together. Narrow on `meta.type` at each consumer instead of casting, so a train run can
  * no longer be statically read as a backtest (and vice-versa).
  */
-export type RunMeta = BacktestRunMeta | TrainRunMeta | EvolveRunMeta;
+export type RunMeta = BacktestRunMeta | TrainRunMeta | EvolveRunMeta | FlowRunMeta;
 
 /** A `type:"backtest"` run — its `params` is a {@link BacktestParams}. */
 export interface BacktestRunMeta extends RunMetaBase {
@@ -187,6 +238,19 @@ export interface TrainRunMeta extends RunMetaBase {
   params: TrainParams;
   /** Rich training progress — present only on `train` runs (QE-261). */
   train?: TrainProgress;
+}
+
+/** A `type:"flow"` run (QE-460) — {@link FlowParams} + the {@link FlowProgress} supervision record. */
+export interface FlowRunMeta extends RunMetaBase {
+  type: 'flow';
+  params: FlowParams;
+  /** Composite-flow supervision record — present only on `flow` runs (QE-460). */
+  flow?: FlowProgress;
+}
+
+/** Type-predicate narrowing a {@link RunMeta} to the `flow` variant (for `.filter(isFlowRun)`). */
+export function isFlowRun(run: RunMeta): run is FlowRunMeta {
+  return run.type === 'flow';
 }
 
 /** Type-predicate narrowing a {@link RunMeta} to the `train` variant (for `.filter(isTrainRun)`). */
@@ -553,6 +617,16 @@ export function createRun(params: BacktestParams): Promise<string> {
 /** Create + spawn a training run (QE-261). Resolves to the new run id; throws {@link ApiError} on 400. */
 export function createTrainRun(params: TrainParams): Promise<string> {
   return postRun('train', params);
+}
+
+/**
+ * Create + spawn a composite `flow` run (QE-460) — one supervised `train`→`backtest` over a
+ * server-frozen holdout. Resolves to the new run id; throws {@link ApiError} on a `400` (a missing
+ * `seed`/window, or a request that names a blocklisted gate-decision knob). Client-side
+ * {@link FlowParams} construction sends only the QE-458 whitelisted steer fields.
+ */
+export function createFlowRun(params: FlowParams): Promise<string> {
+  return postRun('flow', params);
 }
 
 /**

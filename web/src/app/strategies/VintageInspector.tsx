@@ -7,6 +7,7 @@ import {
   type ChromosomeComposition,
   type DataProvenance,
   type IndicatorRef,
+  type RegimeShare,
   type SealEvidence,
   type VintageDetail,
 } from '../../api/runs';
@@ -161,6 +162,48 @@ function GateEvidence({ e, consultations }: { e: SealEvidence; consultations: nu
   );
 }
 
+/**
+ * The standing **"backtest-holdout only — not paper-confirmed"** label (QE-457). Extracted so the composite
+ * flow result ({@link import('../training/FlowMonitor').FlowMonitor}) surfaces the identical verdict framing:
+ * a flow / vintage verdict is a backtest-holdout evaluation still owing the G2 (shadow/paper) and G3 (live)
+ * gates — never read as paper- or live-confirmed.
+ */
+export function NotPaperConfirmedCallout() {
+  return (
+    <Callout variant="warn" title="Backtest-holdout only — not paper-confirmed">
+      This verdict is a backtest-holdout evaluation. It still owes the G2 (shadow/paper) and G3 (live) gates
+      before any promotion — it is not paper-confirmed and not live-confirmed.
+    </Callout>
+  );
+}
+
+/**
+ * The frozen-holdout **regime composition** chips (QE-125/QE-460) — which regimes the frozen holdout spans
+ * (rode diverse regimes, not one trailing block). Extracted so the composite flow result mirrors the
+ * Inspector's regime rendering verbatim from the same persisted `regime_composition`.
+ */
+export function RegimeComposition({ regimes }: { regimes: RegimeShare[] }) {
+  const totalRegimeBars = regimes.reduce((a, r) => a + r.bars, 0);
+  return (
+    <>
+      <p className="qe-vi__lead">Holdout regime composition (rode diverse regimes, not one trailing block)</p>
+      {regimes.length === 0 ? (
+        <div className="qe-vi__empty">Regime composition not yet recorded for this vintage (QE-460).</div>
+      ) : (
+        <div className="qe-vi__regimes">
+          {regimes.map((r) => (
+            <div className="r" key={r.regime}>
+              <span className="lbl">{r.regime}</span>
+              <span className="bars">{r.bars} bars</span>
+              <span>{totalRegimeBars > 0 ? `${((r.bars / totalRegimeBars) * 100).toFixed(1)}%` : '—'}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </>
+  );
+}
+
 export interface VintageInspectorProps {
   vintageId: string;
   onBack: () => void;
@@ -234,7 +277,6 @@ export function VintageInspector({ vintageId, onBack }: VintageInspectorProps) {
     }
   }
   const split = detail.holdout_split;
-  const totalRegimeBars = detail.regime_composition.reduce((a, r) => a + r.bars, 0);
 
   return (
     <div className="qe-vi">
@@ -250,10 +292,7 @@ export function VintageInspector({ vintageId, onBack }: VintageInspectorProps) {
 
       <ProvenanceBanner provenance={detail.data_provenance} />
 
-      <Callout variant="warn" title="Backtest-holdout only — not paper-confirmed">
-        This verdict is a backtest-holdout evaluation. It still owes the G2 (shadow/paper) and G3 (live) gates
-        before any promotion — it is not paper-confirmed and not live-confirmed.
-      </Callout>
+      <NotPaperConfirmedCallout />
 
       <Card title="Gate evidence (net-of-cost / tradability led)">
         <GateEvidence e={detail.seal_evidence} consultations={detail.consultation_count} />
@@ -300,20 +339,7 @@ export function VintageInspector({ vintageId, onBack }: VintageInspectorProps) {
             </div>
           ))}
         </div>
-        <p className="qe-vi__lead">Holdout regime composition (rode diverse regimes, not one trailing block)</p>
-        {detail.regime_composition.length === 0 ? (
-          <div className="qe-vi__empty">Regime composition not yet recorded for this vintage (QE-460).</div>
-        ) : (
-          <div className="qe-vi__regimes">
-            {detail.regime_composition.map((r) => (
-              <div className="r" key={r.regime}>
-                <span className="lbl">{r.regime}</span>
-                <span className="bars">{r.bars} bars</span>
-                <span>{totalRegimeBars > 0 ? `${((r.bars / totalRegimeBars) * 100).toFixed(1)}%` : '—'}</span>
-              </div>
-            ))}
-          </div>
-        )}
+        <RegimeComposition regimes={detail.regime_composition} />
       </Card>
 
       <Card title="Lineage">
