@@ -736,7 +736,9 @@ mod tests {
         assert_eq!(segs[0].3, Calibration::Uncalibrated);
         // A synthetic store summarises Synthetic — never silently Real.
         assert_eq!(
-            store.store_provenance_summary(std::slice::from_ref(&id), res).unwrap(),
+            store
+                .store_provenance_summary(std::slice::from_ref(&id), res)
+                .unwrap(),
             ProvenanceSummary::Synthetic
         );
         // Coverage exposes the tag; the bars scan is still key-only.

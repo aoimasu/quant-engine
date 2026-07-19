@@ -1054,8 +1054,15 @@ fn progress(emit: &mut dyn FnMut(ProgressLine), pct: u8, stage: &str, msg: &str)
 
 /// QE-464: derive the vintage's `data_provenance` from the STORE's actual per-bar provenance for the
 /// scanned `(instrument, resolution)`, rather than assuming `Real`. A synthetic or mixed store yields a
-/// vintage marked synthetic-/mixed-derived (never silently real); a fully-real or legacy/untagged store
-/// maps to `Real` (the documented default — pre-tagging bars read `unknown`).
+/// vintage marked synthetic-/mixed-derived (never silently real).
+///
+/// **Fail-safe on legacy/untagged data.** Only a store verified **pure-real** maps to `Real`. An
+/// `Unknown` (legacy/untagged) or `Empty` store maps to `Mixed` ("not verified pure-real"), NEVER `Real`
+/// — in this deployment every pre-QE-464 bar came from `--synthetic` (the only path that existed), so
+/// those `unknown` bars are actually synthetic; stamping them a confident `real` vintage is the exact
+/// "nobody trains on synthetic bars believing they're real" hazard QE-464 exists to kill. `DataProvenance`
+/// (QE-467 schema) has no `Unknown` variant and we cannot bump the schema here, so `Mixed` is the
+/// conservative fail-safe; a dedicated `DataProvenance::Unknown` variant is a QE-467 follow-up.
 fn store_data_provenance(
     store: &qe_storage::MarketStore,
     instrument: &InstrumentId,
@@ -1064,9 +1071,10 @@ fn store_data_provenance(
     use qe_storage::ProvenanceSummary as S;
     Ok(
         match store.store_provenance_summary(std::slice::from_ref(instrument), resolution)? {
+            S::Real => qe_vintage::DataProvenance::Real,
             S::Synthetic => qe_vintage::DataProvenance::Synthetic,
-            S::Mixed => qe_vintage::DataProvenance::Mixed,
-            S::Real | S::Unknown | S::Empty => qe_vintage::DataProvenance::Real,
+            // Mixed, and the fail-safe collapse of Unknown/Empty (not verified pure-real).
+            S::Mixed | S::Unknown | S::Empty => qe_vintage::DataProvenance::Mixed,
         },
     )
 }
@@ -1456,6 +1464,33 @@ mod tests {
         assert_eq!(
             store_data_provenance(&store, &synth, Resolution::H1).unwrap(),
             qe_vintage::DataProvenance::Mixed
+        );
+
+        // Fail-safe (coordinator review): a LEGACY / untagged store (bars written without a provenance
+        // segment ⇒ `unknown`) maps to `Mixed`, NEVER silently `Real` — those pre-QE-464 bars actually
+        // came from `--synthetic`, so a confident `real` vintage would be the hazard QE-464 kills.
+        let legacy = InstrumentId::new("ETHUSDT").unwrap();
+        store.put_bars(&legacy, &[bar(3600), bar(7200)]).unwrap();
+        assert_eq!(
+            store_data_provenance(&store, &legacy, Resolution::H1).unwrap(),
+            qe_vintage::DataProvenance::Mixed,
+            "legacy/unknown store must fail safe to Mixed, never silently Real"
+        );
+
+        // A store verified PURE-REAL still maps to `Real` (the fail-safe must not over-rotate).
+        let real = InstrumentId::new("SOLUSDT").unwrap();
+        store
+            .put_bars_with_provenance(
+                &real,
+                &[bar(3600), bar(7200)],
+                Provenance::Real,
+                Calibration::Uncalibrated,
+            )
+            .unwrap();
+        assert_eq!(
+            store_data_provenance(&store, &real, Resolution::H1).unwrap(),
+            qe_vintage::DataProvenance::Real,
+            "a pure-real store must still map to Real"
         );
     }
 
