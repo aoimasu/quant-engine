@@ -386,6 +386,55 @@ pub struct TrainParams {
     /// Optional operating profile override (`--profile`); omitted ⇒ the CLI default (`train`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
+
+    // ---- QE-458 whitelisted, gate-monotone steer knobs (design §6.1) ------------------------------
+    /// **Indicator subset** — which catalogue-indicator ids are in play (`None` ⇒ the full catalogue).
+    /// Restricting the subset is a *smaller* hypothesis space (strictly safer); the count feeds the
+    /// distinct-trial basis `N` (QE-439, design §6.1a) so a larger subset only *raises* the deflation bar.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub indicator_subset: Option<Vec<String>>,
+    /// **Evolved-pool source** — the id of an *already-sealed* evolved formula pool (QE-451) whose formulas
+    /// may be referenced as indicators. Consuming it cannot un-seal or re-deflate it (read-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evolved_pool: Option<String>,
+    /// **Evolved-formula subset** — which `formula_hash`es of `evolved_pool` are in play (`None` ⇒ all sealed
+    /// formulas). Their count adds to the available-feature-space size fed to `N` (design §6.1a).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evolved_formulas: Option<Vec<String>>,
+    /// **WFO windows** — number of walk-forward windows the steered run scores over. More/longer windows
+    /// raise `T_eff` and make CV *harder* to pass; a count below the regime-coverage floor is a `400`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub windows: Option<usize>,
+    /// **CV folds** — number of cross-validation folds. A count below the regime-coverage floor is a `400`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folds: Option<usize>,
+
+    // ---- QE-458 blocklist probes (design §6.2) — NOT steerable ------------------------------------
+    // Everything the G1 gate's own decision rides on is off the whitelist and carries a compiled floor.
+    // These fields exist ONLY so `validate_train` can reject (`400`) a client that tries to set one BELOW
+    // its floor; setting one is never how a gate threshold changes (`G1Criteria`/`DEFLATION_BASIS_VERSION`
+    // stay server-side, non-editable). All optional/lenient — an omitted probe is the normal case.
+    /// Cost-stress friction multiplier (blocklist; floor `1×`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_stress_multiplier: Option<f64>,
+    /// Max-turnover cap fraction (blocklist; floor `0.25`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_turnover_frac: Option<f64>,
+    /// Capacity floor, USD (blocklist; floor `250_000`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacity_floor_usd: Option<i64>,
+    /// DSR cutoff (blocklist; floor `0.95`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dsr_cutoff: Option<f64>,
+    /// Uncensored-PBO cutoff (blocklist; floor `0.5`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pbo_cutoff: Option<f64>,
+    /// IC / FDR discovery threshold (blocklist; floor `0.10`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ic_fdr_threshold: Option<f64>,
+    /// Purge bars between train and holdout (blocklist; floored).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purge: Option<usize>,
 }
 
 // ---- QE-452 evolve run-spec (the GP indicator-evolution campaign) --------------------------------

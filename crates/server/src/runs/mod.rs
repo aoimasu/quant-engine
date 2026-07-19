@@ -11,6 +11,7 @@ pub mod api;
 pub mod manager;
 pub mod model;
 pub mod spawn;
+pub mod steer;
 pub mod store;
 
 pub use manager::{CreateError, HaltOutcome, RunManager};

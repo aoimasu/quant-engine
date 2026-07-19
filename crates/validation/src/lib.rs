@@ -44,6 +44,7 @@ pub mod nulls;
 pub mod pbo;
 pub mod spa;
 pub mod stats;
+pub mod steer;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -69,6 +70,12 @@ pub use spa::{reality_check_pvalue, SpaConfig};
 pub use stats::{
     kurtosis, mean, normal_cdf, normal_ppf, sharpe_ratio, skewness, std_dev, variance,
     EULER_MASCHERONI,
+};
+pub use steer::{
+    archive_coverage, available_feature_space, coverage_floor_ok, effective_trials_with_features,
+    CAPACITY_FLOOR_USD, COST_STRESS_MULTIPLIER_FLOOR, DESCRIPTOR_SPACE_CELLS, DSR_CUTOFF_FLOOR,
+    EMBARGO_FLOOR, HOLDOUT_FLOOR, IC_FDR_THRESHOLD_FLOOR, MAX_TURNOVER_CAP_FLOOR,
+    MIN_OCCUPIED_NICHES, MIN_WFO_FOLDS, MIN_WFO_WINDOWS, PBO_CUTOFF_FLOOR, PURGE_FLOOR,
 };
 
 /// Errors from the robustness suite.
