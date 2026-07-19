@@ -354,7 +354,6 @@ _All sixteen delivered — see [`reviewed/`](mds/reviewed/) (qe-434..449)._
 
 | Ticket | Title | Depends on | Status |
 |--------|-------|------------|:------:|
-| [QE-465](./mds/tickets/QE-465.md) | SPA ingest-trigger screen + **provenance column** in MarketData  *(R3 · frontend)* | QE-464 | — |
 | [QE-466](./mds/tickets/QE-466.md) | Vintage **leaderboard/comparison**: rank sealed vintages on the **persisted** net-of-cost holdout series (deployed capacity-capped weights) / capacity-at-size / turnover / cross-vintage correlation (**QE-430 R(N)/Fisher-z**, effective N) + steer diffs; **ENFORCES the holdout-consultation budget** (grey-out/escalate over-consulted; no fresh cross-vintage selection statistic); "not paper-confirmed" — **INFORMATIONAL, no best-of-N selection**; promotion stays via the gate/seal (owes G2/G3)  *(R1 · backend/frontend)* | QE-467, QE-460, QE-456, QE-457, QE-430 | — |
 
 ---
