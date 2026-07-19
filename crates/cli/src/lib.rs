@@ -74,6 +74,12 @@ pub struct TrainOptions {
     pub holdout: usize,
     /// Embargo bars purged between the train window and the holdout.
     pub embargo: usize,
+    /// QE-458 steer — indicator subset (`--indicator`, repeated); `None` ⇒ full catalogue.
+    pub indicator_subset: Option<Vec<String>>,
+    /// QE-458 steer — WFO windows override (`--windows`); `None` ⇒ default.
+    pub windows: Option<usize>,
+    /// QE-458 steer — CV folds override (`--folds`); `None` ⇒ `config.selection.cv_folds`.
+    pub folds: Option<usize>,
 }
 
 /// Run the training-search pipeline for `cfg`, sealing a vintage under the configured artefacts
@@ -144,6 +150,10 @@ pub fn run_train(
         },
         lineage,
         profile: cfg.profile.as_str().to_owned(),
+        // QE-458 steer knobs (all `None` ⇒ un-steered, byte-identical seal).
+        indicator_subset: opts.indicator_subset.clone(),
+        windows: opts.windows,
+        folds: opts.folds,
     };
 
     Ok(run_train_job(&params, emit)?)
@@ -281,6 +291,12 @@ pub enum Command {
         holdout: usize,
         /// Embargo bars purged between the train window and the holdout.
         embargo: usize,
+        /// QE-458 steer — indicator subset (`--indicator`, repeated); `None` ⇒ full catalogue.
+        indicator_subset: Option<Vec<String>>,
+        /// QE-458 steer — WFO windows override (`--windows`).
+        windows: Option<usize>,
+        /// QE-458 steer — CV folds override (`--folds`).
+        folds: Option<usize>,
     },
     /// Run the offline GP evolve pipeline (QE-452): illuminate → deflation → freeze → **seal a formula
     /// pool** (never a vintage).
@@ -390,6 +406,10 @@ where
             let mut population = DEFAULT_TRAIN_POPULATION;
             let mut holdout = DEFAULT_TRAIN_HOLDOUT;
             let mut embargo = DEFAULT_TRAIN_EMBARGO;
+            // QE-458 steer knobs (absent ⇒ un-steered).
+            let mut indicators: Vec<String> = Vec::new();
+            let mut windows: Option<usize> = None;
+            let mut folds: Option<usize> = None;
             while let Some(flag) = it.next() {
                 match flag.as_str() {
                     "--config" => config = PathBuf::from(value(&mut it, "--config")?),
@@ -404,6 +424,11 @@ where
                     "--population" => population = parse_usize_flag(&mut it, "--population")?,
                     "--holdout" => holdout = parse_usize_flag(&mut it, "--holdout")?,
                     "--embargo" => embargo = parse_usize_flag(&mut it, "--embargo")?,
+                    // QE-458: `--indicator <id>` (repeatable) restricts the steered feature space;
+                    // `--windows`/`--folds` steer the WFO window / CV fold config.
+                    "--indicator" => indicators.push(value(&mut it, "--indicator")?),
+                    "--windows" => windows = Some(parse_usize_flag(&mut it, "--windows")?),
+                    "--folds" => folds = Some(parse_usize_flag(&mut it, "--folds")?),
                     other => {
                         return Err(CliError::Usage(format!("unknown flag `{other}`")));
                     }
@@ -422,6 +447,9 @@ where
                 population,
                 holdout,
                 embargo,
+                indicator_subset: (!indicators.is_empty()).then_some(indicators),
+                windows,
+                folds,
             })
         }
         "evolve" => {
@@ -662,6 +690,9 @@ mod tests {
                 population: DEFAULT_TRAIN_POPULATION,
                 holdout: DEFAULT_TRAIN_HOLDOUT,
                 embargo: DEFAULT_TRAIN_EMBARGO,
+                indicator_subset: None,
+                windows: None,
+                folds: None,
             }
         );
         // Every flag overridden.
@@ -690,6 +721,15 @@ mod tests {
             "12",
             "--embargo",
             "1",
+            // QE-458 steer flags: repeated `--indicator`, `--windows`, `--folds`.
+            "--indicator",
+            "rsi_14",
+            "--indicator",
+            "atr_pct",
+            "--windows",
+            "6",
+            "--folds",
+            "4",
         ])
         .unwrap();
         assert_eq!(
@@ -707,6 +747,9 @@ mod tests {
                 population: 10,
                 holdout: 12,
                 embargo: 1,
+                indicator_subset: Some(vec!["rsi_14".to_owned(), "atr_pct".to_owned()]),
+                windows: Some(6),
+                folds: Some(4),
             }
         );
     }

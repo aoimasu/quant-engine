@@ -96,6 +96,9 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             population,
             holdout,
             embargo,
+            indicator_subset,
+            windows,
+            folds,
         } => run_train_command(TrainCli {
             config,
             profile,
@@ -110,6 +113,9 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 population,
                 holdout,
                 embargo,
+                indicator_subset,
+                windows,
+                folds,
             },
         }),
         Command::Evolve {

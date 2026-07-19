@@ -13,7 +13,6 @@
 use qe_formula_pool::PoolFormula;
 use qe_run_protocol::TrainParams;
 use qe_vintage::SteerDelta;
-use sha2::{Digest, Sha256};
 
 /// Whether any whitelisted steer knob is set — an un-steered request records **no** steer delta
 /// (`steer_delta: None`), so the default seal path keeps its golden vintage hash (design §6-e).
@@ -29,27 +28,14 @@ pub fn is_steered(p: &TrainParams) -> bool {
         || p.population.is_some()
 }
 
-/// SHA-256 (64 lowercase hex) over the **order-independent** steered indicator subset — catalogue ids and
-/// included evolved-formula hashes, sorted+deduped so the hash is a stable set identity regardless of the
-/// order the client listed them. An empty subset (full catalogue, no evolved formulas) hashes the empty set.
+/// The order-independent steered-subset hash — delegates to [`SteerDelta::subset_hash`] (the single
+/// hashing source in `qe-vintage`) so the server's recorded hash and the CLI seal path's hash agree.
 #[must_use]
 pub fn indicator_subset_hash(
     catalogue_ids: &[String],
     evolved_formula_hashes: &[String],
 ) -> String {
-    let mut items: Vec<String> = catalogue_ids
-        .iter()
-        .map(|s| format!("cat:{s}"))
-        .chain(evolved_formula_hashes.iter().map(|s| format!("evo:{s}")))
-        .collect();
-    items.sort();
-    items.dedup();
-    let mut hasher = Sha256::new();
-    for item in items {
-        hasher.update(item.as_bytes());
-        hasher.update([0u8]); // length-safe separator
-    }
-    format!("{:x}", hasher.finalize())
+    SteerDelta::subset_hash(catalogue_ids, evolved_formula_hashes)
 }
 
 /// The count of included, already-sealed evolved-pool formulas (design §6.1a): the subset the client named

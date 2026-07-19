@@ -30,10 +30,11 @@ use qe_risk::{
     CalibrationProfile, PortfolioSizer, DEFAULT_FAST_QUANTILE, DEFAULT_FAST_WINDOW,
 };
 use qe_validation::{
-    assess, buy_and_hold_returns, effective_trials, sharpe_ratio, RobustnessReport, SpaConfig,
-    VintageStats,
+    assess, available_feature_space, buy_and_hold_returns, coverage_floor_ok, effective_trials,
+    effective_trials_with_features, sharpe_ratio, RobustnessReport, SpaConfig, VintageStats,
+    MIN_OCCUPIED_NICHES,
 };
-use qe_vintage::{Vintage, VintageContent, VintageRepository, VINTAGE_FORMAT_VERSION};
+use qe_vintage::{SteerDelta, Vintage, VintageContent, VintageRepository, VINTAGE_FORMAT_VERSION};
 use qe_wfo::backtest::{backtest, BacktestConfig, Bar as DecisionBar};
 use qe_wfo::cv_fitness::{
     fold_isolation_fitness, fold_test_ranges, selection_kfold, DEFAULT_LABEL_HORIZON,
@@ -97,6 +98,19 @@ fn hash_stable(value: f64) -> f64 {
     } else {
         value
     }
+}
+
+/// QE-458 (c): enforce the archive-coverage floor on a STEERED run — a steer that flattens the MAP-Elites
+/// quality-diversity archive below [`MIN_OCCUPIED_NICHES`] is a hard error (surfaced, never silently
+/// sealed). Un-steered runs are never gated here, so no pre-QE-458 golden run can start failing.
+fn enforce_coverage_floor(is_steered: bool, occupied_niches: usize) -> Result<(), RunError> {
+    if is_steered && !coverage_floor_ok(occupied_niches) {
+        return Err(RunError::ArchiveCoverageCollapsed {
+            occupied: occupied_niches,
+            floor: MIN_OCCUPIED_NICHES,
+        });
+    }
+    Ok(())
 }
 
 /// Funding coverage over a decision-bar series: `(present, expected)` where `present` counts bars carrying
@@ -165,6 +179,19 @@ pub struct TrainParams {
     pub lineage: Lineage,
     /// The operating profile label (recorded in the result sidecar).
     pub profile: String,
+
+    // ---- QE-458 steered-search knobs (design §6.1). All `None` ⇒ an UN-STEERED run, byte-identical to
+    // the pre-QE-458 seal path (no golden move). A run is "steered" iff any of these is `Some`.
+    /// **Indicator subset** — the catalogue-indicator ids the steered search may reference. `None` ⇒ the
+    /// full catalogue. Applied as a leak-free feature allowlist on the MAP-Elites variation
+    /// (`VariationDriver::with_allowed_features`); an id not in the catalogue is rejected.
+    pub indicator_subset: Option<Vec<String>>,
+    /// **WFO windows** override for the steered search (`None` ⇒ the default backtest windows). More
+    /// windows raise `T_eff` and the recorded trial basis `N`.
+    pub windows: Option<usize>,
+    /// **CV folds** override for the steered selection fitness (`None` ⇒ `cv_folds`). More folds make the
+    /// in-window CV harder to pass.
+    pub folds: Option<usize>,
 }
 
 /// The training window recorded in the result sidecar.
@@ -287,6 +314,36 @@ pub fn run_train_job(
         "assembling decision bars and splitting train/holdout",
     );
     let schema = catalogue_schema();
+
+    // ---- QE-458 steer setup (steered-runs-only; un-steered ⇒ byte-identical seal) -----------------
+    // A run is STEERED iff any steer knob is set. Un-steered runs take every default below and produce a
+    // byte-identical vintage to the pre-QE-458 path (no golden move, no basis/version bump).
+    let is_steered =
+        params.indicator_subset.is_some() || params.windows.is_some() || params.folds.is_some();
+    // Map the requested indicator-subset ids → feature indices (a leak-free allowlist on the search). An
+    // id not in the catalogue is a hard error (never a silent full-catalogue fallback). `catalogue_ids_in_play`
+    // is what the steer delta hashes + the cardinality that feeds `N` (design §6.1a): the subset, or the
+    // full catalogue when only budget/window/fold knobs are steered.
+    let (allowed_features, catalogue_ids_in_play): (Vec<u16>, Vec<String>) =
+        match &params.indicator_subset {
+            Some(ids) => {
+                let mut allowed = Vec::with_capacity(ids.len());
+                for id in ids {
+                    let idx = schema
+                        .ids()
+                        .iter()
+                        .position(|s| s == id)
+                        .ok_or_else(|| RunError::UnknownIndicator { id: id.clone() })?;
+                    allowed.push(idx as u16);
+                }
+                (allowed, ids.clone())
+            }
+            None => (Vec::new(), schema.ids().to_vec()),
+        };
+    // Window/fold overrides (steered runs only; `None` ⇒ the pre-QE-458 defaults).
+    let steer_windows = params.windows.unwrap_or(2);
+    let steer_folds = params.folds.unwrap_or(params.cv_folds);
+
     let decision_bars = to_decision_bars(&bars, &funding, &premium);
 
     // ---- funding-coverage gate (QE-403) ----------------------------------------------------------
@@ -319,7 +376,8 @@ pub fn run_train_job(
     // The *sealed* genomes are still evolved fully net-of-cost (QE-109 friction is unchanged).
     let train_cfg = BacktestConfig {
         min_trades: 1,
-        windows: 2,
+        // QE-458: steered `--windows` overrides the default (2); un-steered ⇒ 2 (byte-identical).
+        windows: steer_windows,
         // QE-442: grade entry size by the firing bank's ordinal conviction across the whole training
         // pipeline (selection CV, elite pool, ensemble, DSR, G1 holdout, Kelly sizer), so a genome is
         // selected and sealed on graded-conviction sizing — deep-in-band entries size full, band-edge
@@ -346,8 +404,12 @@ pub fn run_train_job(
     let generations = params.generations.max(1);
     let population = params.population.max(1);
     let mut archive = MapElitesArchive::new(schema.clone());
-    let mut long = VariationDriver::new(OperatorSelector::with_defaults(), Direction::Long);
-    let mut short = VariationDriver::new(OperatorSelector::with_defaults(), Direction::Short);
+    // QE-458: the steered feature allowlist confines the search to the requested catalogue subset. An
+    // empty allowlist (un-steered) reproduces the pre-QE-458 draw sequence byte-for-byte.
+    let mut long = VariationDriver::new(OperatorSelector::with_defaults(), Direction::Long)
+        .with_allowed_features(allowed_features.clone());
+    let mut short = VariationDriver::new(OperatorSelector::with_defaults(), Direction::Short)
+        .with_allowed_features(allowed_features.clone());
     let mut rng = seed_rng(params.seed);
 
     // QE-415: selection fitness = cross-validated fold-isolation robustness, not whole-window in-sample
@@ -362,11 +424,8 @@ pub fn run_train_job(
     // robustness signal, not a true OOS gate; the purge/embargo shapes each fold's (unused) train partition
     // and the disjointness invariant, not the scored test blocks. The G1 terminal holdout stays the only true
     // OOS boundary (see `qe_wfo::cv_fitness` module docs).
-    let cv = selection_kfold(
-        params.cv_folds,
-        schema.max_lookback(),
-        DEFAULT_LABEL_HORIZON,
-    );
+    // QE-458: steered `--folds` overrides `cv_folds`; un-steered ⇒ `cv_folds` (byte-identical).
+    let cv = selection_kfold(steer_folds, schema.max_lookback(), DEFAULT_LABEL_HORIZON);
     let cv_ranges = fold_test_ranges(&cv, train_bars.len());
     let eval = |g: &Genome| fold_isolation_fitness(g, train_bars, &cv_ranges, &search_cfg).mean;
     let mut best_fitness = f64::NEG_INFINITY;
@@ -488,7 +547,31 @@ pub fn run_train_job(
     } else {
         0.0
     };
-    let n_trials = effective_trials(archive.occupied_cells(), generations, train_cfg.windows);
+    // ---- QE-458 (c) archive-coverage floor (steered runs only; preserves the QD mandate) ----------
+    // Record the post-steer occupied-niche count and enforce the minimum-occupied-niches floor so a steer
+    // that flattens the MAP-Elites archive is SURFACED (a hard error), never silently sealed. Un-steered
+    // runs are not newly gated (byte-identical), so no existing golden run can start failing here.
+    let occupied_niches = archive.occupied_cells();
+    enforce_coverage_floor(is_steered, occupied_niches)?;
+
+    // ---- QE-458 (a) cardinality → the live trial basis N (steered runs only) ----------------------
+    // For a STEERED run the available-feature-space size (catalogue-subset count + included evolved-pool
+    // formulas — evolved-pool-as-indicator is not yet applied on the live train search, so 0 here) feeds
+    // the QE-439 basis: a search allowed to reference more indicators explored a larger hypothesis space
+    // and is deflated against it. Un-steered runs keep the plain `effective_trials` basis unchanged (this
+    // is what keeps the un-steered deflation bar / golden vintage byte-identical — no DEFLATION_BASIS_VERSION
+    // move). Monotone: `effective_trials_with_features(..) >= effective_trials(..)` (feature_space >= 1).
+    let n_trials = if is_steered {
+        let feature_space = available_feature_space(catalogue_ids_in_play.len(), 0);
+        effective_trials_with_features(
+            occupied_niches,
+            generations,
+            train_cfg.windows,
+            feature_space,
+        )
+    } else {
+        effective_trials(occupied_niches, generations, train_cfg.windows)
+    };
 
     // QE-414: the DSR deflation bar's cross-trial Sharpe *dispersion* is estimated from the FULL cell
     // population — the best elite of every occupied cell, one representative Sharpe per behavioural niche
@@ -607,8 +690,25 @@ pub fn run_train_job(
     // over the loaded store, so the data provenance is `Real`; the holdout split / regime composition /
     // consultation count / steer delta are the research flow's fields, populated downstream (QE-458/QE-460)
     // under this same bump.
+    // QE-458 (e): record the applied steer delta into the content-addressed lineage (QE-467's schema).
+    // `None` for an un-steered run ⇒ the provenance block is byte-identical to the pre-QE-458 seal, so the
+    // un-steered vintage id/content hash is unchanged. A steered run pins the subset hash + the budget /
+    // window / fold counts the search actually ran, so the leaderboard can diff the frontier.
+    let steer_delta = if is_steered {
+        Some(SteerDelta::from_parts(
+            &catalogue_ids_in_play,
+            &[],
+            generations as u64,
+            population as u64,
+            train_cfg.windows as u64,
+            steer_folds as u64,
+        ))
+    } else {
+        None
+    };
     let provenance = qe_vintage::ResearchProvenance {
         data_provenance: qe_vintage::DataProvenance::Real,
+        steer_delta,
         ..qe_vintage::ResearchProvenance::default()
     };
 
@@ -1021,6 +1121,23 @@ mod tests {
         assert_eq!(search_pct(0, 8), 20);
         assert_eq!(search_pct(8, 8), 70);
         assert!((20..=70).contains(&search_pct(4, 8)));
+    }
+
+    #[test]
+    fn coverage_floor_is_enforced_only_on_steered_runs() {
+        // QE-458 (c): a steered run that collapses the archive below the floor is a hard error …
+        let err = enforce_coverage_floor(true, MIN_OCCUPIED_NICHES - 1).unwrap_err();
+        assert!(matches!(
+            err,
+            RunError::ArchiveCoverageCollapsed { occupied, floor }
+                if occupied == MIN_OCCUPIED_NICHES - 1 && floor == MIN_OCCUPIED_NICHES
+        ));
+        // … a steered run at/above the floor is fine …
+        enforce_coverage_floor(true, MIN_OCCUPIED_NICHES).unwrap();
+        enforce_coverage_floor(true, 20).unwrap();
+        // … and an UN-STEERED run is NEVER gated (even a 1-niche archive), preserving every golden run.
+        enforce_coverage_floor(false, 1).unwrap();
+        enforce_coverage_floor(false, 0).unwrap();
     }
 
     /// QE-416 AC (a): the sealed weights differ from equal-weight when capacity binds, stay equal when it

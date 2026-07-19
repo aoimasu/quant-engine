@@ -98,9 +98,43 @@ Placement respects the firewall (search ⟂ portfolio ⟂ live) and adds **no ne
   fail-safe, matching design §6.2 ("These are **not** steerable"). Only `holdout`/`embargo`/`purge` — which
   PRE-EXIST as legitimate QE-261 knobs and are *floored, not tuned* — keep floor semantics (may be raised, never
   dropped below floor). The compiled `*_FLOOR` consts name the pinned server-side values.
-- **End-to-end search wiring** — consistent with how QE-439/QE-451 landed ("default-off machinery exercised by
-  tests; nothing wired into the default pipeline"), the steer knobs are **validated and recorded** (the
-  security-relevant server surface) and the guardrail math is proven by merge-gate tests. Threading a chosen
-  indicator subset / evolved pool into the live GP search loop and populating `steer_delta` from a real steered
-  run is a follow-up (would touch the qe-wfo engine + qe-cli train job beyond this scoped guardrail). The seal
-  path stays `steer_delta:None` for the un-steered default → **no golden move**.
+## 5. Live seal-path wiring (post-review, PR #171 blocking items 1–4)
+
+The reviewer ruled that AC (a)/(c)/(e) are behavioural and NOT met by "extension built but not called". The
+live train job (`crates/cli/src/jobs/train.rs` `run_train_job`) now applies the steer knobs — **steered runs
+only**, so un-steered runs stay byte-identical (no golden / `DEFLATION_BASIS_VERSION` / `VINTAGE_FORMAT_VERSION`
+move):
+
+- **Item 4 (apply the subset — the honesty prerequisite).** A leak-free **feature allowlist** on the MAP-Elites
+  variation (`qe_wfo::variation`: `pick_feature` / `fresh_random_masked` / `explore_masked` /
+  `VariationDriver::with_allowed_features`) confines a steered search to the requested `indicator_subset`.
+  Golden-safe because it is **RNG-draw-neutral** (an empty allowlist draws exactly `below(rng,len)` as before,
+  proven by `empty_allowlist_is_byte_identical_to_the_unmasked_search`) and **leak-free** because `Genome::repair`
+  only clamps out-of-range features and never re-points an in-range one (proven by
+  `allowlist_confines_every_referenced_feature_to_the_subset` and `driver_with_allowed_features_restricts_the_run`).
+  Keeping the full-width schema means the sealed steered vintage's `CatalogueIdentity` is unchanged, so it stays
+  backtestable through the QE-402 load boundary. `windows`/`folds` override the WFO window / CV-fold config live.
+  A misnamed indicator is a hard `RunError::UnknownIndicator` (never a silent full-catalogue fallback).
+- **Item 2 / AC (a) — cardinality feeds the LIVE `N`.** For a steered run, `n_trials =
+  effective_trials_with_features(occupied, generations, windows, available_feature_space(catalogue_count_in_play, 0))`;
+  un-steered keeps plain `effective_trials`. Monotone (`feature_space ≥ 1`) ⇒ steered `N` ≥ un-steered. Proven by
+  `steered_run_records_steer_delta_raises_the_trial_basis_and_stays_golden_for_unsteered` (steered
+  `seal_evidence.n_trials` strictly exceeds the un-steered run's).
+- **Item 3 / AC (c) — archive-coverage floor enforced live.** `enforce_coverage_floor(is_steered, occupied)` fails
+  a steered run whose occupied niches fall below `MIN_OCCUPIED_NICHES` (surfaced, never silently sealed); un-steered
+  runs are never newly gated. Proven by `coverage_floor_is_enforced_only_on_steered_runs`.
+- **Item 1 / AC (e) — steer delta written at seal.** `SteerDelta::from_parts(catalogue_ids_in_play, &[], gens, pop,
+  windows, folds)` (single hashing source in `qe-vintage`) is set on `content.provenance.steer_delta` for steered
+  runs, `None` for un-steered. Proven by the integration test above (un-steered `steer_delta` is `None`, steered
+  records the subset hash + budget/window/fold counts; un-steered content hash reproduces byte-identically).
+- **`evolved_pool` / `evolved_formulas` — REJECTED at `validate_train`, not silently ignored.** Consuming a sealed
+  GP `ExprTree` pool as a *strategy* indicator would change the feature-space width and thus the `CatalogueIdentity`
+  (breaking QE-402 backtestability), so it cannot be applied golden-safely on the live strategy search today. Per
+  the reviewer's sanctioned alternative to silent-ignore (item 4), a steered request naming an evolved pool is a
+  `400` ("not yet supported on the live train search"). Proven by
+  `validate_train_rejects_evolved_pool_as_not_yet_supported_not_silently_ignored`. A QE-402-safe feature-space
+  extension for evolved-pool-as-indicator is a genuine follow-up. `included_evolved_formulas` (the read-only,
+  firewall-safe pool counter) stays in place for that follow-up; the firewall test remains green.
+
+The end-to-end path is threaded: server `spawn.rs` `train_args` emits `--indicator`/`--windows`/`--folds` (never
+`evolved_*`), the CLI parser + `Command::Train` + `TrainOptions` carry them, and `run_train_job` applies them.

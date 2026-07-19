@@ -450,6 +450,20 @@ fn validate_train(p: &TrainParams) -> Result<(), CreateError> {
     // `400` — regime coverage is invariant to steering.
     floor_usize("windows", p.windows, qe_validation::MIN_WFO_WINDOWS)?;
     floor_usize("folds", p.folds, qe_validation::MIN_WFO_FOLDS)?;
+
+    // QE-458: evolved-pool-as-indicator steering is not yet applied by the live train search — including a
+    // sealed GP formula as a strategy indicator requires a QE-402-safe feature-space extension (a follow-up).
+    // Reject it rather than accept-and-silently-ignore, so a steered request naming an evolved pool errors
+    // instead of running an un-steered full-catalogue search. (Indicator-subset / window / fold / budget
+    // steering IS applied live by `run_train_job`.)
+    if p.evolved_pool.is_some() || p.evolved_formulas.is_some() {
+        return Err(CreateError::Validation(
+            "evolved-pool-as-indicator steering (`evolved_pool` / `evolved_formulas`) is not yet \
+             supported on the live train search — use `indicator_subset` / `windows` / `folds` / budget \
+             steering (a QE-402-safe feature-space extension is a follow-up)"
+                .to_owned(),
+        ));
+    }
     Ok(())
 }
 
@@ -1027,14 +1041,22 @@ mod tests {
 
     #[test]
     fn validate_train_accepts_the_whitelisted_steer_knobs() {
-        // Budget + indicator subset + windows/folds at/above their floors is a clean accept.
+        // Budget + indicator subset + windows/folds at/above their floors is a clean accept (these are
+        // applied live by `run_train_job`).
         assert_train_accepted(json!({
             "start": "2021-01-01", "end": "2021-06-01", "resolution": "1h",
             "generations": 80, "population": 24,
             "indicator_subset": ["rsi_14", "atr_pct"],
-            "evolved_pool": "pool-abc", "evolved_formulas": ["aa", "bb"],
             "windows": 6, "folds": 4
         }));
+    }
+
+    #[test]
+    fn validate_train_rejects_evolved_pool_as_not_yet_supported_not_silently_ignored() {
+        // Evolved-pool-as-indicator steering is not yet applied on the live search, so it is REJECTED
+        // (never accepted-then-silently-ignored) — item 4 non-negotiable.
+        assert_train_rejected("evolved_pool", json!("pool-abc"), "evolved-pool");
+        assert_train_rejected("evolved_formulas", json!(["aa", "bb"]), "evolved-pool");
     }
 
     #[test]
