@@ -13,8 +13,8 @@ const VINTAGES: VintageListItem[] = [
 ];
 
 const COVERAGE: CoverageRow[] = [
-  { symbol: 'BTCUSDT', resolution: '1h', from: 1_600_000_000_000, to: 1_700_000_000_000, bars: 1000 },
-  { symbol: 'ETHUSDT', resolution: '1h', from: 1_600_000_000_000, to: 1_700_000_000_000, bars: 1000 },
+  { symbol: 'BTCUSDT', resolution: '1h', from: 1_600_000_000_000, to: 1_700_000_000_000, bars: 1000, provenance: 'real', calibrated: true },
+  { symbol: 'ETHUSDT', resolution: '1h', from: 1_600_000_000_000, to: 1_700_000_000_000, bars: 1000, provenance: 'real', calibrated: true },
 ];
 
 /** Route GET /api/vintages + /api/market-data/coverage; POST /api/runs via `post`. */

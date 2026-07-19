@@ -5,7 +5,7 @@ import { BacktestsArea } from './backtest/BacktestsArea';
 import { TrainingArea } from './training/TrainingArea';
 import { EvolveArea } from './evolve/EvolveArea';
 import { StrategiesArea } from './strategies/StrategiesArea';
-import { MarketData } from './MarketData';
+import { MarketDataArea } from './data/MarketDataArea';
 import { fetchMe, logout, detectRejection, type Me } from '../api/session';
 import { onUnauthorized } from '../api/authEvents';
 import { ErrorBoundary } from './ErrorBoundary';
@@ -123,7 +123,7 @@ export function App() {
         }}
       >
         {active === 'data' ? (
-          <MarketData />
+          <MarketDataArea />
         ) : active === 'strategies' ? (
           <StrategiesArea initialVintage={inspectVintage} />
         ) : active === 'training' ? (
