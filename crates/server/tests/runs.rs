@@ -973,10 +973,30 @@ fn app_and_manager_supervised(
     evolve_concurrency: usize,
     run_deadline: Duration,
 ) -> (Router, Arc<RunManager>) {
+    app_and_manager_supervised_flow(
+        data_dir,
+        script,
+        max_concurrency,
+        evolve_concurrency,
+        1,
+        run_deadline,
+    )
+}
+
+/// Like [`app_and_manager_supervised`] but also sets the QE-461 flow-concurrency lane bound.
+fn app_and_manager_supervised_flow(
+    data_dir: &Path,
+    script: &Path,
+    max_concurrency: usize,
+    evolve_concurrency: usize,
+    flow_concurrency: usize,
+    run_deadline: Duration,
+) -> (Router, Arc<RunManager>) {
     let spawner = Arc::new(CliJobSpawner::new(script.to_path_buf()));
     let manager = Arc::new(
         RunManager::new(data_dir.join("runs"), spawner, max_concurrency)
             .with_evolve_concurrency(evolve_concurrency)
+            .with_flow_concurrency(flow_concurrency)
             .with_run_deadline(run_deadline),
     );
     let auth = common::auth_context(TEST_EMAIL, None);
@@ -1163,5 +1183,271 @@ async fn flow_with_failed_g1_train_runs_no_backtest_and_fails() {
     assert!(
         !tmp.path().join("runs").join(&id).join("backtest").exists(),
         "no backtest sub-run dir may exist for a failed-G1 flow"
+    );
+}
+
+// ---- QE-461 flow supervision: concurrency lane + deadline + resume/checkpoint ----------------------
+
+/// A flow fake `qe` CLI whose **train** phase blocks on a release sentinel before sealing (so a flow is
+/// deterministically observable as `running`), then seals + emits the handoff; the **backtest** phase is quick.
+fn blocking_flow_script(release: &Path) -> String {
+    format!(
+        r#"#!/bin/sh
+sub="$1"
+run_dir=""
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "--run-dir" ]; then run_dir="$a"; fi
+  prev="$a"
+done
+if [ "$sub" = "train" ]; then
+  printf '{{"t":"progress","pct":20,"stage":"features","msg":"train"}}\n'
+  while [ ! -f "{release}" ]; do sleep 0.02; done
+  printf '{{"t":"gate","pct":85,"stage":"gate","promoted":true,"n_trials":10}}\n'
+  printf '%s\n' '{{"instrument":"BTCUSDT","gate_taker_fee_bps":5.0,"holdout_window":{{"start":"2021-01-05","end":"2021-01-10","resolution":"1h"}},"vintage_id":"vint-flow-1"}}' > "$run_dir/result.json"
+  printf '{{"t":"done","result":"result.json","protocol_version":3,"vintage":"vint-flow-1"}}\n'
+else
+  printf '{{"t":"progress","pct":50,"stage":"simulate","msg":"backtest"}}\n'
+  printf '{{}}\n' > "$run_dir/result.json"
+  printf '{{"t":"done","result":"result.json","protocol_version":3}}\n'
+fi
+"#,
+        release = release.display()
+    )
+}
+
+/// AC1 (dedicated lane): the flow semaphore (default 1) serialises flows — a second flow stays `queued`
+/// behind the first even though the shared worker pool has spare capacity (so a multi-hour flow never
+/// starves interactive backtests).
+#[tokio::test]
+async fn the_flow_semaphore_serialises_flows() {
+    let tmp = TempDir::new().unwrap();
+    let release = tmp.path().join("release");
+    let script = tmp.path().join("qe.sh");
+    write_script(&script, &blocking_flow_script(&release));
+    // Shared pool = 4 slots, but the FLOW lane bound is 1 — so only one flow runs at a time.
+    let (app, _m) =
+        app_and_manager_supervised_flow(tmp.path(), &script, 4, 1, 1, Duration::from_secs(30));
+
+    let (_, b1) = post_run(&app, &create_flow_body()).await;
+    let id1 = b1["id"].as_str().unwrap().to_owned();
+    let (_, b2) = post_run(&app, &create_flow_body()).await;
+    let id2 = b2["id"].as_str().unwrap().to_owned();
+
+    // The first flow runs (its train phase blocks on the release); the second stays queued behind the lane.
+    poll_status(&app, &id1, "running", TIMEOUT).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let (_, meta2) = get(&app, &format!("/api/runs/{id2}")).await;
+    assert_eq!(
+        meta2["status"], "queued",
+        "the second flow is serialised behind the first on the flow lane (pool has spare capacity): {meta2}"
+    );
+
+    // Release: both flows complete.
+    std::fs::write(&release, b"go").unwrap();
+    poll_status(&app, &id1, "succeeded", TIMEOUT).await;
+    poll_status(&app, &id2, "succeeded", TIMEOUT).await;
+}
+
+/// AC1 (per-flow deadline): a flow that blows past the per-flow wall-clock ceiling is aborted (child killed)
+/// and terminally **failed** with the ceiling reason — reusing the existing abort→kill_on_drop pattern.
+#[tokio::test]
+async fn a_flow_past_the_wall_clock_ceiling_is_aborted_and_failed() {
+    let tmp = TempDir::new().unwrap();
+    // The train phase blocks forever on a release that is NEVER created ⇒ the per-flow deadline must abort it.
+    let release = tmp.path().join("never");
+    let script = tmp.path().join("qe.sh");
+    write_script(&script, &blocking_flow_script(&release));
+    let (app, _m) =
+        app_and_manager_supervised_flow(tmp.path(), &script, 4, 1, 1, Duration::from_millis(300));
+
+    let (status, body) = post_run(&app, &create_flow_body()).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let id = body["id"].as_str().unwrap().to_owned();
+
+    let meta = poll_status(&app, &id, "failed", TIMEOUT).await;
+    assert!(
+        meta["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("wall-clock ceiling"),
+        "the flow failure names the wall-clock ceiling: {meta}"
+    );
+}
+
+/// A resume probe `qe` CLI: its **backtest** phase records the `--vintage` it was handed (determinism proof)
+/// and succeeds; its **train** phase must NEVER run on resume — if it does, it writes `train_sentinel` and
+/// fails, so the test can assert the expensive search was not re-run.
+fn resume_probe_script(train_sentinel: &Path, vintage_out: &Path) -> String {
+    format!(
+        r#"#!/bin/sh
+sub="$1"
+run_dir=""
+vintage=""
+prev=""
+for a in "$@"; do
+  case "$prev" in
+    --run-dir) run_dir="$a" ;;
+    --vintage) vintage="$a" ;;
+  esac
+  prev="$a"
+done
+if [ "$sub" = "train" ]; then
+  echo ran > "{sentinel}"
+  exit 1
+fi
+printf '%s' "$vintage" > "{vintage_out}"
+printf '{{"t":"progress","pct":50,"stage":"simulate","msg":"backtest"}}\n'
+printf '{{}}\n' > "$run_dir/result.json"
+printf '{{"t":"done","result":"result.json","protocol_version":3}}\n'
+exit 0
+"#,
+        sentinel = train_sentinel.display(),
+        vintage_out = vintage_out.display()
+    )
+}
+
+/// Seed an on-disk orphaned flow (as a hard-killed process would leave it) that has SEALED its vintage but not
+/// finished the backtest: `train/result.json` + recorded `train.vintage`, status `running`, NO
+/// `backtest/result.json`. Registers it in `index.json`.
+fn seed_sealed_flow_orphan(runs_dir: &Path, id: &str) {
+    let flow_dir = runs_dir.join(id);
+    let train_dir = flow_dir.join("train");
+    std::fs::create_dir_all(&train_dir).unwrap();
+    // The train sub-run's frozen-holdout handoff (the checkpoint the resume reads).
+    std::fs::write(
+        train_dir.join("result.json"),
+        json!({
+            "instrument": "BTCUSDT",
+            "gate_taker_fee_bps": 5.0,
+            "holdout_window": { "start": "2021-01-05", "end": "2021-01-10", "resolution": "1h" },
+            "vintage_id": "vint-flow-1"
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let meta = json!({
+        "id": id,
+        "type": "flow",
+        "status": "running",
+        "params": { "seed": 7, "start": "2021-01-01", "end": "2021-01-10", "resolution": "1h" },
+        "progress": { "pct": 85, "stage": "gate", "msg": "G1 passed" },
+        "train": { "vintage": "vint-flow-1" },
+        "flow": { "train_run": "train", "vintage": "vint-flow-1" },
+        "created_ms": 1,
+        "started_ms": 2,
+        "finished_ms": Value::Null,
+        "exit": Value::Null,
+        "error": Value::Null,
+        "artifacts": []
+    });
+    std::fs::write(flow_dir.join("meta.json"), meta.to_string()).unwrap();
+    let index = json!([{ "id": id, "type": "flow", "created_ms": 1, "label": "flow" }]);
+    std::fs::write(runs_dir.join("index.json"), index.to_string()).unwrap();
+}
+
+/// AC2 (resume from the sealed-vintage checkpoint): a restart with *vintage sealed ∧ backtest incomplete*
+/// re-spawns **only** the backtest phase (no re-search), riding the recorded vintage deterministically.
+#[tokio::test]
+async fn flow_resumes_backtest_from_sealed_vintage_checkpoint_without_research() {
+    let tmp = TempDir::new().unwrap();
+    let runs_dir = tmp.path().join("runs");
+    let train_sentinel = tmp.path().join("train_ran");
+    let vintage_out = tmp.path().join("bt_vintage");
+    let script = tmp.path().join("qe.sh");
+    write_script(&script, &resume_probe_script(&train_sentinel, &vintage_out));
+
+    let id = "flow-resume-1";
+    seed_sealed_flow_orphan(&runs_dir, id);
+
+    let (app, manager) = app_and_manager_with_script(tmp.path(), &script, 4);
+
+    // The reconciler must NOT fail a resumable flow (it is not dead)...
+    let failed = manager.reconcile_orphans().expect("reconcile ok");
+    assert_eq!(failed, 0, "a resumable flow is not a dead orphan");
+    // ...and the resume half re-spawns exactly one flow's backtest phase.
+    let resumed = manager.resume_orphaned_flows().await.expect("resume ok");
+    assert_eq!(resumed, 1, "the sealed-but-incomplete flow is resumed");
+
+    let meta = poll_status(&app, id, "succeeded", TIMEOUT).await;
+    assert_eq!(
+        meta["flow"]["backtest_run"], "backtest",
+        "backtest ran: {meta}"
+    );
+    assert_eq!(meta["flow"]["vintage"], "vint-flow-1");
+    // Determinism: the resumed backtest rode the SAME recorded sealed vintage.
+    assert_eq!(
+        std::fs::read_to_string(&vintage_out).unwrap(),
+        "vint-flow-1",
+        "the resumed backtest is pinned to the recorded sealed vintage"
+    );
+    // The expensive search was NEVER re-run on resume.
+    assert!(
+        !train_sentinel.exists(),
+        "resume must re-spawn ONLY the backtest — the train search must not re-run"
+    );
+    assert!(
+        tmp.path()
+            .join("runs")
+            .join(id)
+            .join("backtest")
+            .join("result.json")
+            .exists(),
+        "the backtest artefact was produced by the resumed phase"
+    );
+}
+
+/// AC2 (dead run): a restart with NO sealed vintage is a dead run — the reconciler terminally marks it
+/// `failed` (never re-searched) and the resume half resumes nothing.
+#[tokio::test]
+async fn reconcile_fails_unsealed_orphan_flow_never_researched() {
+    let tmp = TempDir::new().unwrap();
+    let runs_dir = tmp.path().join("runs");
+    let train_sentinel = tmp.path().join("train_ran");
+    let vintage_out = tmp.path().join("bt_vintage");
+    let script = tmp.path().join("qe.sh");
+    write_script(&script, &resume_probe_script(&train_sentinel, &vintage_out));
+
+    // An orphaned flow with NO sealed vintage: no train/result.json, no recorded train.vintage.
+    let id = "flow-dead-1";
+    let flow_dir = runs_dir.join(id);
+    std::fs::create_dir_all(&flow_dir).unwrap();
+    let meta = json!({
+        "id": id, "type": "flow", "status": "running",
+        "params": {}, "progress": { "pct": 20, "stage": "features", "msg": "train" },
+        "flow": { "train_run": "train" },
+        "created_ms": 1, "started_ms": 2, "finished_ms": Value::Null,
+        "exit": Value::Null, "error": Value::Null, "artifacts": []
+    });
+    std::fs::write(flow_dir.join("meta.json"), meta.to_string()).unwrap();
+    std::fs::write(
+        runs_dir.join("index.json"),
+        json!([{ "id": id, "type": "flow", "created_ms": 1, "label": "flow" }]).to_string(),
+    )
+    .unwrap();
+
+    let (_app, manager) = app_and_manager_with_script(tmp.path(), &script, 4);
+
+    let failed = manager.reconcile_orphans().expect("reconcile ok");
+    assert_eq!(
+        failed, 1,
+        "a flow with no sealed vintage is a dead orphan ⇒ failed"
+    );
+    let resumed = manager.resume_orphaned_flows().await.expect("resume ok");
+    assert_eq!(resumed, 0, "a dead flow is never resumed");
+
+    let m: Value =
+        serde_json::from_slice(&std::fs::read(flow_dir.join("meta.json")).unwrap()).unwrap();
+    assert_eq!(m["status"], "failed");
+    assert!(
+        m["error"]
+            .as_str()
+            .unwrap()
+            .contains("interrupted by a server restart"),
+        "dead flow carries the reconcile reason: {m}"
+    );
+    assert!(
+        !train_sentinel.exists(),
+        "a dead run is NEVER silently re-searched"
     );
 }

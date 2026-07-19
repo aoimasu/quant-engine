@@ -527,6 +527,114 @@ async fn halt_cooperatively_stops_a_running_evolve_run() {
     );
 }
 
+/// QE-461 §5.3: `POST /api/runs/{id}/halt` on a composite **flow** yields terminal `Failed` carrying a halt
+/// reason (no new `RunStatus` variant) and RETAINS the partially-sealed vintage. The flow's train phase seals
+/// (writes `train/result.json` + the recorded vintage), then the backtest phase blocks forever, so we halt
+/// mid-backtest and assert the sealed-checkpoint artefact is retained + auditable.
+#[tokio::test]
+async fn halt_flow_yields_failed_with_halt_reason_and_retains_partial_vintage() {
+    let tmp = TempDir::new().unwrap();
+    let data = tmp.path().join("data");
+    let artifacts = tmp.path().join("artifacts");
+    let release = tmp.path().join("release"); // never created ⇒ the backtest blocks until halted
+    let script = tmp.path().join("qe_flow.sh");
+    // train: seal + emit handoff/vintage; backtest: emit progress then block forever on the release.
+    std::fs::write(
+        &script,
+        format!(
+            r#"#!/bin/sh
+sub="$1"
+run_dir=""
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "--run-dir" ]; then run_dir="$a"; fi
+  prev="$a"
+done
+if [ "$sub" = "train" ]; then
+  printf '{{"t":"gate","pct":85,"stage":"gate","promoted":true,"n_trials":10}}\n'
+  printf '%s\n' '{{"instrument":"BTCUSDT","gate_taker_fee_bps":5.0,"holdout_window":{{"start":"2021-01-05","end":"2021-01-10","resolution":"1h"}},"vintage_id":"vint-flow-1"}}' > "$run_dir/result.json"
+  printf '{{"t":"done","result":"result.json","protocol_version":3,"vintage":"vint-flow-1"}}\n'
+else
+  printf '{{"t":"progress","pct":50,"stage":"simulate","msg":"backtest"}}\n'
+  while [ ! -f "{release}" ]; do sleep 0.05; done
+  exit 0
+fi
+"#,
+            release = release.display()
+        ),
+    )
+    .unwrap();
+    let mut perms = std::fs::metadata(&script).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&script, perms).unwrap();
+
+    let (app, _m) = build_app(&data, &artifacts, &script, roles_with_approver());
+
+    let body = json!({
+        "type": "flow",
+        "params": { "seed": 7, "start": "2021-01-01", "end": "2021-01-10", "resolution": "1h" }
+    });
+    let (status, created) = create_run(&app, &body).await;
+    assert_eq!(status, StatusCode::CREATED, "create flow: {created}");
+    let id = created["id"].as_str().unwrap().to_owned();
+
+    // Wait until the flow has entered the (blocking) backtest phase — its vintage is already sealed by then.
+    let running = poll_flow_backtest(&app, &id, TIMEOUT).await;
+    assert_eq!(
+        running["flow"]["vintage"], "vint-flow-1",
+        "vintage sealed: {running}"
+    );
+
+    let (status, halt_body) = post(&app, &format!("/api/runs/{id}/halt")).await;
+    assert_eq!(status, StatusCode::OK, "halt: {halt_body}");
+    assert_eq!(halt_body["halted"], true);
+
+    // Terminal `failed` (NOT a new status) carrying the operator-halt reason.
+    let meta = poll_status(&app, &id, "failed", TIMEOUT).await;
+    assert!(
+        meta["error"].as_str().unwrap_or("").contains("halt"),
+        "halted flow records the operator-halt reason: {meta}"
+    );
+    // The partially-sealed vintage checkpoint (the train sub-run's sealed result) is RETAINED + auditable.
+    assert!(
+        data.join("runs")
+            .join(&id)
+            .join("train")
+            .join("result.json")
+            .exists(),
+        "the partially-sealed vintage checkpoint must be retained after a halt"
+    );
+    assert_eq!(
+        meta["flow"]["train_run"], "train",
+        "the train lineage is auditable: {meta}"
+    );
+
+    // Re-halting a terminal flow is a 409.
+    let (status, _) = post(&app, &format!("/api/runs/{id}/halt")).await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "re-halt of a terminal flow is 409"
+    );
+}
+
+/// Poll `GET /api/runs/{id}` until the flow has recorded its backtest sub-run (i.e. it sealed the vintage and
+/// entered the backtest phase), returning the meta.
+async fn poll_flow_backtest(app: &Router, id: &str, timeout: Duration) -> Value {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let (_, meta) = get(app, &format!("/api/runs/{id}")).await;
+        if meta["flow"]["backtest_run"] == "backtest" {
+            return meta;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for the flow backtest phase: {meta}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 /// A legal reject edge and a revoke edge function through the routes (sandbox).
 #[tokio::test]
 async fn reject_and_revoke_edges_function() {

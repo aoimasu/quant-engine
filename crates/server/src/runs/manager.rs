@@ -85,6 +85,12 @@ pub const DEFAULT_MAX_RUN_SECS: u64 = 24 * 60 * 60;
 /// `QE_SERVER_MAX_EVOLVE_CONCURRENCY` / [`RunManager::with_evolve_concurrency`].
 pub const DEFAULT_MAX_EVOLVE_CONCURRENCY: usize = 1;
 
+/// QE-461 (design §5.3): default bound on **concurrently-running composite flows** — a separate semaphore
+/// (default 1), a byte-for-byte mirror of [`DEFAULT_MAX_EVOLVE_CONCURRENCY`], so a multi-hour train→backtest
+/// flow serialises against other flows without ever starving interactive backtests. Overridable via
+/// `QE_SERVER_MAX_FLOW_CONCURRENCY` / [`RunManager::with_flow_concurrency`].
+pub const DEFAULT_MAX_FLOW_CONCURRENCY: usize = 1;
+
 /// Owns the run store, the spawn seam, and the worker-pool bound. Wrapped in an `Arc` and shared as
 /// axum state.
 pub struct RunManager {
@@ -95,6 +101,10 @@ pub struct RunManager {
     /// supervisor acquires one of these **in addition to** a shared worker-pool permit, so a long campaign
     /// serialises against other campaigns without ever blocking interactive backtests.
     evolve_permits: Arc<Semaphore>,
+    /// QE-461 §5.3: a **separate** bound on concurrently-running composite flows (default 1), mirroring
+    /// [`Self::evolve_permits`]. A flow supervisor acquires one of these **in addition to** a shared
+    /// worker-pool permit, so a multi-hour flow serialises against other flows without blocking backtests.
+    flow_permits: Arc<Semaphore>,
     /// QE-454 §13.10: the per-run wall-clock ceiling; a run that exceeds it is aborted + terminally failed.
     run_deadline: Duration,
     index_lock: Arc<Mutex<()>>,
@@ -120,6 +130,7 @@ impl RunManager {
             spawner,
             permits: Arc::new(Semaphore::new(max_concurrency.max(1))),
             evolve_permits: Arc::new(Semaphore::new(DEFAULT_MAX_EVOLVE_CONCURRENCY.max(1))),
+            flow_permits: Arc::new(Semaphore::new(DEFAULT_MAX_FLOW_CONCURRENCY.max(1))),
             run_deadline: Duration::from_secs(DEFAULT_MAX_RUN_SECS),
             index_lock: Arc::new(Mutex::new(())),
             registry: Arc::new(Mutex::new(HashMap::new())),
@@ -132,6 +143,15 @@ impl RunManager {
     #[must_use]
     pub fn with_evolve_concurrency(mut self, max_evolve: usize) -> Self {
         self.evolve_permits = Arc::new(Semaphore::new(max_evolve.max(1)));
+        self
+    }
+
+    /// QE-461 §5.3: set the bound on concurrently-running composite flows (clamped to ≥1), mirroring
+    /// [`Self::with_evolve_concurrency`]. A real deploy resolves this from `QE_SERVER_MAX_FLOW_CONCURRENCY`;
+    /// tests set it directly.
+    #[must_use]
+    pub fn with_flow_concurrency(mut self, max_flow: usize) -> Self {
+        self.flow_permits = Arc::new(Semaphore::new(max_flow.max(1)));
         self
     }
 
@@ -216,6 +236,7 @@ impl RunManager {
         let spawner = Arc::clone(&self.spawner);
         let permits = Arc::clone(&self.permits);
         let evolve_permits = Arc::clone(&self.evolve_permits);
+        let flow_permits = Arc::clone(&self.flow_permits);
         let run_deadline = self.run_deadline;
         let registry = Arc::clone(&self.registry);
         let task_id = id.clone();
@@ -230,6 +251,7 @@ impl RunManager {
                 spawner,
                 permits,
                 evolve_permits,
+                flow_permits,
                 run_deadline,
                 meta,
                 spec,
@@ -256,6 +278,15 @@ impl RunManager {
         for entry in &index {
             if let Some(mut meta) = self.store.read_meta(&entry.id)? {
                 if matches!(meta.status, RunStatus::Queued | RunStatus::Running) {
+                    // QE-461 §5.3: a RESUMABLE flow (vintage sealed ∧ backtest incomplete) is NOT dead — it
+                    // resumes from its sealed-vintage checkpoint, so leave it for [`Self::resume_orphaned_flows`]
+                    // to re-spawn the backtest phase. Every other non-terminal orphan is a dead run: fail it.
+                    if matches!(
+                        classify_orphan(&self.store, &meta),
+                        OrphanAction::ResumeBacktest
+                    ) {
+                        continue;
+                    }
                     let exit = meta.exit;
                     finish_failed(&self.store, &mut meta, exit, RECONCILE_REASON.to_owned());
                     reconciled += 1;
@@ -263,6 +294,68 @@ impl RunManager {
             }
         }
         Ok(reconciled)
+    }
+
+    /// QE-461 §5.3 — the flow-resume half of startup reconciliation. Scans the index and, for each orphaned
+    /// **resumable** flow ([`classify_orphan`] ⇒ [`OrphanAction::ResumeBacktest`]: vintage sealed ∧ backtest
+    /// incomplete), re-spawns a registry-tracked supervisor that runs **only** the backtest phase from the
+    /// sealed-vintage checkpoint — never the expensive search. Call after [`Self::reconcile_orphans`] (which
+    /// has already failed the dead runs) and before serving. Returns how many flows were resumed.
+    ///
+    /// # Errors
+    /// A filesystem/parse error reading `index.json` or a run's `meta.json`.
+    pub async fn resume_orphaned_flows(&self) -> std::io::Result<usize> {
+        let index = self.store.read_index()?;
+        let mut resumed = 0;
+        for entry in &index {
+            if let Some(meta) = self.store.read_meta(&entry.id)? {
+                if matches!(meta.status, RunStatus::Queued | RunStatus::Running)
+                    && matches!(
+                        classify_orphan(&self.store, &meta),
+                        OrphanAction::ResumeBacktest
+                    )
+                {
+                    self.spawn_flow_backtest_resume(meta).await;
+                    resumed += 1;
+                }
+            }
+        }
+        Ok(resumed)
+    }
+
+    /// Spawn a registry-tracked supervisor that resumes a flow's backtest phase (mirrors [`Self::create`]'s
+    /// task-spawn + insert-before-remove registry discipline, so shutdown/halt can drain it). The caller
+    /// guarantees `meta` is a resumable flow with a recorded `train.vintage`.
+    async fn spawn_flow_backtest_resume(&self, meta: RunMeta) {
+        // `classify_orphan` guarantees a recorded `train.vintage`; be defensive rather than panic.
+        let Some(vintage) = meta.train.as_ref().and_then(|t| t.vintage.clone()) else {
+            return;
+        };
+        let store = self.store.clone();
+        let spawner = Arc::clone(&self.spawner);
+        let permits = Arc::clone(&self.permits);
+        let flow_permits = Arc::clone(&self.flow_permits);
+        let run_deadline = self.run_deadline;
+        let registry = Arc::clone(&self.registry);
+        let id = meta.id.clone();
+        let task_id = meta.id.clone();
+        // Hold the registry lock across spawn + insert so the self-deregister can never precede the insert.
+        let mut reg = self.registry.lock().await;
+        let handle = tokio::spawn(async move {
+            supervise_flow_resume(
+                store,
+                spawner,
+                permits,
+                flow_permits,
+                run_deadline,
+                meta,
+                vintage,
+            )
+            .await;
+            registry.lock().await.remove(&task_id);
+        });
+        reg.insert(id, handle);
+        drop(reg);
     }
 
     /// QE-407 — graceful shutdown. Stop accepting new runs, then drain in-flight supervisors within a
@@ -579,11 +672,13 @@ fn now_ms() -> u64 {
 
 /// Supervise one run end-to-end: acquire a pool slot, spawn the subprocess, tail stdout progress
 /// into `meta.json` + `stdout.log`, capture a stderr tail, and record the terminal outcome.
+#[allow(clippy::too_many_arguments)] // the supervisor's store/spawner/three permits/deadline/meta/spec are all independent inputs
 async fn supervise(
     store: RunStore,
     spawner: Arc<dyn JobSpawner>,
     permits: Arc<Semaphore>,
     evolve_permits: Arc<Semaphore>,
+    flow_permits: Arc<Semaphore>,
     run_deadline: Duration,
     mut meta: RunMeta,
     spec: RunSpec,
@@ -610,6 +705,26 @@ async fn supervise(
                     &mut meta,
                     None,
                     "evolve worker pool closed".to_owned(),
+                );
+                return;
+            }
+        }
+    } else {
+        None
+    };
+
+    // QE-461 §5.3: a composite flow ALSO acquires a separate flow permit (default 1) so a multi-hour flow
+    // serialises against other flows without starving interactive backtests — a byte-for-byte mirror of the
+    // evolve permit above. Held for the whole sequence.
+    let _flow_permit = if matches!(spec, RunSpec::Flow(_)) {
+        match flow_permits.acquire().await {
+            Ok(p) => Some(p),
+            Err(_) => {
+                finish_failed(
+                    &store,
+                    &mut meta,
+                    None,
+                    "flow worker pool closed".to_owned(),
                 );
                 return;
             }
@@ -822,6 +937,105 @@ async fn drain_child(
     (done_seen, exit, err_tail, deadline_exceeded)
 }
 
+/// QE-461 §5.3 — the startup reconciler's decision for a single non-terminal (orphaned) run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OrphanAction {
+    /// A dead run (non-flow orphan, or a flow with no sealed-vintage checkpoint / no readable train handoff,
+    /// or a flow whose backtest already produced its artefact): terminally mark `failed`, never re-search.
+    Fail,
+    /// A **resumable** flow — vintage sealed ∧ backtest incomplete: re-spawn ONLY the backtest phase from the
+    /// sealed-vintage checkpoint.
+    ResumeBacktest,
+}
+
+/// QE-461 §5.3 — **the resume predicate.** A non-terminal orphaned flow is [`OrphanAction::ResumeBacktest`]
+/// iff **all** hold; anything else (and every non-flow orphan) is [`OrphanAction::Fail`]:
+/// - it is a `flow` run;
+/// - **vintage sealed**: the recorded `meta.train.vintage` is present **and** the train sub-run's
+///   `train/result.json` exists — the durable, content-addressed checkpoint plus its readable frozen-holdout
+///   handoff (needed to rebuild the deterministic backtest);
+/// - **backtest incomplete**: the backtest sub-run's `backtest/result.json` does **not** exist.
+///
+/// This is a **pure** classifier (only `meta` + on-disk artefact existence) so it is directly unit-testable
+/// and shared by both [`RunManager::reconcile_orphans`] (skip resumable) and
+/// [`RunManager::resume_orphaned_flows`] (act on resumable).
+fn classify_orphan(store: &RunStore, meta: &RunMeta) -> OrphanAction {
+    if meta.run_type != "flow" {
+        return OrphanAction::Fail;
+    }
+    let flow_dir = store.run_dir(&meta.id);
+    let vintage_sealed = meta
+        .train
+        .as_ref()
+        .and_then(|t| t.vintage.as_ref())
+        .is_some()
+        && flow_dir.join("train").join("result.json").exists();
+    let backtest_complete = flow_dir.join("backtest").join("result.json").exists();
+    if vintage_sealed && !backtest_complete {
+        OrphanAction::ResumeBacktest
+    } else {
+        OrphanAction::Fail
+    }
+}
+
+/// QE-461 §5.3 — resume an orphaned flow from its sealed-vintage checkpoint by running **only** the backtest
+/// phase. Acquires the shared pool permit **and** the flow-lane permit (a resumed flow respects the same lane
+/// as a fresh one), rebuilds the [`super::model::FlowProgress`] from the recorded `meta.flow`, then hands off
+/// to the shared [`flow_backtest_phase`] — which rebuilds the deterministic backtest from the recorded
+/// vintage + train handoff. The search is **never** re-run.
+async fn supervise_flow_resume(
+    store: RunStore,
+    spawner: Arc<dyn JobSpawner>,
+    permits: Arc<Semaphore>,
+    flow_permits: Arc<Semaphore>,
+    run_deadline: Duration,
+    mut meta: RunMeta,
+    vintage: String,
+) {
+    let exit = meta.exit;
+    let _permit = match permits.acquire().await {
+        Ok(permit) => permit,
+        Err(_) => {
+            finish_failed(&store, &mut meta, exit, "worker pool closed".to_owned());
+            return;
+        }
+    };
+    let _flow_permit = match flow_permits.acquire().await {
+        Ok(permit) => permit,
+        Err(_) => {
+            finish_failed(
+                &store,
+                &mut meta,
+                exit,
+                "flow worker pool closed".to_owned(),
+            );
+            return;
+        }
+    };
+
+    // Fresh per-flow clock for the resumed backtest (it gets the full ceiling — the prior wall-clock is gone).
+    let flow_start = Instant::now();
+    let flow = meta.flow.clone().unwrap_or_default();
+    meta.status = RunStatus::Running;
+    meta.progress = Progress {
+        pct: 88,
+        stage: "flow-resume".to_owned(),
+        msg: "flow: resuming backtest from the sealed-vintage checkpoint".to_owned(),
+    };
+    let _ = store.write_meta(&meta);
+
+    flow_backtest_phase(
+        &store,
+        spawner.as_ref(),
+        run_deadline,
+        flow_start,
+        &mut meta,
+        flow,
+        vintage,
+    )
+    .await;
+}
+
 /// QE-460 — supervise a composite flow: sequence the `train` sub-job (sealing a vintage over the frozen,
 /// regime-stratified OOS holdout carved once) then the `backtest` sub-job over that same holdout with the
 /// just-sealed vintage id. **Atomic**: the flow succeeds only if both sub-runs succeed and a vintage sealed;
@@ -835,6 +1049,11 @@ async fn supervise_flow(
     params: &FlowParams,
 ) {
     use super::model::FlowProgress;
+
+    // QE-461 §5.3: a single per-flow wall-clock clock. Each sub-phase drains under the *remaining* budget
+    // (`run_deadline − elapsed`), so the ceiling bounds the whole train→backtest flow rather than each phase
+    // independently — reusing the existing timeout→`start_kill`→`RUN_DEADLINE_REASON` abort pattern.
+    let flow_start = Instant::now();
 
     let flow_dir = store.run_dir(&meta.id);
     let train_dir = flow_dir.join("train");
@@ -876,8 +1095,14 @@ async fn supervise_flow(
     // `drain_stdout` folds the train sub-run's terminal `done` vintage + its G1 gate verdict into
     // `meta.train`.
     let train_spec = RunSpec::Train(train_params);
-    let (done, exit, err_tail, deadline) =
-        drain_child(child, store, meta, &train_spec, run_deadline).await;
+    let (done, exit, err_tail, deadline) = drain_child(
+        child,
+        store,
+        meta,
+        &train_spec,
+        run_deadline.saturating_sub(flow_start.elapsed()),
+    )
+    .await;
     let vintage = meta.train.as_ref().and_then(|t| t.vintage.clone());
     // The G1 verdict the train sub-run emitted (`gate.promoted`). The flow's atomic verdict rides it: a
     // train that fails G1 fails the flow and runs NO backtest (design §5.2), even though the CLI seal itself
@@ -911,6 +1136,38 @@ async fn supervise_flow(
     let vintage = vintage.expect("checked Some above");
     flow.vintage = Some(vintage.clone());
 
+    // The sealed vintage is the checkpoint. Hand off to the shared backtest phase (also the QE-461 resume
+    // entry point), which rebuilds the deterministic holdout backtest from the recorded handoff.
+    flow_backtest_phase(
+        store,
+        spawner,
+        run_deadline,
+        flow_start,
+        meta,
+        flow,
+        vintage,
+    )
+    .await;
+}
+
+/// The **backtest phase** of a composite flow, shared by the initial [`supervise_flow`] and the QE-461
+/// resume path ([`supervise_flow_resume`]). Reads the train sub-run's frozen-holdout handoff, pins the
+/// backtest to the sealed gate cost model (cost-parity guard), spawns + drains the holdout backtest under
+/// the *remaining* per-flow deadline, and records the terminal outcome. Because it rebuilds the backtest
+/// params from the **recorded** vintage + handoff (frozen holdout window + gate taker fee), a resumed run
+/// rides the SAME sealed checkpoint deterministically — no search re-runs.
+async fn flow_backtest_phase(
+    store: &RunStore,
+    spawner: &dyn JobSpawner,
+    run_deadline: Duration,
+    flow_start: Instant,
+    meta: &mut RunMeta,
+    mut flow: super::model::FlowProgress,
+    vintage: String,
+) {
+    let flow_dir = store.run_dir(&meta.id);
+    let train_dir = flow_dir.join("train");
+
     // ---- read the frozen holdout window + instrument the train phase resolved -----------------------
     let handoff = match read_train_handoff(&train_dir.join("result.json")) {
         Some(h) => h,
@@ -918,7 +1175,7 @@ async fn supervise_flow(
             finish_failed(
                 store,
                 meta,
-                exit,
+                meta.exit,
                 "flow train result.json missing the holdout handoff (holdout_window/instrument)"
                     .to_owned(),
             );
@@ -941,7 +1198,7 @@ async fn supervise_flow(
         finish_failed(
             store,
             meta,
-            exit,
+            meta.exit,
             "flow backtest cost model diverged from the sealed gate calibration (cost-parity breach)"
                 .to_owned(),
         );
@@ -954,7 +1211,7 @@ async fn supervise_flow(
         finish_failed(
             store,
             meta,
-            exit,
+            meta.exit,
             format!("failed to create flow backtest dir: {e}"),
         );
         return;
@@ -977,14 +1234,20 @@ async fn supervise_flow(
             finish_failed(
                 store,
                 meta,
-                exit,
+                meta.exit,
                 format!("failed to spawn flow backtest: {e}"),
             );
             return;
         }
     };
-    let (bt_done, bt_exit, bt_err, bt_deadline) =
-        drain_child(child, store, meta, &bt_spec, run_deadline).await;
+    let (bt_done, bt_exit, bt_err, bt_deadline) = drain_child(
+        child,
+        store,
+        meta,
+        &bt_spec,
+        run_deadline.saturating_sub(flow_start.elapsed()),
+    )
+    .await;
     let bt_ok =
         !bt_deadline && bt_done && bt_exit == Some(0) && backtest_dir.join("result.json").exists();
     if !bt_ok {
@@ -1632,5 +1895,125 @@ mod tests {
             "missing gate fee ⇒ no handoff"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- QE-461 §5.3 resume predicate (classify_orphan) + no-status-leak -----------------------------
+
+    /// Build a flow `RunMeta` for `id` with the given recorded `train.vintage` (the sealed-vintage marker).
+    fn flow_meta(id: &str, train_vintage: Option<&str>) -> RunMeta {
+        RunMeta {
+            id: id.to_owned(),
+            run_type: "flow".to_owned(),
+            status: RunStatus::Running,
+            params: serde_json::Value::Null,
+            progress: Progress::default(),
+            train: train_vintage.map(|v| TrainProgress {
+                vintage: Some(v.to_owned()),
+                ..TrainProgress::default()
+            }),
+            flow: Some(crate::runs::model::FlowProgress {
+                train_run: Some("train".to_owned()),
+                ..crate::runs::model::FlowProgress::default()
+            }),
+            created_ms: 1,
+            started_ms: Some(2),
+            finished_ms: None,
+            exit: None,
+            error: None,
+            artifacts: Vec::new(),
+        }
+    }
+
+    /// Touch `<run>/<sub>/result.json` under the store so `classify_orphan`'s existence checks see it.
+    fn touch_sub_result(store: &RunStore, id: &str, sub: &str) {
+        let dir = store.run_dir(id).join(sub);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("result.json"), b"{}").unwrap();
+    }
+
+    #[test]
+    fn classify_orphan_resumes_a_sealed_flow_with_an_incomplete_backtest() {
+        let tmp = std::env::temp_dir().join(format!("qe461-cls-{}", uuid::Uuid::new_v4()));
+        let store = RunStore::new(tmp.clone());
+        let meta = flow_meta("flow-1", Some("vint-1"));
+        // Vintage sealed: train.vintage recorded AND train/result.json present; backtest NOT yet written.
+        touch_sub_result(&store, "flow-1", "train");
+        assert_eq!(
+            classify_orphan(&store, &meta),
+            OrphanAction::ResumeBacktest,
+            "sealed vintage ∧ incomplete backtest ⇒ resume the backtest phase"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn classify_orphan_fails_a_flow_with_no_sealed_vintage() {
+        let tmp = std::env::temp_dir().join(format!("qe461-cls-{}", uuid::Uuid::new_v4()));
+        let store = RunStore::new(tmp.clone());
+        // No recorded train.vintage (and no train/result.json) — the search never sealed ⇒ dead, never resumed.
+        let meta = flow_meta("flow-2", None);
+        assert_eq!(classify_orphan(&store, &meta), OrphanAction::Fail);
+        // Even a recorded vintage is NOT resumable without the readable train handoff (result.json).
+        let meta_no_handoff = flow_meta("flow-2b", Some("vint-x"));
+        assert_eq!(
+            classify_orphan(&store, &meta_no_handoff),
+            OrphanAction::Fail,
+            "a recorded vintage without train/result.json is not a readable checkpoint ⇒ dead"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn classify_orphan_fails_a_flow_whose_backtest_already_completed() {
+        let tmp = std::env::temp_dir().join(format!("qe461-cls-{}", uuid::Uuid::new_v4()));
+        let store = RunStore::new(tmp.clone());
+        let meta = flow_meta("flow-3", Some("vint-3"));
+        touch_sub_result(&store, "flow-3", "train");
+        touch_sub_result(&store, "flow-3", "backtest"); // backtest terminal ⇒ NOT resumable
+        assert_eq!(
+            classify_orphan(&store, &meta),
+            OrphanAction::Fail,
+            "a completed backtest ⇒ dead (nothing to resume), never re-searched"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn classify_orphan_never_resumes_a_non_flow_run() {
+        let tmp = std::env::temp_dir().join(format!("qe461-cls-{}", uuid::Uuid::new_v4()));
+        let store = RunStore::new(tmp.clone());
+        let mut meta = flow_meta("bt-1", Some("vint-1"));
+        meta.run_type = "backtest".to_owned();
+        touch_sub_result(&store, "bt-1", "train");
+        assert_eq!(
+            classify_orphan(&store, &meta),
+            OrphanAction::Fail,
+            "resume is a flow-only supervision concern"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// AC5 guard: flow supervision (resume/halt) rides the terminal 4-state `RunStatus` — this exhaustive
+    /// match will fail to compile if a 5th variant is ever added, and asserts exactly the four wire strings.
+    #[test]
+    fn flow_supervision_adds_no_run_status_variant() {
+        for s in [
+            RunStatus::Queued,
+            RunStatus::Running,
+            RunStatus::Succeeded,
+            RunStatus::Failed,
+        ] {
+            // Exhaustive: a new variant would make this match non-exhaustive (compile error).
+            let wire = match s {
+                RunStatus::Queued => "queued",
+                RunStatus::Running => "running",
+                RunStatus::Succeeded => "succeeded",
+                RunStatus::Failed => "failed",
+            };
+            assert_eq!(serde_json::to_value(s).unwrap(), serde_json::json!(wire));
+        }
+        // The operator-halt outcome is `Failed` + a reason, not a new status.
+        assert_eq!(serde_json::to_value(RunStatus::Failed).unwrap(), "failed");
+        assert!(HALT_REASON.contains("halt"));
     }
 }

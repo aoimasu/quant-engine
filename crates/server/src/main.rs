@@ -52,6 +52,18 @@ async fn main() -> ExitCode {
         Err(e) => tracing::error!(error = %e, "failed to reconcile orphaned runs on startup"),
     }
 
+    // QE-461 §5.3: after failing the dead orphans, RESUME any orphaned composite flow that had sealed its
+    // vintage but not finished the backtest — re-spawn ONLY the backtest phase from the sealed-vintage
+    // checkpoint (no re-search), before serving so the run list is honest from the first request.
+    match manager.resume_orphaned_flows().await {
+        Ok(0) => {}
+        Ok(n) => tracing::warn!(
+            resumed = n,
+            "resumed orphaned flows from their sealed-vintage checkpoint (backtest phase re-spawned)"
+        ),
+        Err(e) => tracing::error!(error = %e, "failed to resume orphaned flows on startup"),
+    }
+
     // QE-419: unify the storage dirs. Load `qe-config` (the single source of truth the spawned CLI
     // reads) and cross-check it against the server's read-state dirs BEFORE opening the store or
     // binding — a mismatch means the read APIs would scan a different store than training wrote, so we

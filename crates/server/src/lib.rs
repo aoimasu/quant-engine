@@ -224,6 +224,11 @@ pub const ENV_MAX_EVOLVE_CONCURRENCY: &str = "QE_SERVER_MAX_EVOLVE_CONCURRENCY";
 /// run that exceeds it is aborted (`kill_on_drop`) and terminally failed.
 pub const ENV_MAX_RUN_SECS: &str = "QE_SERVER_MAX_RUN_SECS";
 
+/// QE-461 §5.3: environment variable naming the max number of concurrently-running **composite flows** (a
+/// separate bound from [`ENV_MAX_CONCURRENCY`]/[`ENV_MAX_EVOLVE_CONCURRENCY`], default 1) so a multi-hour flow
+/// never starves interactive backtests.
+pub const ENV_MAX_FLOW_CONCURRENCY: &str = "QE_SERVER_MAX_FLOW_CONCURRENCY";
+
 /// Server transport configuration (bind address + static-assets dir).
 ///
 /// These are server-only knobs, so they live here rather than in `qe-config`'s training-domain schema;
@@ -335,9 +340,17 @@ impl ServerConfig {
             .and_then(|s| s.parse::<u64>().ok())
             .filter(|&n| n >= 1)
             .unwrap_or(runs::manager::DEFAULT_MAX_RUN_SECS);
+        // QE-461 §5.3: the separate flow-concurrency lane (default 1), resolved from the environment
+        // (invalid values fall back to the default, fail-safe) — mirrors the evolve bound above.
+        let max_flow = std::env::var(ENV_MAX_FLOW_CONCURRENCY)
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|&n| n >= 1)
+            .unwrap_or(runs::manager::DEFAULT_MAX_FLOW_CONCURRENCY);
         Arc::new(
             RunManager::new(self.data_dir.join("runs"), spawner, self.max_concurrency)
                 .with_evolve_concurrency(max_evolve)
+                .with_flow_concurrency(max_flow)
                 .with_run_deadline(Duration::from_secs(max_run_secs)),
         )
     }
