@@ -466,6 +466,62 @@ export interface VintageDetail {
   primary_run?: string;
 }
 
+/** How a leaderboard entry's DSR bar is treated (`qe_server ... DsrStatus`, QE-466). */
+export type DsrStatus = 'ok' | 'escalated';
+
+/**
+ * One ranked row of the QE-466 vintage leaderboard — a projection of one sealed vintage's PERSISTED metrics.
+ * One-to-one with the server `LeaderboardEntry` DTO (`crates/server/src/read.rs`). It carries **only**
+ * net-of-cost / tradability / deflation-basis numbers read verbatim from the sealed evidence — there is no
+ * gross-Sharpe, equal-weight, lone-Sharpe, or in-sample field, and **no** promote/select action.
+ */
+export interface LeaderboardEntry {
+  /** 1-based display rank (within-budget vintages first, then descending persisted net-of-cost). */
+  rank: number;
+  id: string;
+  label: string;
+  content_hash: string;
+  format_version: number;
+  data_provenance: DataProvenance;
+  /** The ranking key — the DEPLOYED capacity-capped, net-of-cost `min{1×,2×}` figure (QE-467/438). */
+  cost_stress_net_min?: number;
+  realised_turnover: number;
+  capacity_usd: number;
+  dsr: number;
+  /** `escalated` ⇒ the DSR bar is greyed/escalated because the holdout was over-consulted. */
+  dsr_status: DsrStatus;
+  consultation_count: number;
+  /** `true` ⇒ over-consulted: demoted below every within-budget vintage and DSR bar escalated. */
+  over_consulted: boolean;
+  holdout_series_len: number;
+  steer_delta?: SteerDelta;
+  /** Always `true`: a backtest-holdout verdict still owing G2/G3 — never paper-/live-confirmed. */
+  not_paper_confirmed: boolean;
+}
+
+/**
+ * `GET /api/vintages/leaderboard` (QE-466) — the read-only leaderboard/comparison over sealed vintages.
+ * One-to-one with the server `Leaderboard` DTO. It ranks on each vintage's OWN persisted already-deflated
+ * evidence (enforcement posture (b) — `own-evidence-only`), surfaces the QE-430-deflated cross-vintage
+ * correlation + effective N as a **diversity diagnostic** (never a rank input), and ENFORCES the consultation
+ * budget. It exposes **no** promote/select/seal/auto-run action — inspection only.
+ */
+export interface Leaderboard {
+  entries: LeaderboardEntry[];
+  /** QE-430 R(N)/Fisher-z deflated positive-mean pairwise correlation over the persisted net-of-cost series. */
+  cross_vintage_correlation: number;
+  /** The effective N (aligned series length) the correlation rested on. */
+  effective_n: number;
+  effective_n_note: string;
+  /** The enforcement posture in force (`own-evidence-only`). */
+  enforcement_posture: string;
+  /** The consultation budget enforced (over-consulted when a vintage's count exceeds it). */
+  consultation_budget: number;
+  not_paper_confirmed: boolean;
+  /** The standing caveat: ranking is inspection; re-running to improve the top slot is the rejected best-of-N. */
+  caveat: string;
+}
+
 /**
  * Data provenance of a single contiguous coverage run (QE-464). Kept in lockstep with
  * `qe_storage::provenance::Provenance` (`#[serde(rename_all = "lowercase")]`). `unknown` is a legacy
@@ -643,6 +699,15 @@ export function listVintages(): Promise<VintageListItem[]> {
 /** Read one sealed vintage's full inspection detail (QE-456) — composition, gate evidence, provenance. */
 export function getVintage(id: string): Promise<VintageDetail> {
   return getJson<VintageDetail>(`/api/vintages/${encodeURIComponent(id)}`);
+}
+
+/**
+ * Read the QE-466 vintage leaderboard/comparison — sealed vintages ranked on their persisted net-of-cost
+ * evidence, with the cross-vintage diversity diagnostic and enforced consultation budget. Inspection only;
+ * the endpoint exposes no promote/select action.
+ */
+export function getLeaderboard(): Promise<Leaderboard> {
+  return getJson<Leaderboard>('/api/vintages/leaderboard');
 }
 
 /** Read-only market-data coverage (symbols × ranges present in the store). */
