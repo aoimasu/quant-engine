@@ -102,9 +102,18 @@ disjoint OOS window). It re-surfaces the gate's holdout evaluation; it confers n
 credit (no gate/seal re-run — the backtest is a report over the already-sealed vintage). Documented in code
 + the design already dropped the "disjoint" language (§4/§11 risk 10).
 
-**Cost parity (d).** The backtest sub-job is pinned to the sealed default cost model; the server asserts the
-constructed `BacktestParams` cost fields equal the pinned model before spawn (maxdama #6). A CLI test already
-proves `backtest_config` default impact == the selection cost model.
+**Cost parity (d).** The backtest sub-job is pinned to the **gate's own taker fee**, carried through the
+handoff — NOT a server-side literal. The train sub-job derives `gate_taker_fee_bps` from its actual
+`train_cfg.friction.fees.taker` (`FeeSchedule::default().taker = 0.0005 = 5 bps` — the exact fee that priced
+the `holdout_returns` feeding `evaluate_g1`) and records it in `result.json`; the flow supervisor reads it and
+pins the holdout backtest to that fee, then asserts `flow_cost_parity_ok(&bp, gate_fee)` before spawn. Because
+`qe-server` cannot import `qe-wfo` (firewall), deriving the fee at the train and threading it through the
+handoff is the drift-proof route — the flow fee can never silently diverge from the gate's. (Impact/slippage
+parity is already content-addressed from the sealed vintage; the backtest job's `reporting_impact=None`
+reproduces the selection impact model.) **Correction (review):** an earlier revision pinned a wrong `2.0` bps
+literal (the standalone-CLI `BacktestParams` default) — 2.5× friendlier than the gate's 5 bps — which the
+`qe-cli` test `flow_records_the_gate_taker_fee_and_it_equals_the_gate_default` now catches by asserting the
+recorded fee equals `FeeSchedule::default().taker` (5 bps).
 
 **Determinism.** The flow `seed` is the train seed (drives the search) and the backtest is deterministic. A
 fresh-repo re-run from `seed` + pinned snapshot reproduces the flow vintage byte-identically (content hash).

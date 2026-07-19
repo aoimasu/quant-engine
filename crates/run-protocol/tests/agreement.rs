@@ -84,7 +84,7 @@ fn ensemble_and_gate_wire_are_frozen() {
 
 #[test]
 fn done_and_error_wire_are_frozen() {
-    // Backtest form (no vintage, no pool) — carries the current protocol version (QE-452: 2).
+    // Backtest form (no vintage, no pool) — carries the current protocol version (QE-460: 3).
     assert_wire(
         &ProgressLine::Done {
             result: "result.json".to_owned(),

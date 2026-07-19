@@ -715,29 +715,29 @@ async fn supervise(
     }
 }
 
-/// The pinned taker fee (bps) the flow's holdout backtest re-costs with — equal to the run-protocol
-/// `BacktestParams` default the train gate priced selection with (`BacktestConfig::default().friction`), so
-/// the backtest cannot re-cost the holdout under a friendlier friction model than the gate used (QE-460 (d),
-/// maxdama #6 cost parity).
-const FLOW_TAKER_FEE_BPS: f64 = 2.0;
-/// The pinned slippage-model label the flow's holdout backtest re-costs with — equal to the train gate's
-/// sealed selection cost model (QE-460 (d)).
+/// The slippage-model label the flow's holdout backtest re-costs with — the default (`square-root-impact`)
+/// selection cost model the train gate priced with. The impact/slippage model itself is content-addressed
+/// from the sealed vintage (QE-431), so this label just names the model the backtest job defaults to (no
+/// `--reporting-impact` override ⇒ the selection model); the taker FEE, by contrast, is not sealed, so it is
+/// carried explicitly from the gate via the handoff (see [`TrainHandoff::gate_taker_fee_bps`]).
 const FLOW_SLIPPAGE_MODEL: &str = "square-root-impact";
 /// QE-460 (a): the flow's backtest re-surfaces the gate's holdout verdict — it is the SINGLE recorded
 /// consultation, not a fresh OOS look — so it confers no independent deflation credit.
 const FLOW_SINGLE_CONSULTATION_NOTE: &str =
     "flow backtest evaluates ON the frozen holdout (single recorded consultation, no independent credit)";
 
-/// Build the flow's holdout-backtest params, **pinned to the sealed default cost model** (QE-460 (d)): the
-/// vintage handoff (content hash), the frozen holdout window `[start,end)`, and the config-derived
-/// instrument the train sub-job trained over. The operator cannot choose the backtest window or a friendlier
-/// friction model — both are server-derived.
+/// Build the flow's holdout-backtest params, **pinned to the sealed gate cost model** (QE-460 (d), maxdama
+/// #6): the vintage handoff (content hash), the frozen holdout window `[start,end)`, the config-derived
+/// instrument, and — crucially — the **taker fee the G1 gate actually priced the holdout with**, carried from
+/// the train sub-run (`gate_taker_fee_bps`) rather than a standalone default. The operator cannot choose the
+/// backtest window or a friendlier friction model — both are server-derived from the gate.
 fn flow_backtest_params(
     vintage: String,
     start: String,
     end: String,
     resolution: String,
     instrument: String,
+    gate_taker_fee_bps: f64,
 ) -> BacktestParams {
     BacktestParams {
         vintage,
@@ -746,34 +746,40 @@ fn flow_backtest_params(
         end,
         resolution,
         universe: vec![instrument],
-        taker_fee_bps: FLOW_TAKER_FEE_BPS,
+        // The EXACT fee the gate used (from the handoff) — never a divergent default.
+        taker_fee_bps: gate_taker_fee_bps,
         slippage_model: FLOW_SLIPPAGE_MODEL.to_owned(),
     }
 }
 
 /// Cost-parity guard (QE-460 (d), maxdama #6): the flow's holdout backtest must re-cost under the **same**
-/// sealed cost calibration the train gate used — the pinned default taker fee + slippage model. Returns
-/// `false` if the params carry a friendlier (or any different) friction model, which fails the flow rather
-/// than letting the backtest re-cost the holdout cheaper than the gate.
-fn flow_cost_parity_ok(bp: &BacktestParams) -> bool {
-    (bp.taker_fee_bps - FLOW_TAKER_FEE_BPS).abs() < f64::EPSILON
+/// cost calibration the train gate used — the gate's own taker fee (`gate_taker_fee_bps`, carried from the
+/// train sub-run) and the sealed selection slippage model. Returns `false` if the backtest params carry a
+/// friendlier (or any different) friction model than the gate's, which fails the flow rather than letting the
+/// backtest re-cost the holdout cheaper than the gate.
+fn flow_cost_parity_ok(bp: &BacktestParams, gate_taker_fee_bps: f64) -> bool {
+    (bp.taker_fee_bps - gate_taker_fee_bps).abs() < f64::EPSILON
         && bp.slippage_model == FLOW_SLIPPAGE_MODEL
 }
 
 /// The train→backtest handoff the flow supervisor reads from the train sub-run's `result.json` (parsed as an
 /// opaque `serde_json::Value`, so no `qe-cli` crate edge is added — the firewall stays green): the frozen
-/// holdout window the train sub-job carved + the config-derived instrument it trained over.
+/// holdout window the train sub-job carved, the config-derived instrument it trained over, and the exact
+/// taker fee the G1 gate priced the holdout with (so the backtest re-costs under the identical fee).
 struct TrainHandoff {
     holdout_start: String,
     holdout_end: String,
     resolution: String,
     instrument: String,
+    /// The gate's own taker fee (bps) — the fee the train sub-run priced the G1 holdout evaluation with.
+    gate_taker_fee_bps: f64,
 }
 
 /// Parse the train sub-run's `result.json` for the frozen-holdout handoff (QE-460): the resolved holdout
 /// window (`holdout_window.{start,end,resolution}`) the train phase carved from the pinned snapshot's right
-/// edge, and the `instrument` it trained over (the config-derived backtest universe). `None` if the file is
-/// missing/unparseable or lacks the fields.
+/// edge, the `instrument` it trained over (the config-derived backtest universe), and the `gate_taker_fee_bps`
+/// the gate priced the holdout with (so the backtest pins the identical fee — cost parity). `None` if the
+/// file is missing/unparseable or lacks any required field (the flow then fails cleanly).
 fn read_train_handoff(result_path: &std::path::Path) -> Option<TrainHandoff> {
     let bytes = std::fs::read(result_path).ok()?;
     let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
@@ -783,6 +789,7 @@ fn read_train_handoff(result_path: &std::path::Path) -> Option<TrainHandoff> {
         holdout_end: hw.get("end")?.as_str()?.to_owned(),
         resolution: hw.get("resolution")?.as_str()?.to_owned(),
         instrument: v.get("instrument")?.as_str()?.to_owned(),
+        gate_taker_fee_bps: v.get("gate_taker_fee_bps")?.as_f64()?,
     })
 }
 
@@ -921,15 +928,16 @@ async fn supervise_flow(
     flow.holdout_start = Some(handoff.holdout_start.clone());
     flow.holdout_end = Some(handoff.holdout_end.clone());
 
-    // ---- cost-parity guard (maxdama #6): pin the sealed default cost model --------------------------
+    // ---- cost-parity guard (maxdama #6): pin the backtest to the GATE'S OWN taker fee + slippage ----
     let bp = flow_backtest_params(
         vintage.clone(),
         handoff.holdout_start.clone(),
         handoff.holdout_end.clone(),
         handoff.resolution.clone(),
         handoff.instrument.clone(),
+        handoff.gate_taker_fee_bps,
     );
-    if !flow_cost_parity_ok(&bp) {
+    if !flow_cost_parity_ok(&bp, handoff.gate_taker_fee_bps) {
         finish_failed(
             store,
             meta,
@@ -1519,53 +1527,73 @@ mod tests {
 
     // ---- QE-460 (d) cost-parity guard ----------------------------------------------------------------
 
+    /// The gate's actual taker fee in bps — `FeeSchedule::default().taker = 0.0005` = 5 bps. Mirrored here
+    /// (the server cannot import `qe-wfo` — firewall); the drift-proof end-to-end check that this equals the
+    /// gate's real fee lives in `qe-cli` (`flow_records_the_gate_taker_fee_and_it_equals_the_gate_default`),
+    /// which CAN see `FeeSchedule::default()`.
+    const GATE_FEE_BPS: f64 = 5.0;
+
     #[test]
-    fn flow_backtest_params_pin_the_sealed_cost_model_and_pass_parity() {
+    fn flow_backtest_params_pin_the_gate_fee_and_pass_parity() {
+        // The flow pins the backtest to the GATE'S OWN taker fee (carried from the train handoff), the frozen
+        // holdout window, and the config-derived instrument — never a standalone default.
         let bp = flow_backtest_params(
             "vint-abc".to_owned(),
             "2021-05-01".to_owned(),
             "2021-06-01".to_owned(),
             "1h".to_owned(),
             "BTCUSDT".to_owned(),
+            GATE_FEE_BPS,
         );
-        // The flow pins the sealed default cost model (= the model the train gate priced with), the frozen
-        // holdout window, and the config-derived instrument as the backtest universe.
-        assert_eq!(bp.taker_fee_bps, FLOW_TAKER_FEE_BPS);
+        assert_eq!(
+            bp.taker_fee_bps, GATE_FEE_BPS,
+            "the backtest fee is the gate's fee"
+        );
         assert_eq!(bp.slippage_model, FLOW_SLIPPAGE_MODEL);
         assert_eq!(bp.universe, vec!["BTCUSDT".to_owned()]);
         assert_eq!(bp.vintage, "vint-abc");
         assert!(
-            flow_cost_parity_ok(&bp),
-            "the pinned model must pass the parity guard"
+            flow_cost_parity_ok(&bp, GATE_FEE_BPS),
+            "the gate-fee-pinned model must pass the parity guard"
         );
     }
 
     #[test]
-    fn flow_cost_parity_rejects_a_friendlier_friction_model() {
-        // A backtest re-costing the holdout under a cheaper fee (or a different slippage model) than the gate
-        // used is a cost-parity breach (maxdama #6) — the guard fails it.
+    fn flow_cost_parity_rejects_a_friendlier_friction_model_than_the_gate() {
+        // A backtest re-costing the holdout under a cheaper fee (or a different slippage model) than the GATE
+        // used is a cost-parity breach (maxdama #6). This is the check that would have caught the 2-vs-5-bps
+        // bug: the OLD 2.0 bps literal is friendlier than the gate's 5.0 bps and now FAILS parity.
         let mut bp = flow_backtest_params(
             "v".to_owned(),
             "a".to_owned(),
             "b".to_owned(),
             "1h".to_owned(),
             "BTCUSDT".to_owned(),
+            GATE_FEE_BPS,
         );
-        bp.taker_fee_bps = 0.5; // friendlier than the sealed 2.0
-        assert!(!flow_cost_parity_ok(&bp));
+        bp.taker_fee_bps = 2.0; // the previously-shipped (wrong) literal — friendlier than the gate's 5 bps
+        assert!(
+            !flow_cost_parity_ok(&bp, GATE_FEE_BPS),
+            "2 bps is friendlier than the gate's 5 bps — must fail parity"
+        );
+        // Any drift from the gate fee fails, in either direction.
+        bp.taker_fee_bps = 5.5;
+        assert!(!flow_cost_parity_ok(&bp, GATE_FEE_BPS));
+        // A tampered slippage model also fails.
         let mut bp2 = flow_backtest_params(
             "v".to_owned(),
             "a".to_owned(),
             "b".to_owned(),
             "1h".to_owned(),
             "BTCUSDT".to_owned(),
+            GATE_FEE_BPS,
         );
         bp2.slippage_model = "zero-impact".to_owned();
-        assert!(!flow_cost_parity_ok(&bp2));
+        assert!(!flow_cost_parity_ok(&bp2, GATE_FEE_BPS));
     }
 
     #[test]
-    fn read_train_handoff_parses_the_holdout_window_and_instrument() {
+    fn read_train_handoff_parses_window_instrument_and_gate_fee() {
         let dir = std::env::temp_dir().join(format!("qe460-handoff-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("result.json");
@@ -1573,6 +1601,7 @@ mod tests {
             &path,
             serde_json::to_vec(&json!({
                 "instrument": "BTCUSDT",
+                "gate_taker_fee_bps": 5.0,
                 "holdout_window": { "start": "2021-05-20", "end": "2021-06-01", "resolution": "1h" }
             }))
             .unwrap(),
@@ -1583,13 +1612,25 @@ mod tests {
         assert_eq!(h.holdout_start, "2021-05-20");
         assert_eq!(h.holdout_end, "2021-06-01");
         assert_eq!(h.resolution, "1h");
-        // A result.json missing the holdout window yields None (the flow then fails cleanly).
+        assert_eq!(
+            h.gate_taker_fee_bps, 5.0,
+            "the gate fee is carried in the handoff"
+        );
+        // A result.json missing the gate fee (or the window) yields None — the flow then fails cleanly rather
+        // than guessing a fee and breaking cost parity.
         std::fs::write(
             &path,
-            serde_json::to_vec(&json!({ "instrument": "X" })).unwrap(),
+            serde_json::to_vec(&json!({
+                "instrument": "X",
+                "holdout_window": { "start": "a", "end": "b", "resolution": "1h" }
+            }))
+            .unwrap(),
         )
         .unwrap();
-        assert!(read_train_handoff(&path).is_none());
+        assert!(
+            read_train_handoff(&path).is_none(),
+            "missing gate fee ⇒ no handoff"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

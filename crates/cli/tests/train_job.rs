@@ -670,6 +670,37 @@ fn flow_consultation_counter_is_overlap_keyed_not_equality() {
     );
 }
 
+/// AC5 cost parity (the test that would have caught the 2-vs-5-bps bug): a `--flow` train records the EXACT
+/// taker fee the G1 gate priced the holdout with, and it EQUALS the gate's own `FeeSchedule::default().taker`
+/// (5 bps), NOT the standalone-CLI `BacktestParams` default (2 bps). The flow supervisor pins the holdout
+/// backtest to this recorded fee, so the flow's holdout backtest fee == the gate's fee.
+#[test]
+fn flow_records_the_gate_taker_fee_and_it_equals_the_gate_default() {
+    use qe_wfo::friction::FeeSchedule;
+    use rust_decimal::prelude::ToPrimitive;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let store_path = copy_store_to(tmp.path());
+    let root = tmp.path().join("artifacts/flow");
+    let outcome =
+        run_train_job(&flow_params(store_path, root, 42), &mut |_| {}).expect("flow train seals");
+
+    let recorded = outcome
+        .result
+        .gate_taker_fee_bps
+        .expect("a --flow train records the gate taker fee");
+    // The gate priced the G1 holdout with `BacktestConfig::default().friction` → `FeeSchedule::default().taker`.
+    let gate_fee_bps = FeeSchedule::default().taker.to_f64().unwrap() * 10_000.0;
+    assert!(
+        (recorded - gate_fee_bps).abs() < 1e-9,
+        "recorded gate fee {recorded} bps must equal the gate's FeeSchedule::default().taker {gate_fee_bps} bps"
+    );
+    assert!(
+        (recorded - 5.0).abs() < 1e-9,
+        "the gate fee is 5 bps (0.0005), NOT the 2 bps standalone-CLI default — got {recorded}"
+    );
+}
+
 /// A plain (non-flow) train leaves the frozen-holdout lineage EMPTY — un-flow vintages are unaffected by
 /// QE-460 (byte-identical seal, no golden move).
 #[test]
@@ -695,5 +726,9 @@ fn plain_train_records_no_frozen_holdout_lineage() {
     assert!(
         o.result.holdout_window.is_none(),
         "no holdout window on a plain train result"
+    );
+    assert!(
+        o.result.gate_taker_fee_bps.is_none(),
+        "no gate-fee handoff on a plain train result"
     );
 }

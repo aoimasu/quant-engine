@@ -1094,7 +1094,7 @@ done
 if [ "$sub" = "train" ]; then
   printf '{{"t":"progress","pct":20,"stage":"features","msg":"train"}}\n'
   printf '{{"t":"gate","pct":85,"stage":"gate","promoted":{promoted},"n_trials":10}}\n'
-  printf '%s\n' '{{"instrument":"BTCUSDT","holdout_window":{{"start":"2021-01-05","end":"2021-01-10","resolution":"1h"}},"vintage_id":"vint-flow-1"}}' > "$run_dir/result.json"
+  printf '%s\n' '{{"instrument":"BTCUSDT","gate_taker_fee_bps":5.0,"holdout_window":{{"start":"2021-01-05","end":"2021-01-10","resolution":"1h"}},"vintage_id":"vint-flow-1"}}' > "$run_dir/result.json"
   printf '{{"t":"done","result":"result.json","protocol_version":3,"vintage":"vint-flow-1"}}\n'
 else
   printf '{{"t":"progress","pct":50,"stage":"simulate","msg":"backtest"}}\n'

@@ -163,6 +163,13 @@ fn holdout_regime_composition(
     (composition, labelled)
 }
 
+/// Convert a friction rate (fraction of notional, e.g. `FeeSchedule::default().taker = 0.0005`) to basis
+/// points (`0.0005 → 5.0`) — the unit the flow's holdout backtest `--taker-fee-bps` uses. Deterministic; a
+/// non-finite/unrepresentable rate maps to `0.0` (never a panic).
+fn decimal_to_bps(rate: Decimal) -> f64 {
+    rate.to_f64().unwrap_or(0.0) * 10_000.0
+}
+
 /// The canonical, deterministic label of a QE-125 [`Regime`] (`"<vol>-<trend>"`, e.g. `"calm-trending"`) —
 /// the string recorded per [`RegimeShare`] in the sealed holdout regime composition.
 fn regime_label(r: Regime) -> String {
@@ -416,6 +423,13 @@ pub struct TrainResultDoc {
     /// snapshot's right edge — the flow supervisor reads it to build the holdout backtest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub holdout_window: Option<TrainWindow>,
+    /// QE-460 (d) cost parity: the **exact taker fee the G1 gate priced the holdout evaluation with** (basis
+    /// points), derived from the gate's own `train_cfg.friction.fees.taker` — NOT a standalone default. The
+    /// flow supervisor reads this and pins the holdout backtest to the SAME fee, so the backtest cannot
+    /// re-cost the holdout under a friendlier friction model than the gate used (maxdama #6). Present only on
+    /// a `--flow` train (`None` otherwise so a plain train's `result.json` is unchanged).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate_taker_fee_bps: Option<f64>,
     /// The master search seed.
     pub seed: u64,
     /// MAP-Elites generations run.
@@ -990,6 +1004,14 @@ pub fn run_train_job(
         // QE-460: the frozen holdout window the flow supervisor reads to build the holdout backtest (present
         // only on a `--flow` train; `None` otherwise so a plain train's `result.json` is unchanged).
         holdout_window: flow_lineage.as_ref().map(|f| f.holdout_window.clone()),
+        // QE-460 (d) cost parity: record the EXACT taker fee the G1 gate priced the holdout with — the gate's
+        // own `train_cfg.friction.fees.taker` (the same `train_cfg` that produced `holdout_returns` feeding
+        // `evaluate_g1`), converted to bps. The flow supervisor pins the holdout backtest to this fee, so it
+        // can never re-cost the holdout cheaper than the gate (deriving it here makes drift impossible). Only
+        // on a `--flow` train.
+        gate_taker_fee_bps: flow_lineage
+            .as_ref()
+            .map(|_| decimal_to_bps(train_cfg.friction.fees.taker)),
         seed: params.seed,
         generations,
         population,
