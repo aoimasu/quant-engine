@@ -354,7 +354,6 @@ _All sixteen delivered — see [`reviewed/`](mds/reviewed/) (qe-434..449)._
 
 | Ticket | Title | Depends on | Status |
 |--------|-------|------------|:------:|
-| [QE-458](./mds/tickets/QE-458.md) | Steerable-search params (budget / indicator subset / windows) + **gate-monotone whitelist** + **deflation-scaling** (subset cardinality→N, noise-series false-discovery test) + **archive-coverage floor** + regime-coverage invariant + steer-delta into lineage  *(R1 · run-protocol/server/wfo)* | QE-467, QE-260, QE-437, QE-439, QE-451 | — |
 | [QE-459](./mds/tickets/QE-459.md) | SPA steering controls (indicator picker / budget / windows) with blocklisted thresholds shown as fixed guardrail chips  *(R1 · frontend)* | QE-458, QE-261 | — |
 | [QE-460](./mds/tickets/QE-460.md) | `RunSpec::Flow` composite run-kind: server-owned train→backtest sequencing, deterministic vintage handoff, **collapsed holdout contract** (backtest IS the single recorded consultation), **regime-aware/walk-forward** holdout, **overlap-keyed** consultation counter, **cost-calibration parity** across sub-runs, `PROTOCOL_VERSION` 2→3 (lineage rides QE-467's bump)  *(R2 · run-protocol/server)* | QE-467, QE-452, QE-419, QE-458, QE-117, QE-125 | — |
 | [QE-461](./mds/tickets/QE-461.md) | Flow supervision: dedicated concurrency lane + resume-from-sealed-vintage checkpoint + authorised halt (runs are terminal 4-state today)  *(R2 · backend/orchestration)* | QE-460, QE-407 | — |
