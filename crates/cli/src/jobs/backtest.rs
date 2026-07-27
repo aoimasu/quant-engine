@@ -257,13 +257,32 @@ fn assemble_doc(
     let ppy = periods_per_year(resolution);
     let years = ensemble.len() as f64 / ppy;
 
+    // QE-468 — honest headline statistics. The per-bar `√ppy` Sharpe assumes IID returns and inflates the
+    // reported figure; instead aggregate the per-bar net returns to a **daily** clock (compounding within
+    // each UTC day, the equity-curve convention) and annualise the daily Sharpe by the Lo (2002)
+    // autocorrelation-adjusted `√365` factor. The per-bar `ensemble` series is untouched (the DSR /
+    // selection path — computed elsewhere at seal time — is unaffected). PSR rides beside the headline,
+    // and the persisted DSR/PBO/N are read by handle from the sealed vintage — never recomputed here.
+    let daily = metrics::daily_returns(ensemble, &times);
+    let ev = &vintage.content.seal_evidence;
+
     let metrics = Metrics {
         cagr: round10(metrics::cagr(&equity, years)),
-        sharpe: round10(metrics::sharpe(ensemble, ppy)),
-        sortino: round10(metrics::sortino(ensemble, ppy)),
+        sharpe: round10(metrics::sharpe_lo_annualised(
+            &daily,
+            metrics::DAYS_PER_YEAR,
+        )),
+        sortino: round10(metrics::sortino(&daily, metrics::DAYS_PER_YEAR)),
         max_dd: round10(metrics::max_drawdown(&dd)),
         win_rate: round10(metrics::win_rate(&trades)),
         profit_factor: round10(metrics::profit_factor(&trades)),
+        sharpe_clock: "daily, Lo-adj".to_owned(),
+        sharpe_per_bar: round10(metrics::sharpe(ensemble, ppy)),
+        psr: round10(qe_validation::probabilistic_sharpe_ratio(&daily, 0.0)),
+        // Persisted seal evidence (QE-467) — surfaced by handle, no recomputation / deflation call.
+        dsr: round10(ev.dsr),
+        pbo: round10(ev.pbo),
+        n_trials: ev.n_trials,
     };
     let equity: Vec<f64> = equity.iter().map(|&x| round10(x)).collect();
     let dd: Vec<f64> = dd.iter().map(|&x| round10(x)).collect();

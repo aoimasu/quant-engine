@@ -40,7 +40,20 @@ const RESULT: ResultContract = {
   window: { start: '2021-01-01', end: '2024-12-31', resolution: '1h' },
   universe: { symbols: ['BTC-PERP', 'ETH-PERP', 'SOL-PERP'], count: 3 },
   costs: { taker_fee_bps: 2, slippage_model: 'square-root-impact' },
-  metrics: { cagr: 0.412, sharpe: 2.14, sortino: 3.08, max_dd: -0.083, win_rate: 0.582, profit_factor: 1.94 },
+  metrics: {
+    cagr: 0.412,
+    sharpe: 1.62,
+    sortino: 2.3,
+    max_dd: -0.083,
+    win_rate: 0.582,
+    profit_factor: 1.94,
+    sharpe_clock: 'daily, Lo-adj',
+    sharpe_per_bar: 2.14,
+    psr: 0.87,
+    dsr: 0.91,
+    pbo: 0.12,
+    n_trials: 7680,
+  },
   equity_curve: [100, 101, 103, 106, 110, 108, 112],
   drawdown: [0, -0.5, -1.2, -0.3, 0, -0.8, 0],
   monthly_returns: [{ year: 2021, months: [1, 2, -3, 4, 5, -1, 2, 3, 4, 5, 6, -2] }],
@@ -86,13 +99,25 @@ describe('BacktestResult', () => {
     // Header + strategy name.
     expect(await screen.findByRole('heading', { name: 'Momentum v3' })).toBeInTheDocument();
 
-    // 6-metric strip.
+    // 6-metric strip — the headline Sharpe is the honest daily/Lo-adjusted figure, labelled with its
+    // clock + adjustment (QE-468), never the bare per-bar number.
     expect(screen.getByText('+41.2%')).toBeInTheDocument(); // CAGR
-    expect(screen.getByText('2.14')).toBeInTheDocument(); // Sharpe
-    expect(screen.getByText('3.08')).toBeInTheDocument(); // Sortino
+    expect(screen.getByText('Sharpe (daily, Lo-adj)')).toBeInTheDocument(); // labelled headline
+    expect(screen.getByText('1.62')).toBeInTheDocument(); // headline Sharpe (daily, Lo-adj)
+    expect(screen.getByText('2.30')).toBeInTheDocument(); // Sortino (daily)
     expect(screen.getByText('−8.3%')).toBeInTheDocument(); // Max DD (typographic minus)
     expect(screen.getByText('58.2%')).toBeInTheDocument(); // Win rate
     expect(screen.getByText('1.94')).toBeInTheDocument(); // Profit factor
+
+    // QE-468 "Third Law" honesty row: PSR beside the Sharpe + persisted DSR/PBO/N + per-bar diagnostic.
+    const evidence = within(screen.getByLabelText('Deflation evidence'));
+    expect(evidence.getByText('PSR')).toBeInTheDocument();
+    expect(evidence.getByText('0.87')).toBeInTheDocument(); // PSR
+    expect(evidence.getByText('DSR')).toBeInTheDocument();
+    expect(evidence.getByText('0.91')).toBeInTheDocument(); // persisted DSR
+    expect(evidence.getByText('0.12')).toBeInTheDocument(); // persisted PBO
+    expect(evidence.getByText('7680')).toBeInTheDocument(); // persisted trial count N
+    expect(evidence.getByText('2.14')).toBeInTheDocument(); // per-bar diagnostic Sharpe
 
     // Equity + drawdown area charts (inline SVG — no chart lib).
     expect(container.querySelectorAll('svg.qe-chart2').length).toBe(2);

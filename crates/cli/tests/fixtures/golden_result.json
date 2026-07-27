@@ -26,11 +26,17 @@
   },
   "metrics": {
     "cagr": 0.9104817728,
-    "sharpe": 1.4795323531,
-    "sortino": 2.1080963883,
+    "sharpe": 32.2622890648,
+    "sortino": 11.1182487933,
     "max_dd": -0.0433296739,
     "win_rate": 0.5,
-    "profit_factor": 0.9952707437
+    "profit_factor": 0.9952707437,
+    "sharpe_clock": "daily, Lo-adj",
+    "sharpe_per_bar": 1.4795323531,
+    "psr": 0.6352930367,
+    "dsr": 0.0,
+    "pbo": 0.0,
+    "n_trials": 0
   },
   "equity_curve": [
     1.0,

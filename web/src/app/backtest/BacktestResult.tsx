@@ -21,6 +21,7 @@ const CSS = `
 .qe-bt__title h2 { font-size: 20px; }
 .qe-bt__params { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
 .qe-metrics { display: grid; grid-template-columns: repeat(6, 1fr); gap: 1px; background: var(--border-subtle); border: 1px solid var(--border-subtle); border-radius: var(--radius-lg); overflow: hidden; }
+.qe-metrics--evidence { grid-template-columns: repeat(5, 1fr); }
 .qe-metric { background: var(--surface-card); padding: 14px; display: flex; flex-direction: column; gap: 4px; }
 .qe-metric .k { font: 500 10px var(--font-mono); text-transform: uppercase; letter-spacing: .08em; color: var(--text-muted); }
 .qe-metric .v { font-family: var(--font-mono); font-variant-numeric: tabular-nums; font-size: 20px; font-weight: 600; color: var(--text-primary); }
@@ -291,8 +292,10 @@ export function BacktestResult({ runId, onBack, onReRun, pollMs }: BacktestResul
                 {(
                   [
                     ['CAGR', pct(result.metrics.cagr, true)],
-                    ['Sharpe', num(result.metrics.sharpe)],
-                    ['Sortino', num(result.metrics.sortino)],
+                    // QE-468: the headline Sharpe states its clock + adjustment so a per-bar and a daily
+                    // figure can never be silently compared.
+                    [`Sharpe (${result.metrics.sharpe_clock})`, num(result.metrics.sharpe)],
+                    ['Sortino (daily)', num(result.metrics.sortino)],
                     ['Max DD', pct(result.metrics.max_dd, true)],
                     ['Win rate', pct(result.metrics.win_rate, false)],
                     ['Profit factor', num(result.metrics.profit_factor)],
@@ -303,6 +306,25 @@ export function BacktestResult({ runId, onBack, onReRun, pollMs }: BacktestResul
                     <span className="v" style={v.startsWith(MINUS) ? { color: 'var(--down-500)' } : undefined}>
                       {v}
                     </span>
+                  </div>
+                ))}
+              </div>
+
+              {/* QE-468: the "Third Law" honesty row — PSR beside the Sharpe, plus the persisted
+                  deflation evidence (DSR/PBO/N) read from the sealed vintage, and the per-bar diagnostic. */}
+              <div className="qe-metrics qe-metrics--evidence" aria-label="Deflation evidence">
+                {(
+                  [
+                    ['PSR', num(result.metrics.psr)],
+                    ['DSR', num(result.metrics.dsr)],
+                    ['PBO', num(result.metrics.pbo)],
+                    ['Trials (N)', String(result.metrics.n_trials)],
+                    ['Sharpe (per-bar)', num(result.metrics.sharpe_per_bar)],
+                  ] as const
+                ).map(([k, v]) => (
+                  <div className="qe-metric" key={k}>
+                    <span className="k">{k}</span>
+                    <span className="v">{v}</span>
                   </div>
                 ))}
               </div>
