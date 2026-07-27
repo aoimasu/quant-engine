@@ -58,6 +58,10 @@ use super::{ProgressLine, RunError};
 
 /// The even CSCV block count for the small-budget robustness assessment (min meaningful value).
 const CSCV_BLOCKS: usize = 2;
+/// The even CPCV block count `S` for the OOS distribution (QE-469): `C(6,3) = 20` held-out configurations
+/// ⇒ `φ = C(5,2) = 10` López de Prado paths — a powered distribution (`≥ DEFAULT_MIN_PATHS`) while keeping
+/// each block large enough for a real purged split on the train window.
+const DEFAULT_CPCV_BLOCKS: usize = 6;
 /// Cross-validation folds the ensemble portfolio search scores over.
 const ENSEMBLE_FOLDS: usize = 4;
 /// The default ensemble-search population (small — the pool is a handful of elites).
@@ -109,6 +113,26 @@ fn hash_stable(value: f64) -> f64 {
         (value * HASH_STABLE_SCALE).round() / HASH_STABLE_SCALE
     } else {
         value
+    }
+}
+
+/// QE-469: map the computed `qe_validation::CpcvDistribution` into the sealed `qe_vintage::CpcvSummary`,
+/// rounding every figure `hash_stable` so the CPCV block round-trips byte-identically (same rule as
+/// `weights` / the other seal-evidence figures) and two same-seed runs seal byte-identically.
+fn cpcv_summary(d: &qe_validation::CpcvDistribution, blocks: usize) -> qe_vintage::CpcvSummary {
+    qe_vintage::CpcvSummary {
+        blocks: blocks as u32,
+        n_paths: d.n_paths as u32,
+        median_sharpe: hash_stable(d.median_sharpe),
+        sharpe_iqr_lo: hash_stable(d.sharpe_iqr.0),
+        sharpe_iqr_hi: hash_stable(d.sharpe_iqr.1),
+        sharpe_p05: hash_stable(d.sharpe_p05),
+        sharpe_p95: hash_stable(d.sharpe_p95),
+        median_dsr: hash_stable(d.median_dsr),
+        dsr_p05: hash_stable(d.dsr_p05),
+        frac_dsr_ge_floor: hash_stable(d.frac_dsr_ge_floor),
+        path_sharpes: d.sharpes.iter().map(|&x| hash_stable(x)).collect(),
+        path_dsrs: d.dsrs.iter().map(|&x| hash_stable(x)).collect(),
     }
 }
 
@@ -900,6 +924,28 @@ pub fn run_train_job(
     let net_2x: f64 = combine(&chromosomes, &weights, holdout_bars, &cfg_2x)
         .iter()
         .sum();
+    // ---- QE-469: CPCV out-of-sample DISTRIBUTION (replaces the single G1 terminal-holdout point) ------
+    // Split the deployed ensemble's net-of-cost train series into `DEFAULT_CPCV_BLOCKS` contiguous blocks
+    // and, over every balanced `C(S,S/2)` partition, hold out `S/2` blocks under the SAME purge+embargo as
+    // `PurgedKFold` (`qe_validation::cpcv`, which reuses `pbo.rs`'s enumeration + the PurgedKFold
+    // arithmetic). Each held-out path's DSR deflates against the SAME basis (`robustness.trial_variance` /
+    // `n_trials`) the G1 DSR used, so the distribution is directly comparable to the point estimate it
+    // surrounds. An under-powered series (too short for `S` purged blocks) yields `Err` ⇒ absent CPCV
+    // evidence ⇒ downstream fail-closed. Rounded `hash_stable` so the sealed block round-trips
+    // byte-identically and two same-seed runs seal byte-identically (QE-006). PBO is untouched — CPCV is
+    // the OOS distribution *alongside* PBO, not a replacement.
+    let cpcv = qe_validation::CpcvDistribution::build(
+        &in_sample_returns,
+        DEFAULT_CPCV_BLOCKS,
+        schema.max_lookback(),
+        DEFAULT_LABEL_HORIZON,
+        schema.max_lookback(), // embargo = lookback (PurgedKFold documented default)
+        robustness.trial_variance,
+        n_trials,
+        qe_validation::DEFAULT_DSR_FLOOR,
+    )
+    .ok()
+    .map(|d| cpcv_summary(&d, DEFAULT_CPCV_BLOCKS));
     let seal_evidence = qe_vintage::SealEvidence {
         dsr: hash_stable(robustness.dsr),
         pbo: hash_stable(robustness.pbo),
@@ -914,6 +960,8 @@ pub fn run_train_job(
         uncensored_pbo: None,
         ic: None,
         fdr: None,
+        // QE-469: the CPCV OOS distribution summary (the promotion-facing OOS evidence).
+        cpcv,
     };
     // The canonical net-of-cost holdout series on the DEPLOYED capacity-capped weights (QE-438), rounded to
     // a hash-stable precision so it round-trips byte-identically (same rule as `weights`).

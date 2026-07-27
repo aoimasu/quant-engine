@@ -119,6 +119,28 @@ fn train_over_fixture_store_seals_verifiable_vintage() {
         "weights aligned to chromosomes"
     );
 
+    // QE-469: the sealed evidence carries the CPCV OOS DISTRIBUTION (not a lone terminal-holdout number).
+    // Over 6 blocks the distribution has C(6,3) = 20 held-out configurations, each with its own Sharpe/DSR,
+    // plus the reduced median/IQR/percentile summary — the promotion-facing OOS evidence.
+    let cpcv = loaded
+        .content
+        .seal_evidence
+        .cpcv
+        .as_ref()
+        .expect("the sealed vintage must carry a CPCV OOS distribution");
+    assert_eq!(cpcv.blocks, 6, "CPCV split into 6 blocks");
+    assert_eq!(cpcv.n_paths, 20, "C(6,3) = 20 held-out paths");
+    assert_eq!(cpcv.path_sharpes.len(), 20, "one Sharpe per held-out path");
+    assert_eq!(cpcv.path_dsrs.len(), 20, "one DSR per held-out path");
+    assert!(
+        (0.0..=1.0).contains(&cpcv.frac_dsr_ge_floor),
+        "the DSR-floor fraction is a probability"
+    );
+    assert!(
+        cpcv.dsr_p05 <= cpcv.median_dsr,
+        "the gate's lower DSR percentile is ≤ the median (a real distribution, not a point)"
+    );
+
     // Catalogue-schema alignment: every sealed chromosome is valid against the SAME schema the QE-251
     // backtest job assembles against (`CatalogueConfig::default()`).
     let schema = catalogue_schema();

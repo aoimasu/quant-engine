@@ -38,6 +38,7 @@
 //! A clean DSR/PBO/SPA is evidence the *selection* was honest — never proof the *inputs* were.
 
 pub mod basis;
+pub mod cpcv;
 pub mod dsr;
 pub mod ic;
 pub mod nulls;
@@ -52,6 +53,10 @@ use thiserror::Error;
 pub use basis::{
     basis_satisfied, deflation_basis_satisfied, missing_basis_prereqs, DEFLATION_BASIS_VERSION,
     REQUIRED_DEFLATION_BASIS,
+};
+pub use cpcv::{
+    balanced_partition_count, cpcv_path_count, cpcv_paths, CpcvDistribution, CpcvGate, CpcvPath,
+    DEFAULT_DSR_FLOOR, DEFAULT_DSR_PERCENTILE, DEFAULT_MIN_PATHS,
 };
 pub use dsr::{
     deflated_sharpe_ratio, effective_trials, expected_max_sharpe, expected_max_sharpe_ln,

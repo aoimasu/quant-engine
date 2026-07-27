@@ -113,8 +113,10 @@ fn argmax(xs: &[f64]) -> usize {
         .fold(0usize, |b, (i, &x)| if x > xs[b] { i } else { b })
 }
 
-/// All `k`-subsets of `0..n` as ascending index vectors (lexicographic).
-fn combinations(n: usize, k: usize) -> Vec<Vec<usize>> {
+/// All `k`-subsets of `0..n` as ascending index vectors (lexicographic). Shared with the CPCV path
+/// generator (QE-469, [`crate::cpcv`]) so the balanced-partition enumeration is reused verbatim, not
+/// re-derived.
+pub(crate) fn combinations(n: usize, k: usize) -> Vec<Vec<usize>> {
     let mut out = Vec::new();
     let mut idx: Vec<usize> = (0..k).collect();
     if k == 0 || k > n {
