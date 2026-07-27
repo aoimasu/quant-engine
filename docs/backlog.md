@@ -356,6 +356,47 @@ _All tickets delivered (QE-456–QE-467) — see [`reviewed/`](mds/reviewed/)._
 
 ---
 
+<a id="afml-panel"></a>
+# Review R3 — AFML panel (QE-468..470)
+
+> **Provenance.** A four-discipline panel — senior software engineer, senior quant developer, expert
+> trader, mathematician — comparing *Advances in Financial Machine Learning* (López de Prado, 2018)
+> against the engine on 2026-07-27 (independent analysis → chair-moderated debate → synthesis). The
+> full report (consensus, the four contested debates, the ranked adopt/skip verdict with file:line
+> citations) is the **spec of record**:
+> [`docs/afml-gap-analysis.md`](./afml-gap-analysis.md).
+>
+> **Headline.** The engine already implements the book's overfitting *core* (purged CV, CSCV/PBO, DSR)
+> more rigorously than the book's own reference code; it is a GP/MAP-Elites rule-search, **not** an ML
+> classifier, so most of Ch. 3–4/8/16 is N/A or actively wrong for crypto perps (see the report's
+> Skip/Differ). Only three items were ticketed — the rest are documented as deliberate
+> skips/differs. Not new spec features; do not change the P0–P2 gates.
+
+| Ticket | Title | Depends on | Status |
+|--------|-------|------------|:------:|
+| [QE-468](./mds/tickets/QE-468.md) | Report-surface Sharpe honesty — daily aggregation + Lo autocorrelation haircut + PSR + persisted DSR/PBO/N on the human report (fixes the `√ppy`-inflated headline; **reporting only, not selection**) | QE-439, QE-467 | Todo |
+| [QE-469](./mds/tickets/QE-469.md) | CPCV-distributed OOS evidence — replace the single G1 terminal-holdout point estimate with a distribution of held-out Sharpe/DSR, reusing CSCV (`pbo.rs`) + `PurgedKFold` (`cv.rs`) | QE-113, QE-439, QE-467 | Todo |
+| [QE-470](./mds/tickets/QE-470.md) | **SPIKE** — does an activity clock (dollar/volume bars) earn its integration cost? Timeboxed investigation → written adopt/defer/drop recommendation; **does not implement** | (sequenced after QE-468, QE-469) | Spike |
+
+---
+
+<a id="agentic-ai"></a>
+# Review R4 — Agentic AI on the research/ops plane (QE-471..472)
+
+> **Provenance.** Follow-on from the AFML panel ([`docs/afml-gap-analysis.md`](./afml-gap-analysis.md)): where can agentic AI (LLMs) be adopted **without** touching the properties that make the engine trustworthy? The answer the panel converged on: AI on the **research/ops plane** (widening intake, explaining output), **never** on the alpha/decision plane. Two governing rules apply to every ticket here:
+>
+> 1. **The AI proposes; the deflation gate disposes.** Any AI-generated hypothesis passes the *identical* DSR/PBO/SPA/seal firewall as a GP-mutated one, and **every candidate is counted in the trial ledger** (`gp_trial_basis`). AI widens the funnel; the firewall stays the judge.
+> 2. **Off the deterministic core.** LLM calls are non-deterministic and network-bound — feature-gated (`llm`, off by default), offline/batch only, never in the live path or the QE-006 determinism harness. Rust has no official Anthropic SDK, so the integration is raw HTTPS `POST /v1/messages` (model `claude-opus-5`, `ANTHROPIC_API_KEY` from env).
+>
+> Not new spec features; does not change the P0–P2 gates. **Explicitly rejected** (per the QE-455 guardrail): any outer loop that regenerates AI candidates based on which ones passed the gate — that is the overfitting trap this whole backbone exists to prevent.
+
+| Ticket | Title | Depends on | Status |
+|--------|-------|------------|:------:|
+| [QE-471](./mds/tickets/QE-471.md) | **Narrator (build first)** — read-only `qe explain <vintage-id>` turns sealed `SealEvidence` + `ResearchProvenance` into a plain-English writeup; establishes the feature-gated LLM client (auth, HTTP, `stop_reason`, fail-soft). Zero effect on selection/seal | QE-467; pairs with QE-468 | Todo |
+| [QE-472](./mds/tickets/QE-472.md) | **Brainstormer** — `qe ideate` proposes candidate `Expr` formulas via structured outputs; strict parse-into-catalogue, **every canonical candidate counted in the trial ledger**, sealed only through the unmodified DeflationGate. Reuses QE-471's client | QE-471, QE-451, QE-450, QE-454 | Todo |
+
+---
+
 # Phase 3 — Live, attribution & ops   *(gated by G2; live capital gated by G3)*
 
 | Ticket | Title | Depends on | Status |

@@ -13,3 +13,5 @@ web/dist/
 web/coverage/
 web/*.local
 web/.vite/
+
+.tokensave

@@ -1,0 +1,440 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>quant-engine — Architecture, Explained for Absolute Beginners</title>
+<style>
+  :root{
+    --bg:#0e1116; --panel:#161b22; --panel2:#1c232d; --ink:#e6edf3; --muted:#9aa7b4;
+    --line:#2a323d; --accent:#4ea1ff; --green:#3fb950; --amber:#d29922; --red:#f85149;
+    --purple:#bc8cff; --mono:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font:16px/1.7 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;}
+  .layout{display:grid;grid-template-columns:260px 1fr;max-width:1280px;margin:0 auto;}
+  nav{position:sticky;top:0;align-self:start;height:100vh;overflow:auto;padding:24px 18px;
+    border-right:1px solid var(--line);background:var(--panel);}
+  nav h2{font-size:15px;margin:0 0 4px}
+  nav .sub{font-size:12px;color:var(--muted);margin-bottom:12px}
+  nav a{display:block;color:var(--ink);text-decoration:none;padding:4px 8px;border-radius:6px;font-size:14px}
+  nav a:hover{background:var(--panel2);color:var(--accent)}
+  nav a .n{display:inline-block;width:22px;color:var(--muted)}
+  main{padding:40px 48px;min-width:0}
+  h1{font-size:30px;margin:0 0 6px}
+  h2.section{font-size:23px;margin:48px 0 14px;padding-bottom:8px;border-bottom:1px solid var(--line)}
+  h2.section .num{color:var(--muted);margin-right:10px}
+  h3{font-size:18px;margin:28px 0 10px;color:#cdd9e5}
+  p,li{color:#d3dbe3}
+  code{font-family:var(--mono);font-size:.88em;background:var(--panel2);padding:1px 6px;border-radius:5px;color:#e6edf3}
+  a{color:var(--accent)}
+  .lede{font-size:18px;color:var(--muted);margin:0 0 8px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px 22px;margin:16px 0}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  .callout{border-left:4px solid var(--accent);background:var(--panel2);border-radius:0 10px 10px 0;padding:12px 18px;margin:16px 0}
+  .callout.warn{border-color:var(--amber)}
+  .callout.danger{border-color:var(--red)}
+  .callout.ok{border-color:var(--green)}
+  table{border-collapse:collapse;width:100%;margin:14px 0;font-size:14px}
+  th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--muted);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.05em}
+  tr:hover td{background:var(--panel)}
+  .muted{color:var(--muted)}
+  .pill{display:inline-block;font-size:11px;font-weight:600;padding:2px 9px;border-radius:999px}
+  .high{background:rgba(248,81,73,.15);color:var(--red);border:1px solid rgba(248,81,73,.35)}
+  .med{background:rgba(210,153,34,.15);color:var(--amber);border:1px solid rgba(210,153,34,.35)}
+  .low{background:rgba(139,148,158,.15);color:var(--muted);border:1px solid rgba(139,148,158,.3)}
+  .foot{color:var(--muted);font-size:13px;margin-top:48px;border-top:1px solid var(--line);padding-top:16px}
+  @media(max-width:900px){.layout{grid-template-columns:1fr}nav{position:static;height:auto;border-right:none;border-bottom:1px solid var(--line)}main{padding:28px 20px}.grid2{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="layout">
+  <nav aria-label="Table of contents">
+    <h2>quant-engine</h2>
+    <div class="sub">architecture for beginners</div>
+    <a href="#s1"><span class="n">1</span>The 60-second summary</a>
+    <a href="#s2"><span class="n">2</span>Who and what it talks to</a>
+    <a href="#s3"><span class="n">3</span>The big picture</a>
+    <a href="#s4"><span class="n">4</span>How the code is organized</a>
+    <a href="#s5"><span class="n">5</span>The website (frontend)</a>
+    <a href="#s6"><span class="n">6</span>The server (backend)</a>
+    <a href="#s7"><span class="n">7</span>Logging in &amp; permissions</a>
+    <a href="#s8"><span class="n">8</span>What happens when you click "Run"</a>
+    <a href="#s9"><span class="n">9</span>Where data lives</a>
+    <a href="#s10"><span class="n">10</span>Settings &amp; secrets</a>
+    <a href="#s11"><span class="n">11</span>How it's deployed</a>
+    <a href="#s12"><span class="n">12</span>Quality control &amp; monitoring</a>
+    <a href="#s13"><span class="n">13</span>Long-running jobs</a>
+    <a href="#s14"><span class="n">14</span>Security walls</a>
+    <a href="#s15"><span class="n">15</span>Known weak spots</a>
+  </nav>
+
+  <main>
+    <header>
+      <h1>quant-engine — Architecture, Explained for Absolute Beginners</h1>
+      <p class="lede">The same content as the technical <a href="index.html">architecture document</a>, rewritten
+      for someone who has never built software or traded anything. Every section here mirrors a section there.</p>
+      <div class="callout">"Architecture", in software, just means: <em>what are the major parts, what does each
+      one do, and how do they talk to each other?</em> Like a building's floor plan, but for a program.</div>
+    </header>
+
+    <!-- 1 -->
+    <section id="s1">
+      <h2 class="section"><span class="num">1</span>The 60-second summary</h2>
+      <div class="card">
+        <p>quant-engine is really <strong>three cooperating pieces</strong>:</p>
+        <ol>
+          <li><strong>A worker program</strong> (<code>qe-cli</code>) that does the heavy lifting: invent trading
+          strategies, test them against history, manage market data. It's written in <strong>Rust</strong> — a
+          programming language famous for speed and for catching whole categories of bugs before the program can
+          even run. A good choice when mistakes cost money.</li>
+          <li><strong>A server program</strong> (<code>qe-server</code>) — a receptionist that sits between you
+          and the worker. It checks who you are, takes your requests ("run a backtest of strategy X over 2023"),
+          starts the worker, watches it, and files the results.</li>
+          <li><strong>A website</strong> — the dashboard in your browser where you click buttons and see charts.
+          Built with React, the same technology behind most modern web apps.</li>
+        </ol>
+        <p style="margin-bottom:0">Everything runs on one machine, stores its data in ordinary local files, and —
+        crucially — <strong>none of it can touch real money</strong>. The live-trading machinery exists in the
+        codebase but is walled off so the server physically cannot reach it (§14).</p>
+      </div>
+      <p>A newer subsystem — a "formula-inventing robot" that evolves brand-new market indicators — plugs into the
+      same worker/server/website trio, wrapped in an approval workflow with an audit trail (§7, §14).</p>
+    </section>
+
+    <!-- 2 -->
+    <section id="s2">
+      <h2 class="section"><span class="num">2</span>Who and what it talks to</h2>
+      <p>Four parties in the system's world:</p>
+      <ul>
+        <li><strong>The admin (you)</strong> — opens the website, signs in with Google, clicks buttons to launch
+        and review runs.</li>
+        <li><strong>A developer/operator</strong> — can skip the website and drive the worker program directly
+        from a terminal.</li>
+        <li><strong>Google</strong> — used purely as the doorman: "prove this person really owns this email
+        address." Google never sees trading data.</li>
+        <li><strong>Binance</strong> (a large crypto exchange) — the eventual source of market data and, one day,
+        the venue for orders. Today all Binance connectivity is <em>switched off by default</em>; the system ships
+        with a bundled sample of historical data so everything works completely offline.</li>
+      </ul>
+      <div class="callout ok">Notice what's <em>absent</em>: no cloud databases, no third-party analytics, no
+      payment systems. The dependency list is deliberately tiny — fewer moving parts, fewer surprises.</div>
+    </section>
+
+    <!-- 3 -->
+    <section id="s3">
+      <h2 class="section"><span class="num">3</span>The big picture</h2>
+      <p>The design has one organizing idea: <strong>the thinking is separate from the serving.</strong></p>
+      <div class="grid2">
+        <div class="card">
+          <h3 style="margin-top:0">The worker (thinking)</h3>
+          <p>All the number-crunching happens in the worker program, launched fresh for each job. Each job is
+          <em>deterministic</em>: same inputs, same settings → identical output, byte for byte, every time. Like a
+          calculator, not like a weather forecast. This makes results trustworthy and auditable.</p>
+        </div>
+        <div class="card">
+          <h3 style="margin-top:0">The server (serving)</h3>
+          <p>The server never does the math itself. It only: checks identities, accepts requests, launches worker
+          processes, watches their progress, and serves files to your browser. Keeping it dumb keeps it safe —
+          the part exposed to the network is the part with the least power.</p>
+        </div>
+      </div>
+      <p>They communicate the simplest way possible: the server starts the worker as a separate process and reads
+      its progress line by line, like a supervisor reading status notes an employee slides under the door. No
+      message queues, no microservices — boring on purpose.</p>
+    </section>
+
+    <!-- 4 -->
+    <section id="s4">
+      <h2 class="section"><span class="num">4</span>How the code is organized</h2>
+      <p>The Rust code is split into <strong>26 boxes</strong> (Rust calls them "crates"), each with one job and
+      an explicit list of which other boxes it may use. Think departments in a company with a strict org chart.
+      The main departments:</p>
+      <table>
+        <tr><th>Department</th><th>Plain-language job</th></tr>
+        <tr><td><strong>Vocabulary</strong> <span class="muted">(domain)</span></td>
+          <td>Defines the basic nouns everyone shares: what's a price bar, an instrument, a timestamp, an amount
+          of money. Everyone speaks this language so nothing gets lost in translation.</td></tr>
+        <tr><td><strong>Settings</strong> <span class="muted">(config)</span></td>
+          <td>Reads the configuration file and lets any setting be overridden without touching code.</td></tr>
+        <tr><td><strong>Reproducibility</strong> <span class="muted">(determinism)</span></td>
+          <td>Controls all randomness with a seed, so "random" is repeatable and every result can be traced to
+          exactly what produced it.</td></tr>
+        <tr><td><strong>The library</strong> <span class="muted">(storage)</span></td>
+          <td>Stores market data in a fast embedded database (LMDB) — a filing cabinet inside the program; no
+          separate database server to install or maintain.</td></tr>
+        <tr><td><strong>Measurements &amp; strategy DNA</strong> <span class="muted">(signal)</span></td>
+          <td>The indicators (standardized market measurements) and the definition of what a strategy <em>is</em>.
+          The one box both the research side and the live side share — guaranteeing a strategy behaves identically
+          in testing and in production.</td></tr>
+        <tr><td><strong>Research</strong> <span class="muted">(wfo, ensemble, ingest)</span></td>
+          <td>Downloads history, evolves thousands of candidate strategies, and assembles the best into a
+          diversified team. Includes the new formula-inventing robot.</td></tr>
+        <tr><td><strong>Quality control</strong> <span class="muted">(validation, gate)</span></td>
+          <td>The statistical luck-detectors and the formal pass/fail exams a strategy team must survive.</td></tr>
+        <tr><td><strong>The sealed product</strong> <span class="muted">(vintage, formula-pool)</span></td>
+          <td>The tamper-evident packages research produces: the strategy team ("vintage") and the evolved-formula
+          pool. Each is stamped with a cryptographic fingerprint; change one byte and the seal visibly breaks.</td></tr>
+        <tr><td><strong>Live trading</strong> <span class="muted">(runtime, venue)</span></td>
+          <td>The machinery for real-time evaluation, risk checks, and order handling. Built and tested — but the
+          orders end at a simulator, and the server is forbidden from loading this department at all.</td></tr>
+        <tr><td><strong>The border guard</strong> <span class="muted">(architecture)</span></td>
+          <td>A special box containing automated tests that verify the org chart itself — if someone wires a
+          forbidden connection between departments, the build fails. The rules are enforced by robots, not by
+          politeness.</td></tr>
+        <tr><td><strong>Front doors</strong> <span class="muted">(cli, server)</span></td>
+          <td>The worker program and the server program — the only two places where departments get wired
+          together into something runnable.</td></tr>
+      </table>
+      <p class="muted">Plus <code>web/</code> — the website's own codebase — and <code>docs/</code>, where design
+      decisions are written down.</p>
+    </section>
+
+    <!-- 5 -->
+    <section id="s5">
+      <h2 class="section"><span class="num">5</span>The website (frontend)</h2>
+      <p>What you see in the browser. Deliberately simple construction:</p>
+      <ul>
+        <li><strong>Screens:</strong> Login → then a sidebar with <em>Backtests</em> (list, launch, results with
+        charts and a trade-by-trade table), <em>Training</em> (launch and watch a strategy search live —
+        generation counter, progress grid, final verdict), <em>Evolve</em> (the formula robot: launch campaigns,
+        inspect the evolved formulas, and walk pools through the approval workflow), and <em>Market data</em>
+        (what history is on the shelves). Screens for live trading exist as greyed-out placeholders.</li>
+        <li><strong>How it updates:</strong> while a job runs, the page simply re-asks the server "how's run #42
+        doing?" every 2 seconds — like texting "you there yet?" on repeat. Unfashionable, dead reliable, and
+        plenty at this scale.</li>
+        <li><strong>What it deliberately avoids:</strong> the fancy machinery most web apps accumulate (routing
+        libraries, state-management frameworks). Fewer parts, fewer bugs.</li>
+        <li><strong>Honesty as a feature:</strong> when the server refuses to bless a formula pool for production
+        (which today it always does — the path is intentionally locked), the website shows the refusal and the
+        named reasons. It never pretends success.</li>
+      </ul>
+    </section>
+
+    <!-- 6 -->
+    <section id="s6">
+      <h2 class="section"><span class="num">6</span>The server (backend)</h2>
+      <p>The receptionist in detail. It answers a short, fixed menu of requests ("API endpoints" — think numbered
+      service-desk windows):</p>
+      <table>
+        <tr><th>Window</th><th>What you can ask</th><th>Who may ask</th></tr>
+        <tr><td>Health</td><td>"Are you alive?" (used by monitoring)</td><td>Anyone</td></tr>
+        <tr><td>Sign-in</td><td>"Log me in via Google" / "who am I?"</td><td>Anyone / signed-in</td></tr>
+        <tr><td>Runs</td><td>Start a backtest/training/evolve job; list runs; check progress; fetch results</td>
+          <td>Signed-in, allowlisted users</td></tr>
+        <tr><td>Read-only data</td><td>List sealed strategy packages; browse market-data coverage; inspect
+          evolved-formula pools</td><td>Signed-in, allowlisted users</td></tr>
+        <tr><td>Governance</td><td>Approve/reject/revoke/seal a formula pool; halt a runaway job; read the audit
+          trail</td><td>Signed-in <strong>and</strong> holding the right role (§7)</td></tr>
+      </table>
+      <p>Anything not on the menu gets a polite "no such window." The website itself is served by the same
+      program, so the whole product is one process on one machine.</p>
+    </section>
+
+    <!-- 7 -->
+    <section id="s7">
+      <h2 class="section"><span class="num">7</span>Logging in &amp; permissions</h2>
+      <p>Getting in is a three-lock door:</p>
+      <ol>
+        <li><strong>Google vouches for you.</strong> You sign in with Google; Google confirms to the server "yes,
+        this person controls this email address." The server never sees your password.</li>
+        <li><strong>The guest list.</strong> Even with a verified email, you're only admitted if that exact
+        address is on a pre-configured allowlist. Not on the list → turned away. If the list is missing entirely,
+        <em>nobody</em> gets in ("fail-closed" — when in doubt, the door stays locked).</li>
+        <li><strong>A signed wristband.</strong> Once in, you get a browser cookie cryptographically signed by the
+        server, valid 12 hours. Every later request shows the wristband; forging one without the server's secret
+        key is not feasible.</li>
+      </ol>
+      <h3>Roles: not everyone can do everything</h3>
+      <p>On top of "who can enter" sits "who can do what." Sensitive actions on the formula robot require a
+      <strong>role</strong> — Operator, Approver, or Admin — assigned in server settings, never claimable by the
+      user. The most sensitive action (blessing a formula pool for production) requires <strong>two different
+      approvers, neither of whom launched the run</strong> — the two-keys-to-launch rule. And every governance
+      action is written to a tamper-evident audit log: each entry is cryptographically chained to the previous
+      one, so deleting or editing history breaks the chain visibly.</p>
+    </section>
+
+    <!-- 8 -->
+    <section id="s8">
+      <h2 class="section"><span class="num">8</span>What happens when you click "Run"</h2>
+      <p>Follow one backtest from click to chart:</p>
+      <ol>
+        <li>You fill the form ("strategy package X, 2021–2024") and click <strong>Run</strong>.</li>
+        <li>The browser sends the request; the server checks your wristband, sanity-checks the inputs, creates a
+        folder for this run, and instantly replies with a receipt number.</li>
+        <li>A bounded worker pool picks the job up (only a couple run at once; the rest queue politely) and
+        launches the worker program as a separate process.</li>
+        <li>The worker writes one-line progress notes as it goes; the server reads them and keeps the run's status
+        file up to date. When finished, the worker writes the full report to disk.</li>
+        <li>Your browser, asking "done yet?" every 2 seconds, sees "succeeded", fetches the report once, and draws
+        the charts, metrics, and trade list.</li>
+      </ol>
+      <p>An <strong>evolve</strong> (formula robot) run flows the same way, with two differences: its product is a
+      sealed formula pool — which then enters the separate human approval lifecycle
+      (Draft → Approved → Sealed, with Reject/Revoke exits) — and it carries extra babysitting: a ~24-hour hard
+      time limit, and only one evolve campaign runs at a time so it can't hog the machine.</p>
+    </section>
+
+    <!-- 9 -->
+    <section id="s9">
+      <h2 class="section"><span class="num">9</span>Where data lives</h2>
+      <p>No big database server anywhere. Three kinds of local storage, each fitting its job:</p>
+      <table>
+        <tr><th>Store</th><th>What's in it</th><th>Analogy</th></tr>
+        <tr><td><strong>Market library</strong> (LMDB)</td>
+          <td>Years of price bars, funding rates, and metrics, indexed for very fast lookup by instrument and
+          time.</td>
+          <td>A well-organized reference library inside the building.</td></tr>
+        <tr><td><strong>Sealed packages</strong> (JSON files)</td>
+          <td>Strategy vintages and formula pools — each stamped with a fingerprint computed from its exact
+          contents. The system re-checks the fingerprint on every load and refuses anything that doesn't match.</td>
+          <td>Evidence bags with tamper-evident seals.</td></tr>
+        <tr><td><strong>Run records</strong> (plain folders)</td>
+          <td>One folder per run: parameters, live status, progress, final report.</td>
+          <td>A filing cabinet — one manila folder per job.</td></tr>
+      </table>
+    </section>
+
+    <!-- 10 -->
+    <section id="s10">
+      <h2 class="section"><span class="num">10</span>Settings &amp; secrets</h2>
+      <p>All behaviour is tuned via a settings file plus <em>environment variables</em> — named values handed to
+      a program at startup, the standard way to configure software without editing it. The important ones, in
+      spirit:</p>
+      <ul>
+        <li><strong>The random seed</strong> — the number that makes "random" repeatable.</li>
+        <li><strong>Folder locations</strong> — where the library, packages, and run records live.</li>
+        <li><strong>Network address</strong> — where the server listens. Default: <em>this machine only</em>,
+        invisible to the outside world unless you deliberately change it.</li>
+        <li><strong>Login settings</strong> — the Google sign-in credentials, the email guest list, and the
+        role lists (Operators / Approvers / Admins).</li>
+        <li><strong>Secret keys</strong> — for signing session wristbands and the audit log. Never written into
+        the code or the repository; if the audit-log key is missing, audit features refuse to run rather than run
+        unsigned.</li>
+        <li><strong>Safety dials</strong> — how many jobs may run at once, the per-job time limit.</li>
+      </ul>
+    </section>
+
+    <!-- 11 -->
+    <section id="s11">
+      <h2 class="section"><span class="num">11</span>How it's deployed</h2>
+      <p>"Deployment" = getting the software running somewhere other than the developer's laptop. The repository
+      ships a <strong>Docker</strong> recipe — a standard way to package a program with everything it needs so it
+      runs identically anywhere, like a sealed meal-kit instead of a loose recipe. The recipe builds the worker
+      program in one step and produces a slim final image, with all data kept on an attachable storage volume so
+      upgrading the software never touches the data.</p>
+      <p class="muted">There is currently no automation for pushing releases to a cloud provider — a deliberate
+      "not yet": the system is still in its research phase, running for one operator on trusted machines.</p>
+    </section>
+
+    <!-- 12 -->
+    <section id="s12">
+      <h2 class="section"><span class="num">12</span>Quality control &amp; monitoring</h2>
+      <ul>
+        <li><strong>Automated checks:</strong> every proposed code change normally runs a gauntlet — code
+        formatting, a strict "linter" (an automated nitpicker), the full test suite (~1,100 tests, including the
+        tests that police the department walls of §4/§14), and a dependency-license/vulnerability audit.</li>
+        <li><strong>Logs:</strong> the system writes structured, machine-readable logs stamped with which run,
+        which strategy package, and which instrument each message concerns — so an investigator can pull one
+        thread cleanly.</li>
+        <li><strong>Health check:</strong> a simple "are you alive?" endpoint for monitoring tools.</li>
+      </ul>
+      <div class="callout warn"><strong>Honest caveat:</strong> those automated checks were temporarily switched
+      off during an intense July 2026 development push, and turning them (and the "no unreviewed changes to the
+      main branch" rule) back on is a recorded outstanding chore. The checks themselves are unchanged and ready.</div>
+    </section>
+
+    <!-- 13 -->
+    <section id="s13">
+      <h2 class="section"><span class="num">13</span>Long-running jobs</h2>
+      <p>Training or evolve runs can take hours. The taming mechanisms, in plain terms:</p>
+      <ul>
+        <li><strong>A bounded crew:</strong> only a fixed number of jobs run simultaneously (default 2); extras
+        wait in a queue.</li>
+        <li><strong>No zombie processes:</strong> jobs are started with a dead-man's switch — if the server stops
+        or a run is aborted, its worker process is killed rather than left running forever.</li>
+        <li><strong>A curfew:</strong> each run has a hard wall-clock limit (~24h); overrun → killed and marked
+        failed.</li>
+        <li><strong>An emergency stop:</strong> an authorized Operator can halt any run from the dashboard.</li>
+        <li><strong>Terminal honesty:</strong> a failed run stays failed — no silent auto-retries that could
+        paper over a real problem.</li>
+      </ul>
+    </section>
+
+    <!-- 14 -->
+    <section id="s14">
+      <h2 class="section"><span class="num">14</span>Security walls</h2>
+      <p>Layered walls, outermost first:</p>
+      <ol>
+        <li><strong>The network wall.</strong> The server listens only on the local machine by default and every
+        meaningful request requires the signed session wristband (§7).</li>
+        <li><strong>The guest list + roles.</strong> Allowlisted emails only; destructive/governance actions
+        additionally require assigned roles; production-blessing requires two independent approvers.</li>
+        <li><strong>The big one — the internal firewall.</strong> Automated tests forbid entire departments from
+        knowing each other: the strategy-<em>inventing</em> code can never reach the <em>live-trading</em> code,
+        and the network-facing server can never load the live-trading department at all. Even a bug — or a
+        malicious change — in the server cannot place an order, because the order-placing machinery isn't in the
+        building. The wall is checked by robots on every change.</li>
+        <li><strong>Sealed artefacts.</strong> Strategy packages and formula pools are fingerprinted; anything
+        that fails verification is refused, so results can't be quietly doctored after the fact.</li>
+        <li><strong>The audit chain.</strong> Governance actions land in the tamper-evident, cryptographically
+        chained log (§7).</li>
+        <li><strong>Fail-closed defaults everywhere.</strong> Missing guest list → nobody enters. Missing audit
+        key → auditing refuses to run. Formula-pool production path → locked until its required evidence exists.
+        When configuration is incomplete, the system chooses "safe and unhelpful" over "helpful and unsafe".</li>
+        <li><strong>No real orders, full stop.</strong> The strongest guarantee is structural: the live
+        order-submission code has not been written. You cannot accidentally trade real money with software that
+        contains no way to do so.</li>
+      </ol>
+    </section>
+
+    <!-- 15 -->
+    <section id="s15">
+      <h2 class="section"><span class="num">15</span>Known weak spots (the honest list)</h2>
+      <p>Straight from the technical doc's risk register, translated. That these are written down and ranked is
+      itself a good sign — mature projects keep honest lists.</p>
+      <table>
+        <tr><th>Weak spot</th><th>Plain meaning</th><th>Severity</th></tr>
+        <tr><td>No traffic encryption built in</td>
+          <td>The server itself speaks plain HTTP. Fine while it listens only on the local machine; before facing
+          the internet it must sit behind a standard encrypting proxy.</td>
+          <td><span class="pill high">High</span></td></tr>
+        <tr><td>Automated checks temporarily off</td>
+          <td>The §12 caveat: CI and branch protection need switching back on.</td>
+          <td><span class="pill high">High</span></td></tr>
+        <tr><td>Sessions may not survive a restart</td>
+          <td>If the wristband-signing key isn't configured, the server invents a temporary one — safe, but every
+          restart logs everyone out. Should refuse to start in production without a real key.</td>
+          <td><span class="pill high">High</span></td></tr>
+        <tr><td>Data downloading is a placeholder</td>
+          <td>The real "fetch fresh data from the exchange" plumbing is stubbed; the system currently leans on its
+          bundled sample data.</td>
+          <td><span class="pill med">Medium</span></td></tr>
+        <tr><td>Formula robot's production path incomplete</td>
+          <td>The final lock on the evolve→production path stays closed until one category of required evidence is
+          produced. Deliberate ordering: lock first, key later.</td>
+          <td><span class="pill med">Medium</span></td></tr>
+        <tr><td>No automated release process</td>
+          <td>Deploying a new version is manual. Fine for one operator; would need automation before a team relies
+          on it.</td>
+          <td><span class="pill med">Medium</span></td></tr>
+        <tr><td>Progress via polling; stored data unencrypted; a database sharp-edge</td>
+          <td>Assorted small items: the 2-second "done yet?" polling would need upgrading only with many
+          simultaneous users; files on disk rely on disk-level encryption; and the embedded database has a
+          known "open it only once" rule the code carefully respects.</td>
+          <td><span class="pill low">Low</span></td></tr>
+      </table>
+    </section>
+
+    <footer class="foot">
+      <p>Beginner's companion to <code>docs/architecture/index.html</code> (the technical source of truth, with
+      diagrams and file-level evidence). Same repository snapshot: generated 2026-07-05, refreshed 2026-07-18.
+      Where this page simplifies, the technical page decides.</p>
+    </footer>
+  </main>
+</div>
+</body>
+</html>

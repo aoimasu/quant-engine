@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>quant-engine — Explained for Absolute Beginners</title>
+<style>
+  :root{
+    --bg:#0e1116; --panel:#161b22; --panel2:#1c232d; --ink:#e6edf3; --muted:#9aa7b4;
+    --line:#2a323d; --accent:#4ea1ff; --green:#3fb950; --amber:#d29922; --red:#f85149;
+    --purple:#bc8cff; --mono:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font:16px/1.7 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;}
+  .wrap{display:grid;grid-template-columns:260px 1fr;max-width:1280px;margin:0 auto;}
+  nav{position:sticky;top:0;align-self:start;height:100vh;overflow:auto;padding:24px 18px;
+    border-right:1px solid var(--line);background:var(--panel);}
+  nav h2{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin:18px 0 8px}
+  nav a{display:block;color:var(--ink);text-decoration:none;padding:4px 8px;border-radius:6px;font-size:14px}
+  nav a:hover{background:var(--panel2);color:var(--accent)}
+  main{padding:40px 48px;min-width:0}
+  h1{font-size:30px;margin:0 0 6px}
+  h2.section{font-size:23px;margin:48px 0 14px;padding-bottom:8px;border-bottom:1px solid var(--line)}
+  h3{font-size:18px;margin:28px 0 10px;color:#cdd9e5}
+  h4{font-size:15px;margin:18px 0 6px;color:var(--purple)}
+  p,li{color:#d3dbe3}
+  code{font-family:var(--mono);font-size:.88em;background:var(--panel2);padding:1px 6px;border-radius:5px;color:#e6edf3}
+  a{color:var(--accent)}
+  .lead{font-size:18px;color:var(--muted);margin:0 0 8px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px 22px;margin:16px 0}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  .callout{border-left:4px solid var(--accent);background:var(--panel2);border-radius:0 10px 10px 0;padding:12px 18px;margin:16px 0}
+  .callout.warn{border-color:var(--amber)}
+  .callout.danger{border-color:var(--red)}
+  .callout.ok{border-color:var(--green)}
+  .pill{display:inline-block;font-size:11px;font-weight:600;padding:2px 9px;border-radius:999px;letter-spacing:.02em;vertical-align:middle}
+  .done{background:rgba(63,185,80,.15);color:var(--green);border:1px solid rgba(63,185,80,.35)}
+  .wip{background:rgba(210,153,34,.15);color:var(--amber);border:1px solid rgba(210,153,34,.35)}
+  .todo{background:rgba(139,148,158,.15);color:var(--muted);border:1px solid rgba(139,148,158,.3)}
+  .gate{background:rgba(188,140,255,.15);color:var(--purple);border:1px solid rgba(188,140,255,.4)}
+  table{border-collapse:collapse;width:100%;margin:14px 0;font-size:14px}
+  th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--muted);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.05em}
+  tr:hover td{background:var(--panel)}
+  .mono{font-family:var(--mono)}
+  .muted{color:var(--muted)}
+  dl.gloss dt{font-weight:700;color:var(--accent);margin-top:14px}
+  dl.gloss dd{margin:4px 0 0 0;color:#d3dbe3}
+  .foot{color:var(--muted);font-size:13px;margin-top:48px;border-top:1px solid var(--line);padding-top:16px}
+  @media(max-width:900px){.wrap{grid-template-columns:1fr}nav{position:static;height:auto;border-right:none;border-bottom:1px solid var(--line)}main{padding:28px 20px}.grid2{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="wrap">
+<nav>
+  <strong style="font-size:15px">quant-engine</strong>
+  <div class="muted" style="font-size:12px;margin-bottom:6px">explained for beginners</div>
+  <h2>Contents</h2>
+  <a href="#what">1 · What is this thing?</a>
+  <a href="#words">2 · The words you need</a>
+  <a href="#today">3 · What it can do today</a>
+  <a href="#howworks">4 · How it works (the story)</a>
+  <a href="#robot">5 · The robot chef analogy</a>
+  <a href="#firewall">6 · Why the "no peeking" rule</a>
+  <a href="#gates">7 · The three exams (G1–G3)</a>
+  <a href="#evolve">8 · The formula-inventing robot</a>
+  <a href="#done">9 · How far along is it?</a>
+  <a href="#money">10 · "Can it make me money?"</a>
+  <h2>Status key</h2>
+  <div style="padding:0 8px">
+    <div><span class="pill done">done</span> built &amp; tested</div>
+    <div style="margin-top:6px"><span class="pill wip">partial</span> partly done</div>
+    <div style="margin-top:6px"><span class="pill todo">todo</span> not started</div>
+    <div style="margin-top:6px"><span class="pill gate">exam</span> pass/fail checkpoint</div>
+  </div>
+</nav>
+
+<main>
+  <h1>quant-engine — Explained for Absolute Beginners</h1>
+  <p class="lead">The same system described in <a href="current-state.html">current-state.html</a>, but explained
+  as if you've never heard of quant trading. No jargon without an explanation. Promise.</p>
+  <p class="muted">Written by a quant researcher for a reader with zero trading or programming background.
+  Last updated 2026-07-18. If a sentence here contradicts the technical doc, trust the technical doc.</p>
+
+  <!-- ============================================================= -->
+  <h2 class="section" id="what">1 · What is this thing?</h2>
+  <div class="card">
+    <p><strong>In one sentence:</strong> quant-engine is a software factory that <em>invents trading strategies,
+    tests them brutally on years of historical data, and — one day, after passing three strict exams — will be
+    allowed to trade real money automatically.</strong></p>
+    <p><strong>What does it trade?</strong> Cryptocurrency contracts — specifically bets on the price of Bitcoin
+    and Ethereum (more on what a "perpetual future" is below). Right now it only trades with
+    <em>pretend money</em>. Real money is deliberately impossible today — the wiring for it literally does not
+    exist yet. That is a safety feature, not a bug.</p>
+    <p><strong>Who is "trading"?</strong> Nobody, in the human sense. The whole point of "quant"
+    (short for <em>quantitative</em>) trading is that a computer follows precise mathematical rules with no
+    human emotion, no gut feelings, and no 3am panic-selling. Humans design the <em>factory</em>; the factory
+    designs and runs the <em>strategies</em>.</p>
+  </div>
+  <div class="callout ok">
+    <strong>The most important fact on this page:</strong> the system currently trades zero real dollars.
+    Every trade it has ever made happened either on historical data (a simulation of the past) or in a
+    "paper trading" simulator (a pretend account tracking live prices). There is no code path that can send a
+    real order to a real exchange. That path is planned as the final phase, locked behind an independent
+    go/no-go review.
+  </div>
+
+  <!-- ============================================================= -->
+  <h2 class="section" id="words">2 · The words you need (a tiny glossary)</h2>
+  <p>Learn these ten terms and the rest of this page reads easily.</p>
+  <dl class="gloss">
+    <dt>Strategy</dt>
+    <dd>A precise rule for when to buy and when to sell. Example of a (toy) strategy: "if the price has risen
+    for 3 days in a row, buy; sell when it drops 2%". Real strategies here are more complex, but they are the
+    same kind of thing: <em>rules</em>, written in math, that a computer can follow without judgement calls.</dd>
+
+    <dt>Perpetual future ("perp")</dt>
+    <dd>A type of crypto contract that lets you bet on Bitcoin's price going up <em>or down</em> without ever
+    owning Bitcoin. Think of it as a rolling bet with no expiry date. It's the most heavily traded instrument
+    in crypto. The system trades these on the (simulated) Binance exchange.</dd>
+
+    <dt>Backtest</dt>
+    <dd>A time machine for strategies. You take a strategy and ask: "if I had run this rule every day from 2021
+    to 2024, how much would I have made or lost?" The computer replays history and gives you the answer. A good
+    backtest includes all the annoying real-world costs — fees, funding payments, slippage — because a strategy
+    that only wins when trading is free is worthless.</dd>
+
+    <dt>Overfitting — the #1 enemy</dt>
+    <dd>The central disease of this whole field. If you try 10,000 random strategies on the same historical data,
+    a few will look brilliant <em>purely by luck</em> — like flipping 10,000 coins and being amazed that one came
+    up heads 14 times in a row. That "brilliant" strategy will then lose money in real life because its success
+    was coincidence, not insight. An enormous fraction of this codebase exists solely to fight overfitting.</dd>
+
+    <dt>Training / search</dt>
+    <dd>The process of having the computer <em>invent and refine</em> thousands of candidate strategies
+    automatically, keeping the promising ones. Like evolution: generate variations, keep the fittest, repeat.</dd>
+
+    <dt>Ensemble</dt>
+    <dd>Rather than betting everything on one strategy, the system combines a team of diverse strategies and
+    splits money between them. Same logic as a diversified portfolio: when one is having a bad month, others may
+    not be. The system computes the best team and the best split.</dd>
+
+    <dt>Vintage</dt>
+    <dd>The factory's finished, sealed product: a frozen package containing the chosen team of strategies, their
+    money-split weights, and a record of exactly how they were produced. "Sealed" means it's stamped with a
+    tamper-evident fingerprint (a cryptographic hash) — if anyone changes a single byte later, the system notices
+    and refuses to use it. Think: a sealed evidence bag, or a bottled wine vintage — hence the name.</dd>
+
+    <dt>Deterministic</dt>
+    <dd>Run the factory twice with the same inputs and the same "random" seed, and you get <em>byte-for-byte
+    identical</em> results. No hidden randomness. Why obsess over this? Because in trading, if you can't reproduce
+    a result, you can't trust it, debug it, or prove where it came from.</dd>
+
+    <dt>Paper trading</dt>
+    <dd>Trading with pretend money against real live prices. The full pipeline runs — decisions, orders, risk
+    checks — but the "exchange" is a simulator. It's the dress rehearsal before real money.</dd>
+
+    <dt>Gate</dt>
+    <dd>A formal pass/fail exam between phases of the project. The system must prove specific things (e.g. "the
+    strategy still makes money after all costs, on data it has never seen") before the project may advance.
+    There are three: G1, G2, G3 (§7).</dd>
+  </dl>
+
+  <!-- ============================================================= -->
+  <h2 class="section" id="today">3 · What it can do today</h2>
+  <p>The software ships as two programs plus a website. In beginner terms:</p>
+  <table>
+    <tr><th>Thing</th><th>What it is, plainly</th></tr>
+    <tr>
+      <td><strong>The pipeline tool</strong><br><span class="mono muted">qe-cli</span></td>
+      <td>A command-line program (you type commands, it works) with four jobs:
+        <ul style="margin:6px 0 0;padding-left:18px">
+          <li><strong>train</strong> — invent strategies, test them, pick a team, sit the G1 exam, and seal the
+            result into a vintage. This is the whole factory in one command.</li>
+          <li><strong>backtest</strong> — take a sealed vintage and replay it over any slice of history: "how
+            would this team have done in 2022?" Produces a detailed report card (returns, worst losing streak,
+            win rate, every single trade).</li>
+          <li><strong>ingest</strong> — download and organize historical market data into the local library.</li>
+          <li><strong>evolve</strong> — the newest job: a robot that invents brand-new market <em>indicators</em>
+            (measurement formulas) from scratch. Explained in §8.</li>
+        </ul>
+      </td>
+    </tr>
+    <tr>
+      <td><strong>The control room</strong><br><span class="mono muted">qe-server</span></td>
+      <td>A small web server that wraps the pipeline tool so you can drive it from a browser instead of a
+      terminal. It handles who's allowed in (you sign in with Google, and only pre-approved email addresses
+      work), starts jobs, babysits them, and stores the results.</td>
+    </tr>
+    <tr>
+      <td><strong>The website</strong><br><span class="mono muted">web/</span></td>
+      <td>The browser dashboard itself: log in, click "new backtest", watch a training run's progress live,
+      browse results with charts, and review the formula-inventing robot's output. The screens for <em>live</em>
+      trading exist but are deliberately switched off — they belong to the final phase.</td>
+    </tr>
+  </table>
+  <div class="callout">
+    <strong>Also built (but only exercised by automated tests so far):</strong> the entire "live trading loop" —
+    the machinery that would watch real-time prices, make decisions, check risk limits, and place orders. All of
+    it ends at a <em>simulator</em> instead of a real exchange, and it's guarded by a kill switch (a big red
+    button that halts everything). Roughly 1,100 automated tests check all of this works, all currently passing.
+  </div>
+
+  <!-- ============================================================= -->
+  <h2 class="section" id="howworks">4 · How it works — the story of one strategy's life</h2>
+  <p>Here is the journey from raw data to (eventual) live trading, told as a story. Each numbered step is a real
+  stage in the pipeline.</p>
+  <div class="card">
+    <p><strong>① Collect the history.</strong> Download years of Bitcoin/Ethereum price history — every hour's
+    open, high, low, close, plus the fees and funding payments that perps charge. Garbage in, garbage out, so the
+    data is cross-checked from multiple sources for errors.</p>
+    <p><strong>② &amp; ③ Clean and shelve it.</strong> Reconcile the sources, then file everything into a fast
+    local library (a lightweight embedded database — no big database server needed).</p>
+    <p><strong>④ Compute the measurements.</strong> From raw prices, compute <em>indicators</em> — standardized
+    measurements like "how fast has the price been moving?" or "how wild are the swings lately?". These are the
+    ingredients strategies are built from.</p>
+    <p><strong>⑤ Evolve strategies.</strong> The creative heart. The computer generates thousands of candidate
+    strategies, scores each with careful backtests, then breeds/mutates the best performers over many
+    generations — survival of the fittest, for trading rules. Crucially it uses a technique (called MAP-Elites)
+    that keeps a <em>diverse zoo</em> of good strategies with different personalities, rather than one champion —
+    because one champion is exactly how you end up overfit.</p>
+    <p><strong>⑥ Assemble the team.</strong> From the zoo, pick a complementary team and decide how to split
+    money between them, preferring members whose bad days don't coincide.</p>
+    <p><strong>⑦ Seal the vintage.</strong> Freeze the team + weights + full provenance into a tamper-evident
+    package. From here on, nothing about it can change silently.</p>
+    <p><strong>Exam G1.</strong> Test the sealed vintage on a chunk of history it was <em>never allowed to see</em>
+    during training — after all trading costs, with statistical corrections for "you tried thousands of things,
+    some look good by luck". Fail → back to the drawing board. Pass → eligible for the next phase.</p>
+    <p><strong>The live loop (built, paper-only).</strong> A separate program loads the sealed vintage
+    (read-only), warms itself up on recent history, switches to live price feeds, and runs the strategies in
+    real time — risk checks, position tracking, kill switch and all — with every order going to the pretend
+    exchange. <strong>Exam G2</strong> checks the live loop's decisions match the simulator's expectations
+    exactly, with zero real orders. That exam has been passed.</p>
+    <p style="margin-bottom:0"><strong>Exam G3 (future).</strong> An independent human go/no-go review, then
+    real money — starting tiny, with hard caps, ramping up in stages. Not started.</p>
+  </div>
+
+  <!-- ============================================================= -->
+  <h2 class="section" id="robot">5 · The robot chef analogy (how the pieces fit)</h2>
+  <p>The codebase is split into 26 separate building blocks ("crates" in Rust jargon — think LEGO bricks of
+  code). You don't need the list; you need the shape. Picture a restaurant company:</p>
+  <table>
+    <tr><th>Restaurant world</th><th>quant-engine world</th></tr>
+    <tr><td><strong>The test kitchen</strong> — where new recipes are invented and taste-tested on historical
+      diners' preferences.</td>
+      <td>The <em>training</em> side: data ingestion, the strategy-evolving search, the team assembler.</td></tr>
+    <tr><td><strong>The restaurant</strong> — where the finalized menu is actually cooked and served, live, under
+      health-and-safety rules.</td>
+      <td>The <em>runtime</em> side: live price feeds, real-time strategy evaluation, risk checks, order
+      handling (currently ending at the pretend exchange).</td></tr>
+    <tr><td><strong>The recipe binder</strong> — the sealed, signed-off menu handed from the test kitchen to the
+      restaurant. The restaurant can read it, never edit it.</td>
+      <td>The <em>vintage</em> — the sealed strategy package. It is the <strong>only</strong> thing that crosses
+      from training to runtime.</td></tr>
+    <tr><td><strong>The shared cookbook of basic techniques</strong> — knife skills, sauces — used identically by
+      both the test kitchen and the restaurant.</td>
+      <td>The <em>shared spine</em>: the small core of code (basic data types + the indicator/strategy
+      definitions) that both sides use, guaranteeing a strategy behaves <em>identically</em> in backtests and
+      live. If it didn't, your backtest would be a lie.</td></tr>
+    <tr><td><strong>Head office</strong> — schedules everything, hires nobody's imagination.</td>
+      <td>The command-line tool and the web control room, which are the only places allowed to touch both
+      worlds.</td></tr>
+  </table>
+
+  <!-- ============================================================= -->
+  <h2 class="section" id="firewall">6 · Why the "no peeking" rule matters more than anything</h2>
+  <p>Two iron rules are enforced by automated tests that fail the build if anyone breaks them. They sound
+  bureaucratic; they are actually the intellectual core of the project.</p>
+  <div class="grid2">
+    <div class="card">
+      <h4>Rule ① — the information firewall</h4>
+      <p>The strategy-inventing search is <strong>forbidden from seeing live or portfolio results</strong>.
+      Analogy: a teacher grading student essays must never know which student is their own child. If the search
+      could peek at how strategies do "for real", it would — subtly, automatically — start optimizing for the
+      peeked answers, and every safeguard against overfitting collapses. So the code that searches literally
+      <em>cannot import</em> the code that trades. A test checks this on every change.</p>
+    </div>
+    <div class="card">
+      <h4>Rule ② — the clean handoff</h4>
+      <p>The live-trading side is forbidden from reaching back into the training machinery, and vice versa. The
+      only bridge is the sealed vintage (plain data) plus the shared cookbook. Analogy: the pharmacy dispenses
+      exactly what's on the sealed prescription; it does not phone the lab and ask for tweaks. This guarantees
+      what was tested is <em>exactly</em> what runs.</p>
+    </div>
+  </div>
+  <p class="muted">Why so paranoid? Because the failure mode of quant trading is not dramatic crashes — it's
+  quiet self-deception: a system that looks great on paper for reasons that evaporate with real money. Every
+  firewall here is a precommitment against fooling ourselves.</p>
+
+  <!-- ============================================================= -->
+  <h2 class="section" id="gates">7 · The three exams (G1, G2, G3)</h2>
+  <table>
+    <tr><th>Exam</th><th>Question it answers</th><th>Status</th></tr>
+    <tr>
+      <td><span class="pill gate">G1</span></td>
+      <td><strong>"Is the strategy team actually good, or just lucky?"</strong> Tested on untouched holdout
+      history, after all real-world costs, with statistical penalties for the thousands of candidates tried.
+      Like a final exam with questions the student provably never saw, graded on a curve that punishes
+      lucky guessing.</td>
+      <td><span class="pill done">passed</span></td>
+    </tr>
+    <tr>
+      <td><span class="pill gate">G2</span></td>
+      <td><strong>"Does the live machinery behave exactly as the simulation predicts?"</strong> The full live
+      loop runs against real-time market data, produces would-be orders, and every one is reconciled against the
+      simulator — with nothing actually submitted. A flight simulator check-ride for the trading system.</td>
+      <td><span class="pill done">passed</span></td>
+    </tr>
+    <tr>
+      <td><span class="pill gate">G3</span></td>
+      <td><strong>"Do independent humans sign off on going live with real money?"</strong> A go/no-go review by
+      people who didn't build it, followed by a staged capital ramp: tiny amounts first, hard caps enforced in
+      code, increased only gradually.</td>
+      <td><span class="pill todo">not started</span></td>
+    </tr>
+  </table>
+
+  <!-- ============================================================= -->
+  <h2 class="section" id="evolve">8 · The formula-inventing robot (the newest addition)</h2>
+  <p>Recently the system gained a second, more radical creative tool. Until now, strategies were assembled from a
+  fixed <em>menu</em> of human-designed indicators (§4, step ④). The new <strong>evolve</strong> job removes that
+  limit: it uses a technique called genetic programming to <strong>invent entirely new indicator formulas from
+  scratch</strong> — breeding random mathematical expressions, keeping ones that seem to measure something
+  genuinely predictive, discarding the rest, over many generations.</p>
+  <div class="callout warn">
+    <p style="margin:0"><strong>Why this is powerful and dangerous.</strong> A machine that invents formulas is
+    an overfitting machine par excellence — with enough random formulas, some will "predict" the past perfectly
+    and mean nothing. So this subsystem is wrapped in more red tape than anything else in the codebase, and that
+    red tape is the feature.</p>
+  </div>
+  <p>The safeguards, in plain terms:</p>
+  <ul>
+    <li><strong>Quarantine.</strong> Evolved formulas land in a sealed "formula pool" — a separate artefact the
+    live-trading side <em>never loads</em>. Research output, not a tradeable product.</li>
+    <li><strong>Brutal statistical vetting.</strong> Each formula must survive tests designed to detect luck
+    masquerading as skill, plus practicality checks (would it survive trading costs? does it trade too
+    frantically? does it work at realistic size?). At most 16 survivors are frozen into a pool.</li>
+    <li><strong>Human governance with teeth.</strong> For a pool to ever be blessed for production use, the rules
+    require: named roles (only designated approvers can approve), <em>two different</em> approvers neither of
+    whom launched the run, and a tamper-evident audit log — every decision chained together cryptographically so
+    history can't be quietly rewritten. The server, not the user, decides whether sealing is allowed, by checking
+    a long list of hard requirements.</li>
+    <li><strong>Currently fail-closed on purpose.</strong> As of today, even a perfect pool <em>cannot</em> be
+    sealed for production, because one category of required evidence isn't produced by the pipeline yet. The
+    designers chose to arm the lock before building the key. Research and inspection work end-to-end; production
+    blessing is deliberately impossible until the evidence wiring lands.</li>
+  </ul>
+
+  <!-- ============================================================= -->
+  <h2 class="section" id="done">9 · How far along is it?</h2>
+  <p>The project runs in phases, each ending at an exam. Score so far: <strong>80 planned work items
+  completed</strong>, plus a 24-item hardening program delivered in July 2026.</p>
+  <table>
+    <tr><th>Phase</th><th>Plain-language goal</th><th>Status</th></tr>
+    <tr><td><strong>Phase 0</strong></td><td>Foundations — project skeleton, configuration, data storage,
+      logging, the reproducibility machinery.</td><td><span class="pill done">complete</span></td></tr>
+    <tr><td><strong>Phase 1</strong></td><td>The strategy factory — data in, strategies evolved, team assembled,
+      vintage sealed, G1 exam passed.</td><td><span class="pill done">complete</span></td></tr>
+    <tr><td><strong>Phase 2</strong></td><td>The live loop — real-time feeds, risk checks, kill switch, pretend
+      exchange, G2 exam passed.</td><td><span class="pill done">complete</span></td></tr>
+    <tr><td><strong>Phase "PreP3"</strong></td><td>The control room — the web dashboard for running and
+      reviewing everything from a browser.</td><td><span class="pill done">complete</span></td></tr>
+    <tr><td><strong>Hardening program</strong></td><td>20 methodology improvements recommended by an expert
+      review, plus the formula-inventing robot and its governance (§8).</td>
+      <td><span class="pill done">complete</span></td></tr>
+    <tr><td><strong>Phase 3</strong></td><td>Real money — order submission to a real exchange, accounting and
+      attribution, monitoring, on-call runbooks, the G3 human sign-off, staged capital ramp.</td>
+      <td><span class="pill todo">not started</span></td></tr>
+  </table>
+  <p>Known loose ends the team has explicitly recorded (none blocks current use): finish the evidence wiring for
+  the formula robot's production path (§8); a handful of robustness chores on the control room (e.g. if the
+  server restarts mid-job, mark the orphaned job as failed rather than "running forever"); some security
+  hardening before exposing the dashboard beyond a trusted network; and switching the repository's automated
+  checks back on (they were temporarily disabled during the July program — a known follow-up).</p>
+
+  <!-- ============================================================= -->
+  <h2 class="section" id="money">10 · "So… can it make me money?"</h2>
+  <div class="callout danger">
+    <p style="margin-top:0"><strong>Not today, by design.</strong> There is no way to connect this system to real
+    money right now — the final phase (real order submission, monitoring, human go/no-go, capped capital ramp)
+    has not been started. Anyone describing this as a working money-making machine today would be wrong.</p>
+    <p style="margin-bottom:0"><strong>What is genuinely impressive, verifiably:</strong> the discipline. Every
+    result is reproducible to the byte. The strategy search is physically firewalled from information that would
+    let it cheat. Backtests charge every realistic cost, so no strategy is ranked on profits that wouldn't
+    survive contact with reality. Statistical luck-detectors are built into the exams, not bolted on. And the
+    most dangerous new capability (the formula robot) shipped locked, with the key deliberately not yet cut.
+    In a field where the default failure is self-deception, this codebase is built like it knows that.
+    The engineering is real; the product is mid-build.</p>
+  </div>
+
+  <div class="foot">
+    Beginner's companion to <code>docs/current-state.html</code> (the technical source of truth). Derived from
+    the same repository snapshot: 2026-07-03, refreshed 2026-07-18 after the QE-430..454 program.
+    Test baseline at that snapshot: 1046 Rust tests + 75 frontend tests, all green.
+  </div>
+</main>
+</div>
+</body>
+</html>
