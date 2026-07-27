@@ -47,6 +47,11 @@ pub mod schema;
 ///   needs: holdout split, holdout regime composition, per-holdout consultation count, and steer delta).
 ///   The whole schema is defined here; downstream tickets (QE-458/QE-460) **populate** the deferred
 ///   fields under this single bump — nobody bumps the version again.
+///
+/// **QE-469 rides version 8 (no bump).** The additive [`SealEvidence::cpcv`] slot (the CPCV OOS
+/// distribution) is `#[serde(default, skip_serializing_if = "Option::is_none")]`, so a `None`-bearing
+/// vintage is byte-identical to the pre-QE-469 artefact — exactly the QE-454 additive-`Option` precedent,
+/// no `VINTAGE_FORMAT_VERSION` change, no golden drift.
 pub const VINTAGE_FORMAT_VERSION: u16 = 8;
 
 /// The persisted **seal evidence** (QE-467): the gate's own tradability + deflation outputs, carried into
@@ -58,7 +63,14 @@ pub const VINTAGE_FORMAT_VERSION: u16 = 8;
 /// the path that actually computes them: `uncensored_pbo`/`ic`/`fdr` are GP/IC-screen concerns (absent on
 /// the normal train path, exactly like `GateSnapshot::uncensored_pbo`), and `cost_stress_net_min` is the
 /// deployed ensemble's `min{1×,2×}` cost-stressed net (design §4.6a).
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+///
+/// **QE-469 (additive, no version bump).** The `cpcv` slot carries the CPCV out-of-sample **distribution**
+/// summary (median/IQR/percentile of held-out Sharpe/DSR + the fraction clearing the DSR floor) — the OOS
+/// evidence that replaces the single G1 terminal-holdout point estimate. Like the QE-454 `Option` slots it
+/// is `#[serde(default, skip_serializing_if = "Option::is_none")]`, so a vintage that does not run CPCV
+/// (`None`) serialises **byte-identically** to the pre-QE-469 artefact — no `VINTAGE_FORMAT_VERSION` bump,
+/// no golden drift. When populated it enters the hashed content (content-addressed, changes the vintage id).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct SealEvidence {
     /// Deflated Sharpe Ratio (QE-131) the DSR criterion evaluated.
     pub dsr: f64,
@@ -90,6 +102,67 @@ pub struct SealEvidence {
     /// screen ran.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fdr: Option<f64>,
+    /// The CPCV out-of-sample **distribution** summary (QE-469): the median/IQR/percentile of the held-out
+    /// Sharpe/DSR distribution and the fraction of held-out paths clearing the DSR floor — the promotion-
+    /// facing OOS evidence that replaces the single G1 terminal-holdout point estimate. `None` on a path
+    /// that does not run CPCV (byte-identical to pre-QE-469 — see the struct doc). Content-addressed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpcv: Option<CpcvSummary>,
+}
+
+/// The CPCV out-of-sample distribution summary (QE-469 — López de Prado Ch. 12.4), persisted in the sealed
+/// [`SealEvidence`] so every downstream surface **reads** — never recomputes — the OOS distribution. Built
+/// by the seal path from `qe_validation::CpcvDistribution` over the deployed ensemble's net-of-cost series.
+///
+/// Carries the per-held-out-path Sharpe and DSR vectors (content-addressed by inclusion in the hashed
+/// content) plus the reduced summary the promotion gate and the report surface consume. Every field is a
+/// finite `f64` (checked in [`VintageContent::validate`]); the seal writer rounds each to a hash-stable
+/// precision (like `weights`) so the whole block round-trips byte-identically.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct CpcvSummary {
+    /// Number of contiguous blocks `S` the series was split into.
+    pub blocks: u32,
+    /// Number of held-out paths (balanced `C(S, S/2)` partitions) the distribution was built from.
+    pub n_paths: u32,
+    /// Median held-out Sharpe.
+    pub median_sharpe: f64,
+    /// 25th-percentile held-out Sharpe (IQR lower bound).
+    pub sharpe_iqr_lo: f64,
+    /// 75th-percentile held-out Sharpe (IQR upper bound).
+    pub sharpe_iqr_hi: f64,
+    /// 5th-percentile held-out Sharpe.
+    pub sharpe_p05: f64,
+    /// 95th-percentile held-out Sharpe.
+    pub sharpe_p95: f64,
+    /// Median held-out DSR.
+    pub median_dsr: f64,
+    /// The lower (5th) percentile of held-out DSR — the figure the promotion gate decides on.
+    pub dsr_p05: f64,
+    /// Fraction of held-out paths whose DSR ≥ the floor (0.95).
+    pub frac_dsr_ge_floor: f64,
+    /// Per-held-out-path Sharpe ratios, in partition order.
+    pub path_sharpes: Vec<f64>,
+    /// Per-held-out-path Deflated Sharpe Ratios, in partition order.
+    pub path_dsrs: Vec<f64>,
+}
+
+impl CpcvSummary {
+    /// The distribution's **complete** set of scalar summary figures (name, value) — every scalar the
+    /// report surface reads and the exact set [`VintageContent::validate`] finite-checks (the per-path
+    /// Sharpe/DSR *vectors* are checked separately). `sharpe_p95` is included so no percentile is silently
+    /// dropped.
+    fn summary_fields(&self) -> [(&'static str, f64); 8] {
+        [
+            ("cpcv.median_sharpe", self.median_sharpe),
+            ("cpcv.sharpe_iqr_lo", self.sharpe_iqr_lo),
+            ("cpcv.sharpe_iqr_hi", self.sharpe_iqr_hi),
+            ("cpcv.sharpe_p05", self.sharpe_p05),
+            ("cpcv.sharpe_p95", self.sharpe_p95),
+            ("cpcv.median_dsr", self.median_dsr),
+            ("cpcv.dsr_p05", self.dsr_p05),
+            ("cpcv.frac_dsr_ge_floor", self.frac_dsr_ge_floor),
+        ]
+    }
 }
 
 /// The canonical **net-of-cost holdout return series on the DEPLOYED capacity-capped weights** (QE-438),
@@ -381,6 +454,22 @@ impl VintageContent {
         for (field, value) in evidence_fields {
             if !value.is_finite() {
                 return Err(VintageError::NonFiniteEvidence { field, value });
+            }
+        }
+        // QE-469: the CPCV distribution summary (when populated) must be finite in every figure and every
+        // per-path Sharpe/DSR — same round-trip reason (a non-finite value serialises to JSON `null`).
+        if let Some(cpcv) = &ev.cpcv {
+            let mut cpcv_fields: Vec<(&'static str, f64)> = cpcv.summary_fields().to_vec();
+            for &v in &cpcv.path_sharpes {
+                cpcv_fields.push(("cpcv.path_sharpes", v));
+            }
+            for &v in &cpcv.path_dsrs {
+                cpcv_fields.push(("cpcv.path_dsrs", v));
+            }
+            for (field, value) in cpcv_fields {
+                if !value.is_finite() {
+                    return Err(VintageError::NonFiniteEvidence { field, value });
+                }
             }
         }
         Ok(())
@@ -872,6 +961,71 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn cpcv_summary_is_part_of_the_hash_and_round_trips() {
+        // QE-469: the CPCV OOS distribution summary rides the hashed content, so populating it moves the
+        // vintage id — downstream reads it, so it must be pinned into the lineage (content-addressed).
+        let base = Vintage::seal(content()).unwrap();
+        let summary = CpcvSummary {
+            blocks: 6,
+            n_paths: 20,
+            median_sharpe: 0.12,
+            sharpe_iqr_lo: 0.08,
+            sharpe_iqr_hi: 0.16,
+            sharpe_p05: 0.03,
+            sharpe_p95: 0.20,
+            median_dsr: 0.97,
+            dsr_p05: 0.91,
+            frac_dsr_ge_floor: 0.85,
+            path_sharpes: vec![0.10, 0.12, 0.14],
+            path_dsrs: vec![0.96, 0.97, 0.98],
+        };
+        let mut withc = content();
+        withc.seal_evidence.cpcv = Some(summary.clone());
+        let sealed = Vintage::seal(withc).unwrap();
+        assert_ne!(
+            sealed.content_hash, base.content_hash,
+            "populating cpcv must change the vintage id"
+        );
+
+        // The whole block round-trips through disk verify.
+        let mut buf: Vec<u8> = Vec::new();
+        sealed.write(&mut buf).unwrap();
+        let loaded = Vintage::load(buf.as_slice()).unwrap();
+        assert_eq!(loaded.content.seal_evidence.cpcv, Some(summary));
+
+        // A non-finite CPCV figure (here in a per-path Sharpe) is rejected at seal time.
+        let mut bad = content();
+        let mut bad_summary = loaded.content.seal_evidence.cpcv.clone().unwrap();
+        bad_summary.path_sharpes[1] = f64::NAN;
+        bad.seal_evidence.cpcv = Some(bad_summary);
+        assert!(matches!(
+            Vintage::seal(bad),
+            Err(VintageError::NonFiniteEvidence {
+                field: "cpcv.path_sharpes",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn default_cpcv_is_absent_and_keeps_the_pre_qe469_bytes() {
+        // The golden-safety guarantee: an unset `cpcv` (the default) is OMITTED from the serialised content
+        // via skip_serializing_if, so a `SealEvidence`-default vintage is byte-identical to pre-QE-469 —
+        // no VINTAGE_FORMAT_VERSION bump, no golden move.
+        assert_eq!(
+            VINTAGE_FORMAT_VERSION, 8,
+            "QE-469 rides version 8 (no bump)"
+        );
+        let sealed = Vintage::seal(content()).unwrap();
+        assert!(sealed.content.seal_evidence.cpcv.is_none());
+        let json = serde_json::to_string(&sealed.content).unwrap();
+        assert!(
+            !json.contains("cpcv"),
+            "an absent cpcv must not appear in the serialised content: {json}"
+        );
     }
 
     #[test]

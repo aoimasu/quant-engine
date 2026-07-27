@@ -119,6 +119,28 @@ fn train_over_fixture_store_seals_verifiable_vintage() {
         "weights aligned to chromosomes"
     );
 
+    // QE-469: the sealed evidence carries the CPCV OOS DISTRIBUTION (not a lone terminal-holdout number).
+    // Over 6 blocks the distribution has C(6,3) = 20 held-out configurations, each with its own Sharpe/DSR,
+    // plus the reduced median/IQR/percentile summary — the promotion-facing OOS evidence.
+    let cpcv = loaded
+        .content
+        .seal_evidence
+        .cpcv
+        .as_ref()
+        .expect("the sealed vintage must carry a CPCV OOS distribution");
+    assert_eq!(cpcv.blocks, 6, "CPCV split into 6 blocks");
+    assert_eq!(cpcv.n_paths, 20, "C(6,3) = 20 held-out paths");
+    assert_eq!(cpcv.path_sharpes.len(), 20, "one Sharpe per held-out path");
+    assert_eq!(cpcv.path_dsrs.len(), 20, "one DSR per held-out path");
+    assert!(
+        (0.0..=1.0).contains(&cpcv.frac_dsr_ge_floor),
+        "the DSR-floor fraction is a probability"
+    );
+    assert!(
+        cpcv.dsr_p05 <= cpcv.median_dsr,
+        "the gate's lower DSR percentile is ≤ the median (a real distribution, not a point)"
+    );
+
     // Catalogue-schema alignment: every sealed chromosome is valid against the SAME schema the QE-251
     // backtest job assembles against (`CatalogueConfig::default()`).
     let schema = catalogue_schema();
@@ -167,8 +189,18 @@ fn train_over_fixture_store_seals_verifiable_vintage() {
     // The gate ran and recorded a verdict (a 120-bar fixture is not expected to *pass* strict G1).
     let _ = gate;
 
-    // The result sidecar records the full G1 decision (6 criteria, incl. the QE-437 PBO gate) for QE-261.
-    assert_eq!(outcome.result.g1.criteria.len(), 6);
+    // The result sidecar records the full G1 decision (6 point-estimate criteria incl. the QE-437 PBO gate,
+    // plus the QE-469 CPCV OOS-distribution criterion) for QE-261.
+    assert_eq!(outcome.result.g1.criteria.len(), 7);
+    assert!(
+        outcome
+            .result
+            .g1
+            .criteria
+            .iter()
+            .any(|c| c.name == "cpcv_oos_distribution_clears_floor"),
+        "the CPCV OOS-distribution gate must be a recorded G1 criterion"
+    );
     assert_eq!(outcome.result.vintage_id, outcome.vintage_id);
 
     // QE-414: on the real fixture archive the DSR trial variance is estimated from the FULL cell
@@ -730,5 +762,94 @@ fn plain_train_records_no_frozen_holdout_lineage() {
     assert!(
         o.result.gate_taker_fee_bps.is_none(),
         "no gate-fee handoff on a plain train result"
+    );
+}
+
+/// QE-469 (B1): the CPCV OOS distribution is wired into the **live** promotion verdict and **fails
+/// closed** — not a tested-but-dead primitive. Proven on the real train path:
+///  (wiring) promotion == (all point-estimate criteria pass) AND (the CPCV gate passes) — the CPCV
+///    criterion genuinely gates `g1.promoted`, so any CPCV failure (incl. a lower-tail-fails distribution)
+///    blocks promotion even when the single terminal-holdout point estimate would have passed;
+///  (fail-closed) an UNDER-POWERED series (train window too short for `S` purged CPCV blocks ⇒ absent
+///    distribution) is REJECTED (`promoted == false`, cpcv criterion failed, `seal_evidence.cpcv == None`)
+///    rather than sealed-and-promoted by default.
+#[test]
+fn cpcv_gate_is_wired_into_the_live_promotion_verdict_and_fails_closed() {
+    let cpcv_criterion = |d: &qe_gate::G1Decision| {
+        d.criteria
+            .iter()
+            .find(|c| c.name == "cpcv_oos_distribution_clears_floor")
+            .cloned()
+            .expect("the CPCV OOS-distribution criterion must be present on the live path")
+    };
+
+    // ---- (1) Powered fixture run: the CPCV gate is a live conjunct of the promotion verdict. ----------
+    let tmp = tempfile::tempdir().unwrap();
+    let store_path = copy_store_to(tmp.path());
+    let vintage_root = tmp.path().join("artifacts/vintages");
+    let outcome = run_train_job(&params(store_path, vintage_root.clone(), 42), &mut |_| {})
+        .expect("powered train job runs");
+    let g1 = &outcome.result.g1;
+    let cpcv = cpcv_criterion(g1);
+
+    // The powered fixture yields a real held-out distribution (Some, 20 paths) — so this is NOT an
+    // under-power case; the gate decides on the distribution's lower percentile.
+    let loaded = VintageRepository::new(&vintage_root)
+        .load(&outcome.vintage_id)
+        .expect("sealed vintage loads");
+    let summary = loaded.content.seal_evidence.cpcv.as_ref();
+    assert!(
+        summary.is_some(),
+        "the ~87-bar train window is powered ⇒ a CPCV distribution is present"
+    );
+    assert_eq!(summary.unwrap().n_paths, 20);
+
+    // THE WIRING INVARIANT: promotion is exactly (all point-estimate criteria pass) AND (CPCV gate passes).
+    // This proves the CPCV gate genuinely gates the live verdict (not dead code): flipping the CPCV
+    // criterion flips the verdict whenever the point-estimate criteria pass.
+    let point_estimate_pass = g1
+        .criteria
+        .iter()
+        .filter(|c| c.name != "cpcv_oos_distribution_clears_floor")
+        .all(|c| c.passed);
+    assert_eq!(
+        g1.promoted,
+        point_estimate_pass && cpcv.passed,
+        "promotion must be the conjunction of the point-estimate criteria and the CPCV gate"
+    );
+    // Corollary (fail-closed direction): a failed CPCV criterion forbids promotion outright.
+    if !cpcv.passed {
+        assert!(
+            !g1.promoted,
+            "a failed CPCV distribution gate must block promotion on the live path"
+        );
+    }
+
+    // ---- (2) UNDER-POWERED run: a tiny train window ⇒ absent CPCV distribution ⇒ REJECTED (fail-closed).
+    // A large holdout leaves a train window shorter than `DEFAULT_CPCV_BLOCKS` net-of-cost returns, so
+    // `CpcvDistribution::build` returns `Err` ⇒ the distribution is absent. The verdict must flip to
+    // rejected, never default-accept.
+    let tmp2 = tempfile::tempdir().unwrap();
+    let store2 = copy_store_to(tmp2.path());
+    let vroot2 = tmp2.path().join("artifacts/vintages");
+    let mut under = params(store2, vroot2.clone(), 42);
+    under.holdout = 115; // leaves only a handful of train bars ⇒ < 6 CPCV blocks
+    let outcome2 = run_train_job(&under, &mut |_| {}).expect("under-powered train job still runs");
+    let g1u = &outcome2.result.g1;
+    let cpcv_u = cpcv_criterion(g1u);
+    let loaded2 = VintageRepository::new(&vroot2)
+        .load(&outcome2.vintage_id)
+        .expect("sealed vintage loads");
+    assert!(
+        loaded2.content.seal_evidence.cpcv.is_none(),
+        "an under-powered series must have NO CPCV distribution (absent, not fabricated)"
+    );
+    assert!(
+        !cpcv_u.passed,
+        "the CPCV gate must FAIL on an under-powered/absent distribution (fail-closed)"
+    );
+    assert!(
+        !g1u.promoted,
+        "an under-powered CPCV must REJECT (not seal-and-promote by default) — AC #4 fail-closed"
     );
 }

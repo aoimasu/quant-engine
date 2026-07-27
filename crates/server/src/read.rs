@@ -320,7 +320,7 @@ fn build_detail_body(
         format_version: content.format_version,
         data_provenance: content.provenance.data_provenance,
         composition,
-        seal_evidence: content.seal_evidence,
+        seal_evidence: content.seal_evidence.clone(),
         holdout_series_handle,
         holdout_series_len: content.holdout_series.returns.len(),
         holdout_split: content.provenance.holdout_split.clone(),

@@ -163,6 +163,40 @@ mod tests {
         assert!(folds[1].test.contains(&24));
     }
 
+    /// QE-469 cross-crate REUSE proof: the CPCV path generator in `qe-validation` (which cannot import
+    /// `PurgedKFold` — that would be a dependency cycle) applies the **exact same** purge+embargo
+    /// arithmetic as `PurgedKFold::folds`. With `S = 2` blocks CPCV holds out one block per path, so its
+    /// two single-block held-out configurations must reproduce, block-for-block, `PurgedKFold(2,…)`'s test
+    /// ranges AND purged/embargoed train index sets. This pins the mirror to the original so the CPCV
+    /// geometry can never silently diverge from the purge/embargo arithmetic QE-469 forbids changing.
+    #[test]
+    fn validation_cpcv_purge_matches_purged_kfold() {
+        let lookback = 5;
+        let label_horizon = 2;
+        let embargo = lookback;
+        let n_obs = 200;
+
+        let kfold = PurgedKFold::new(2, lookback, label_horizon, embargo).folds(n_obs);
+        let cpcv = qe_validation::cpcv_paths(n_obs, 2, lookback, label_horizon, embargo).unwrap();
+        assert_eq!(
+            cpcv.len(),
+            kfold.len(),
+            "S=2 ⇒ two single-block held-out paths"
+        );
+
+        for (fold, path) in kfold.iter().zip(cpcv.iter()) {
+            assert_eq!(path.test.len(), 1, "S/2 = 1 held-out block at S=2");
+            assert_eq!(
+                path.test[0], fold.test,
+                "CPCV held-out block must equal the PurgedKFold test block"
+            );
+            assert_eq!(
+                path.train, fold.train,
+                "CPCV purged+embargoed train set must equal PurgedKFold's exactly"
+            );
+        }
+    }
+
     #[test]
     fn fewer_bars_than_folds_skips_empty_blocks() {
         let cv = PurgedKFold::new(10, 1, 0, 1);
