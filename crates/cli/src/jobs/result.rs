@@ -75,14 +75,23 @@ pub struct Costs {
     pub slippage_model: String,
 }
 
-/// The six headline metrics (§8.1 `metrics`).
+/// The headline metrics (§8.1 `metrics`), made **honest** by QE-468: the headline `sharpe`/`sortino` are
+/// now computed on **daily**-aggregated net returns (not per-bar), the Sharpe is Lo (2002)
+/// autocorrelation-adjusted, and every figure is reported beside its PSR plus the persisted deflation
+/// evidence (DSR/PBO/`N`) so a reader sees `SR (daily, Lo-adj) · PSR · DSR · PBO · N` rather than a bare,
+/// `√ppy`-inflated, un-deflated number. The six original keys keep their names (contract-stable); the
+/// added fields are the honesty surface.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Metrics {
     /// Compound annual growth rate (fraction).
     pub cagr: f64,
-    /// Annualised Sharpe ratio.
+    /// **Headline** annualised Sharpe: computed on the **daily**-aggregated net-return series and
+    /// annualised by the **Lo (2002)** autocorrelation-adjusted factor (`√365 / √(1 + 2·Σ(1−k/q)·ρ_k)`),
+    /// not the naïve per-bar `√ppy`. Labelled by [`sharpe_clock`](Self::sharpe_clock).
     pub sharpe: f64,
-    /// Annualised Sortino ratio.
+    /// **Headline** annualised Sortino: computed on the same daily-aggregated series, annualised by
+    /// `√365` (Lo's correction is Sharpe-specific; the downside-deviation Sortino keeps the plain daily
+    /// annualisation).
     pub sortino: f64,
     /// Maximum drawdown (`≤ 0`).
     pub max_dd: f64,
@@ -90,6 +99,23 @@ pub struct Metrics {
     pub win_rate: f64,
     /// Gross profit factor (see `metrics::profit_factor`).
     pub profit_factor: f64,
+    /// The clock + adjustment label for the headline Sharpe (e.g. `"daily, Lo-adj"`) so a per-bar and a
+    /// daily figure can never be silently compared (QE-468, López de Prado "Third Law").
+    pub sharpe_clock: String,
+    /// **Diagnostic only:** the legacy per-bar Sharpe annualised by the naïve `√ppy` — retained beside
+    /// the honest headline so the inflation it carried is visible, never the headline (QE-468).
+    pub sharpe_per_bar: f64,
+    /// **Probabilistic Sharpe Ratio** `P[true SR > 0]` on the daily-aggregated series
+    /// (`probabilistic_sharpe_ratio`, skew/kurtosis-aware) — the book's mandated companion to SR (QE-468).
+    pub psr: f64,
+    /// **Deflated Sharpe Ratio** — read verbatim from the sealed vintage's persisted `SealEvidence`
+    /// (QE-467); **not recomputed** on the report path.
+    pub dsr: f64,
+    /// **Probability of Backtest Overfitting** — read verbatim from the sealed vintage's `SealEvidence`.
+    pub pbo: f64,
+    /// **Trial count `N`** the DSR deflated against — read verbatim from the sealed vintage's
+    /// `SealEvidence` (the "Third Law": report every backtest with its trial count).
+    pub n_trials: u64,
 }
 
 /// One heatmap row: a year and its twelve monthly returns (§8.1 `monthly_returns`).
@@ -150,11 +176,17 @@ mod tests {
             },
             metrics: Metrics {
                 cagr: 0.412,
-                sharpe: 2.14,
-                sortino: 3.08,
+                sharpe: 1.62,
+                sortino: 2.30,
                 max_dd: -0.083,
                 win_rate: 0.582,
                 profit_factor: 1.94,
+                sharpe_clock: "daily, Lo-adj".into(),
+                sharpe_per_bar: 2.14,
+                psr: 0.87,
+                dsr: 0.91,
+                pbo: 0.12,
+                n_trials: 7680,
             },
             equity_curve: vec![1.0, 1.1],
             drawdown: vec![0.0, 0.0],
@@ -192,7 +224,7 @@ mod tests {
         ] {
             assert!(v.get(k).is_some(), "missing top-level key `{k}`");
         }
-        // metrics keys
+        // metrics keys — the six original headline keys plus the QE-468 honesty surface.
         for k in [
             "cagr",
             "sharpe",
@@ -200,10 +232,19 @@ mod tests {
             "max_dd",
             "win_rate",
             "profit_factor",
+            "sharpe_clock",
+            "sharpe_per_bar",
+            "psr",
+            "dsr",
+            "pbo",
+            "n_trials",
         ] {
             assert!(v["metrics"].get(k).is_some(), "missing metrics.`{k}`");
         }
         assert!(v["metrics"]["profit_factor"].is_number());
+        // The headline Sharpe is labelled with its clock + adjustment (never a bare number).
+        assert_eq!(v["metrics"]["sharpe_clock"], "daily, Lo-adj");
+        assert!(v["metrics"]["n_trials"].is_number());
         // window / universe / costs
         assert_eq!(v["window"]["resolution"], "1h");
         assert_eq!(v["universe"]["count"], 1);

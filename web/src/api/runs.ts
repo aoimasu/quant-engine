@@ -334,11 +334,26 @@ export interface BacktestResult {
   costs: { taker_fee_bps: number; slippage_model: string };
   metrics: {
     cagr: number;
+    /** Headline Sharpe: daily-aggregated + Lo (2002) autocorrelation-adjusted (QE-468). Labelled by
+     * `sharpe_clock` — never a bare, `√ppy`-inflated per-bar number. */
     sharpe: number;
+    /** Headline Sortino: daily-aggregated, `√365`-annualised (QE-468). */
     sortino: number;
     max_dd: number;
     win_rate: number;
     profit_factor: number;
+    /** Clock + adjustment label for the headline Sharpe (e.g. `"daily, Lo-adj"`). */
+    sharpe_clock: string;
+    /** Diagnostic legacy per-bar Sharpe (naïve `√ppy`) — shown beside the headline, never as it. */
+    sharpe_per_bar: number;
+    /** Probabilistic Sharpe Ratio `P[true SR > 0]` on the daily series. */
+    psr: number;
+    /** Deflated Sharpe Ratio — read verbatim from the sealed vintage's persisted evidence (QE-467). */
+    dsr: number;
+    /** Probability of Backtest Overfitting — persisted seal evidence (QE-467). */
+    pbo: number;
+    /** Trial count `N` the DSR deflated against — persisted seal evidence (QE-467). */
+    n_trials: number;
   };
   equity_curve: number[];
   drawdown: number[];

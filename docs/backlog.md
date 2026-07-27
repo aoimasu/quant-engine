@@ -374,7 +374,7 @@ _All tickets delivered (QE-456–QE-467) — see [`reviewed/`](mds/reviewed/)._
 
 | Ticket | Title | Depends on | Status |
 |--------|-------|------------|:------:|
-| [QE-468](./mds/tickets/QE-468.md) | Report-surface Sharpe honesty — daily aggregation + Lo autocorrelation haircut + PSR + persisted DSR/PBO/N on the human report (fixes the `√ppy`-inflated headline; **reporting only, not selection**) | QE-439, QE-467 | Todo |
+| [QE-468](./mds/tickets/QE-468.md) | Report-surface Sharpe honesty — daily aggregation + Lo autocorrelation haircut + PSR + persisted DSR/PBO/N on the human report | QE-439, QE-467 | ✅ Delivered — [`reviewed/qe-468.md`](./mds/reviewed/qe-468.md) |
 | [QE-469](./mds/tickets/QE-469.md) | CPCV-distributed OOS evidence — replace the single G1 terminal-holdout point estimate with a distribution of held-out Sharpe/DSR, reusing CSCV (`pbo.rs`) + `PurgedKFold` (`cv.rs`) | QE-113, QE-439, QE-467 | Todo |
 | [QE-470](./mds/tickets/QE-470.md) | **SPIKE** — does an activity clock (dollar/volume bars) earn its integration cost? Timeboxed investigation → written adopt/defer/drop recommendation; **does not implement** | (sequenced after QE-468, QE-469) | Spike |
 

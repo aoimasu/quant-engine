@@ -296,6 +296,88 @@ fn reporting_prices_impact_lowers_returns_vs_zero_impact() {
     );
 }
 
+/// QE-468: the honest report surface. The headline Sharpe is labelled with its clock+adjustment
+/// (`"daily, Lo-adj"`), PSR rides beside it in `[0,1]`, and the persisted DSR/PBO/N are surfaced verbatim
+/// from the sealed vintage's `SealEvidence` — read by handle, never recomputed. Non-vacuous: a vintage
+/// sealed with non-default evidence must reproduce those exact figures on the report.
+#[test]
+fn report_surfaces_labelled_sharpe_psr_and_persisted_seal_evidence() {
+    use qe_determinism::Lineage;
+    use qe_risk::{CalibrationProfile, Fraction, PortfolioSizer, ShockConfig, SlippageCalibration};
+    use qe_vintage::{
+        HoldoutReturnSeries, ResearchProvenance, SealEvidence, Vintage, VintageContent,
+        VintageRepository, VINTAGE_FORMAT_VERSION,
+    };
+
+    let tmp = tempfile::tempdir().unwrap();
+    let store_path = copy_store_to(tmp.path());
+
+    // Seal a vintage carrying DISTINCTIVE, non-default persisted evidence.
+    let evidence = SealEvidence {
+        dsr: 0.83,
+        pbo: 0.14,
+        spa_pvalue: 0.03,
+        n_trials: 4096,
+        realised_turnover: 0.5,
+        capacity_usd: 2_000_000.0,
+        ..SealEvidence::default()
+    };
+    let content = VintageContent {
+        format_version: VINTAGE_FORMAT_VERSION,
+        vintage_id: "evidence_vintage".to_owned(),
+        chromosomes: vec![fixture_genome()],
+        weights: vec![1.0],
+        calibration: CalibrationProfile::new(Fraction::new(Decimal::new(1, 1)).unwrap()),
+        slippage: SlippageCalibration::default(),
+        sizer: PortfolioSizer::default(),
+        shocks: ShockConfig::default(),
+        worst_case_loss: Some(0.1),
+        catalogue: qe_signal::CatalogueIdentity::current(),
+        lineage: Lineage::new(
+            "fixture-config-hash",
+            "fixture-snapshot",
+            "fixture-commit",
+            vec![42],
+        ),
+        seal_evidence: evidence,
+        holdout_series: HoldoutReturnSeries::default(),
+        provenance: ResearchProvenance::default(),
+    };
+    let vintage_dir = tmp.path().join("vintages");
+    VintageRepository::new(&vintage_dir)
+        .write(&Vintage::seal(content).unwrap())
+        .unwrap();
+
+    let mut params = fixture_params(store_path);
+    params.vintage_root = vintage_dir;
+    params.vintage_id = "evidence_vintage".to_owned();
+
+    let doc = run_backtest(&params, &mut |_, _, _| {}).unwrap();
+    let m = &doc.metrics;
+
+    // The headline Sharpe is labelled with its clock + adjustment.
+    assert_eq!(m.sharpe_clock, "daily, Lo-adj");
+    // PSR is a probability in [0,1] on the daily-aggregated series.
+    assert!(
+        (0.0..=1.0).contains(&m.psr),
+        "PSR must be a probability: {}",
+        m.psr
+    );
+    // The per-bar diagnostic is present and finite (retained beside, never the headline).
+    assert!(m.sharpe_per_bar.is_finite());
+    assert!(m.sharpe.is_finite());
+    // Persisted DSR/PBO/N are surfaced VERBATIM from the sealed evidence (read by handle, no recompute).
+    assert_eq!(
+        m.dsr, 0.83,
+        "DSR must be the persisted seal-evidence figure"
+    );
+    assert_eq!(
+        m.pbo, 0.14,
+        "PBO must be the persisted seal-evidence figure"
+    );
+    assert_eq!(m.n_trials, 4096, "N must be the persisted trial count");
+}
+
 /// Regenerate the committed fixtures + golden file. Ignored by default; run explicitly, eyeball, commit:
 /// `cargo test -p qe-cli --test backtest_job regenerate_fixtures -- --ignored --exact`.
 #[test]
