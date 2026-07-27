@@ -133,17 +133,25 @@ finiteness-checked in `VintageContent::validate` (same round-trip guard as the o
 The single terminal-holdout figure (`holdout_sharpe` in the sidecar, `holdout_series` in the seal) is
 **retained**; CPCV is added **alongside** it as the promotion-facing OOS evidence.
 
-## 6. Wiring the real seal (`train.rs`)
+## 6. Wiring the live promotion verdict (`train.rs`) — the fail-closed gate
 
-At seal time compute the CPCV distribution over the deployed ensemble's `in_sample_returns` (its combined
-net-of-cost train series), split into `DEFAULT_CPCV_BLOCKS = 6` blocks with `lookback = schema.max_lookback()`,
-`label_horizon = DEFAULT_LABEL_HORIZON = 1`, `embargo = lookback`, `trial_variance` from the existing
-`variance_returns` cell-champion population, `n_trials`, floor `0.95`. Under-power (series too short for 6
-purged blocks) yields an empty/degenerate distribution ⇒ `CpcvGate` rejects (fail-closed), and the summary
-is still recorded with `n_paths` reflecting reality. All figures rounded via the existing `hash_stable`
-so the seal round-trips byte-identically and two same-seed runs are byte-identical (train_job determinism
-test). PBO (`robustness.pbo`) is **unchanged** — CPCV is the OOS distribution *alongside* PBO, not a
-replacement.
+Immediately after `evaluate_g1`, compute the CPCV distribution over the deployed ensemble's
+`in_sample_returns` (its combined net-of-cost train series), split into `DEFAULT_CPCV_BLOCKS = 6` blocks
+with `lookback = schema.max_lookback()`, `label_horizon = DEFAULT_LABEL_HORIZON = 1`, `embargo = lookback`,
+`trial_variance` from the existing `variance_returns` cell-champion population, `n_trials`, floor `0.95` —
+so each held-out path deflates against the **same basis the G1 DSR used**.
+
+**The CPCV gate decides (AC #4, B1).** The distribution is a **real** promotion criterion, not just
+recorded evidence: an auditable `CriterionResult` `"cpcv_oos_distribution_clears_floor"` (value = the lower
+`dsr_percentile` of held-out DSR, threshold = `0.95`) is appended to `g1.criteria`, and the verdict is
+conjoined — `g1.promoted = g1.promoted && CpcvGate::default().passes(&dist)`. This keeps PBO primary and
+the point-estimate criteria intact while making CPCV an additional hard conjunct. **Fail-closed on
+under-power:** `CpcvDistribution::build → Err` (series too short for 6 purged blocks) or
+`n_paths < min_paths` makes `cpcv_gate_pass == false`, which **flips the verdict to rejected** and records a
+failed criterion — never default-accept. The same `dist` is mapped to the sealed `CpcvSummary`
+(`cpcv = None` exactly when under-powered), all figures rounded via `hash_stable` so the seal round-trips
+byte-identically and two same-seed runs are byte-identical (train_job determinism test). PBO
+(`robustness.pbo`) is **unchanged** — CPCV is the OOS distribution *alongside* PBO, not a replacement.
 
 ## 7. Test plan (TDD)
 
@@ -172,8 +180,14 @@ replacement.
   equals `PurgedKFold::folds` train-exclusion on a shared `(lookback, label_horizon, embargo, n_obs)`.
 
 `crates/cli/tests/train_job.rs`:
-- extend the existing same-seed determinism test to assert the sealed `cpcv` summary is populated and
-  byte-identical across two runs; assert the un-steered golden path still seals deterministically.
+- the seal test asserts the sealed vintage carries a 20-path CPCV distribution (`C(6,3)`) with
+  `dsr_p05 ≤ median_dsr` and a recorded `"cpcv_oos_distribution_clears_floor"` criterion (7 criteria total);
+  the same-seed determinism test proves the populated `cpcv` seals byte-identically.
+- **`cpcv_gate_is_wired_into_the_live_promotion_verdict_and_fails_closed` (B1)** — the LIVE promotion path:
+  (wiring) `g1.promoted == (all point-estimate criteria pass) && (CPCV gate passes)`, so any CPCV failure
+  blocks promotion even when the terminal-holdout point estimate would pass; (fail-closed) an under-powered
+  run (`holdout = 115` ⇒ tiny train window ⇒ absent distribution) yields `seal_evidence.cpcv == None`, a
+  failed CPCV criterion, and `promoted == false` — rejected, not sealed-and-promoted by default.
 
 ## 8. Risks / rollback
 

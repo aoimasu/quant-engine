@@ -147,14 +147,17 @@ pub struct CpcvSummary {
 }
 
 impl CpcvSummary {
-    /// The distribution's scalar summary figures (name, value) — the finite-check set
-    /// [`VintageContent::validate`] iterates, and the fields the report surface reads.
-    fn summary_fields(&self) -> [(&'static str, f64); 7] {
+    /// The distribution's **complete** set of scalar summary figures (name, value) — every scalar the
+    /// report surface reads and the exact set [`VintageContent::validate`] finite-checks (the per-path
+    /// Sharpe/DSR *vectors* are checked separately). `sharpe_p95` is included so no percentile is silently
+    /// dropped.
+    fn summary_fields(&self) -> [(&'static str, f64); 8] {
         [
             ("cpcv.median_sharpe", self.median_sharpe),
             ("cpcv.sharpe_iqr_lo", self.sharpe_iqr_lo),
             ("cpcv.sharpe_iqr_hi", self.sharpe_iqr_hi),
             ("cpcv.sharpe_p05", self.sharpe_p05),
+            ("cpcv.sharpe_p95", self.sharpe_p95),
             ("cpcv.median_dsr", self.median_dsr),
             ("cpcv.dsr_p05", self.dsr_p05),
             ("cpcv.frac_dsr_ge_floor", self.frac_dsr_ge_floor),
@@ -457,7 +460,6 @@ impl VintageContent {
         // per-path Sharpe/DSR — same round-trip reason (a non-finite value serialises to JSON `null`).
         if let Some(cpcv) = &ev.cpcv {
             let mut cpcv_fields: Vec<(&'static str, f64)> = cpcv.summary_fields().to_vec();
-            cpcv_fields.push(("cpcv.sharpe_p95", cpcv.sharpe_p95));
             for &v in &cpcv.path_sharpes {
                 cpcv_fields.push(("cpcv.path_sharpes", v));
             }

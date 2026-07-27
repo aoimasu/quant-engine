@@ -24,7 +24,7 @@ use qe_ensemble::{
     cap_weights, capacity, default_synthetic_shocks, weighted_combined, worst_case_loss,
     CapacityModel, SeedWeighting, StrategyProfile,
 };
-use qe_gate::{evaluate_g1, split_with_embargo, G1Criteria, G1Decision};
+use qe_gate::{evaluate_g1, split_with_embargo, CriterionResult, G1Criteria, G1Decision};
 use qe_risk::{
     calibrate_threshold, calibrate_thresholds, default_calibration_margin, quantize_calibration,
     CalibrationProfile, PortfolioSizer, DEFAULT_FAST_QUANTILE, DEFAULT_FAST_WINDOW,
@@ -850,12 +850,51 @@ pub fn run_train_job(
 
     let in_sample_sharpe = sharpe_ratio(&in_sample_returns);
     let holdout_sharpe = sharpe_ratio(&holdout_returns);
-    let g1 = evaluate_g1(
+    let mut g1 = evaluate_g1(
         in_sample_sharpe,
         &holdout_returns,
         &robustness,
         &G1Criteria::with_defaults(),
     );
+
+    // ---- QE-469: CPCV out-of-sample DISTRIBUTION as a hard, FAIL-CLOSED promotion criterion ----------
+    // Replace the single G1 terminal-holdout point estimate with a DISTRIBUTION of held-out Sharpe/DSR:
+    // split the deployed ensemble's net-of-cost train series into `DEFAULT_CPCV_BLOCKS` contiguous blocks
+    // and, over every balanced `C(S,S/2)` partition, hold out `S/2` blocks under the SAME purge+embargo as
+    // `PurgedKFold` (`qe_validation::cpcv`, reusing `pbo.rs`'s enumeration + the PurgedKFold arithmetic).
+    // Each held-out path's DSR deflates against the SAME basis (`robustness.trial_variance` / `n_trials`)
+    // the G1 DSR uses, so the distribution is directly comparable to the point estimate it surrounds.
+    //
+    // AC #4 — the CPCV distribution is a REAL promotion criterion (not just recorded evidence): promotion
+    // is conjoined with `CpcvGate::passes` (the LOWER `dsr_percentile` of held-out DSR ≥ floor). An
+    // under-powered / degenerate config — `build → Err` (series too short for `S` purged blocks) or
+    // `n_paths < min_paths` — makes `cpcv_gate_pass == false` and **flips the verdict to rejected**
+    // (fail-closed), never default-accept. PBO stays primary and untouched; CPCV is additive.
+    let cpcv_dist = qe_validation::CpcvDistribution::build(
+        &in_sample_returns,
+        DEFAULT_CPCV_BLOCKS,
+        schema.max_lookback(),
+        DEFAULT_LABEL_HORIZON,
+        schema.max_lookback(), // embargo = lookback (PurgedKFold documented default)
+        robustness.trial_variance,
+        n_trials,
+        qe_validation::DEFAULT_DSR_FLOOR,
+    )
+    .ok();
+    let cpcv_gate = qe_validation::CpcvGate::default();
+    let cpcv_gate_pass = cpcv_dist.as_ref().is_some_and(|d| cpcv_gate.passes(d));
+    // Record the CPCV verdict as an auditable G1 criterion (value = the lower percentile of held-out DSR the
+    // gate decided on; `0.0` when under-powered so an absent distribution reads as a clear failure).
+    g1.criteria.push(CriterionResult {
+        name: "cpcv_oos_distribution_clears_floor".to_string(),
+        passed: cpcv_gate_pass,
+        value: cpcv_dist.as_ref().map_or(0.0, |d| d.dsr_p05),
+        threshold: cpcv_gate.dsr_floor,
+    });
+    // Conjoin: promote only if already promoted (all point-estimate criteria + PBO passed) AND the CPCV
+    // distribution clears the floor. Fail-closed on under-power (`cpcv_gate_pass == false`).
+    g1.promoted = g1.promoted && cpcv_gate_pass;
+
     emit(ProgressLine::Gate {
         pct: 85,
         stage: "gate".to_owned(),
@@ -924,28 +963,13 @@ pub fn run_train_job(
     let net_2x: f64 = combine(&chromosomes, &weights, holdout_bars, &cfg_2x)
         .iter()
         .sum();
-    // ---- QE-469: CPCV out-of-sample DISTRIBUTION (replaces the single G1 terminal-holdout point) ------
-    // Split the deployed ensemble's net-of-cost train series into `DEFAULT_CPCV_BLOCKS` contiguous blocks
-    // and, over every balanced `C(S,S/2)` partition, hold out `S/2` blocks under the SAME purge+embargo as
-    // `PurgedKFold` (`qe_validation::cpcv`, which reuses `pbo.rs`'s enumeration + the PurgedKFold
-    // arithmetic). Each held-out path's DSR deflates against the SAME basis (`robustness.trial_variance` /
-    // `n_trials`) the G1 DSR used, so the distribution is directly comparable to the point estimate it
-    // surrounds. An under-powered series (too short for `S` purged blocks) yields `Err` ⇒ absent CPCV
-    // evidence ⇒ downstream fail-closed. Rounded `hash_stable` so the sealed block round-trips
-    // byte-identically and two same-seed runs seal byte-identically (QE-006). PBO is untouched — CPCV is
-    // the OOS distribution *alongside* PBO, not a replacement.
-    let cpcv = qe_validation::CpcvDistribution::build(
-        &in_sample_returns,
-        DEFAULT_CPCV_BLOCKS,
-        schema.max_lookback(),
-        DEFAULT_LABEL_HORIZON,
-        schema.max_lookback(), // embargo = lookback (PurgedKFold documented default)
-        robustness.trial_variance,
-        n_trials,
-        qe_validation::DEFAULT_DSR_FLOOR,
-    )
-    .ok()
-    .map(|d| cpcv_summary(&d, DEFAULT_CPCV_BLOCKS));
+    // ---- QE-469: persist the CPCV OOS distribution summary (the same distribution the promotion gate
+    // decided on above). Rounded `hash_stable` so the sealed block round-trips byte-identically and two
+    // same-seed runs seal byte-identically (QE-006). PBO is untouched — CPCV is the OOS distribution
+    // *alongside* PBO, not a replacement.
+    let cpcv = cpcv_dist
+        .as_ref()
+        .map(|d| cpcv_summary(d, DEFAULT_CPCV_BLOCKS));
     let seal_evidence = qe_vintage::SealEvidence {
         dsr: hash_stable(robustness.dsr),
         pbo: hash_stable(robustness.pbo),

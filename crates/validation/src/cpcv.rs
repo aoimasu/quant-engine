@@ -182,7 +182,8 @@ pub fn cpcv_paths(
 }
 
 /// The CPCV out-of-sample **distribution** summary (QE-469): per-path Sharpe/DSR vectors plus the
-/// reduction the promotion gate and the sealed evidence consume. `serde` so it can be persisted.
+/// reduction the promotion gate consumes. This is an in-memory analysis type — it is **not** serialised;
+/// persistence goes through the separate `qe_vintage::CpcvSummary` (the CLI maps this into it at seal).
 #[derive(Debug, Clone, PartialEq)]
 pub struct CpcvDistribution {
     /// Per-held-out-path Sharpe ratios (one per balanced partition), in partition order.
