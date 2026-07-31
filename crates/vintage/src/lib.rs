@@ -485,8 +485,13 @@ impl VintageContent {
     /// **before** validation and hashing, so the hash-stable rounding invariant lives at the type boundary
     /// that owns the hash — not only in the train-job producer. A future seal writer that constructs a
     /// `VintageContent` without routing every f64 through the producer's rounding still seals a byte-stable
-    /// artefact, because `seal` rounds here by construction. Idempotent on already-rounded producer output
-    /// (rounding a rounded value is a no-op), so it introduces no drift for the existing seal path.
+    /// artefact, because `seal` rounds here by construction. `seal` is thus the **single source of truth**
+    /// for hash-stable precision: fields that were never producer-rounded (notably `weights`) are
+    /// canonicalised here, so reproducibility follows from `seal` ALWAYS canonicalising, not from any prior
+    /// producer rounding. On fields the producer did round the rounding is idempotent (a no-op), so
+    /// re-canonicalising existing producer output does not move the hash. (`capacity_usd` is exempt — see
+    /// the inline note: it is an exact integer by construction and would be perturbed, not stabilised, by
+    /// `hash_stable`.)
     fn canonicalize(&mut self) {
         for w in &mut self.weights {
             *w = hash_stable(*w);
@@ -502,7 +507,11 @@ impl VintageContent {
         ev.pbo = hash_stable(ev.pbo);
         ev.spa_pvalue = hash_stable(ev.spa_pvalue);
         ev.realised_turnover = hash_stable(ev.realised_turnover);
-        ev.capacity_usd = hash_stable(ev.capacity_usd);
+        // QE-482 R6.1: `capacity_usd` is deliberately NOT routed through `hash_stable`. It is
+        // large-magnitude (~1e6–1e8) and producer-rounded to whole dollars, so it is already an exact
+        // integer (hash-stable by construction). Multiplying by `HASH_STABLE_SCALE` (1e12) pushes it past
+        // the f64 exact-integer range (2^53 ≈ 9.0e15), so `hash_stable` could PERTURB an already-stable
+        // value and break its own idempotence. Leaving it untouched keeps seal ∘ canonicalize a no-op.
         for opt in [
             &mut ev.cost_stress_net_min,
             &mut ev.uncensored_pbo,
@@ -1119,6 +1128,35 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn large_magnitude_capacity_usd_is_seal_idempotent() {
+        // QE-482 R6.1: `capacity_usd` is large-magnitude (~1e6–1e8) and producer-rounded to whole dollars.
+        // Routing it through `hash_stable` (× 1e12) would exceed the f64 exact-integer range (2^53) and could
+        // PERTURB an already-stable value — so `canonicalize` deliberately leaves it untouched. Verify that a
+        // realistic ~3.69e7 capacity is byte-stable under seal ∘ canonicalize: pre-canonicalising leaves the
+        // value exactly intact, and re-sealing that already-canonicalised content reproduces the same hash.
+        let cap = 36_900_000.0_f64;
+        let mut c = content();
+        c.seal_evidence.capacity_usd = cap;
+        let sealed = Vintage::seal(c.clone()).unwrap();
+
+        // canonicalize is a no-op on `capacity_usd` (already an exact integer) — the value is byte-identical.
+        let mut pre = c.clone();
+        pre.canonicalize();
+        assert_eq!(
+            pre.seal_evidence.capacity_usd, cap,
+            "canonicalize must leave a whole-dollar capacity_usd exactly intact"
+        );
+
+        // seal(c) == seal(canonicalize(c)) — the content hash is unchanged (idempotent).
+        let resealed = Vintage::seal(pre).unwrap();
+        assert_eq!(
+            resealed.content_hash, sealed.content_hash,
+            "seal ∘ canonicalize must be byte-identical for a large-magnitude capacity_usd"
+        );
+        assert_eq!(sealed.content.seal_evidence.capacity_usd, cap);
     }
 
     #[test]
