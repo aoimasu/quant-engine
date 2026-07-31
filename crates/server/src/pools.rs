@@ -15,8 +15,11 @@
 //! structured `409` **before any state change**, and a sealed pool **never auto-mints a vintage** (§13.2).
 //! Sandbox lifecycle transitions may function; a sandbox seal cannot reach a production vintage.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use tokio::sync::Mutex as AsyncMutex;
 
 use axum::extract::{Path, State};
 use axum::response::{IntoResponse, Response};
@@ -49,6 +52,12 @@ pub struct PoolState {
     production: FormulaPoolRepository,
     /// The governance store (`<data_dir>/governance`) — the durable pool lifecycle, separate from the run.
     governance: PoolGovernanceStore,
+    /// QE-483: per-pool async locks serialising the governance-cache **read-modify-write** in
+    /// [`apply_cache_transition`] (the on-disk record is a rebuildable, audit-derived cache; the tamper-
+    /// evident audit chain stays authoritative). Keyed by pool id, so two racing approve/seal transitions on
+    /// the **same** pool cannot interleave read→apply→write and lose an update, while unrelated pools are
+    /// never needlessly serialised. Mirrors the run store's `index_lock` (`runs/manager.rs`).
+    cache_locks: Arc<AsyncMutex<HashMap<String, Arc<AsyncMutex<()>>>>>,
 }
 
 impl PoolState {
@@ -60,6 +69,7 @@ impl PoolState {
             research: FormulaPoolRepository::new(artifacts_dir.join("research").join("pools")),
             production: FormulaPoolRepository::new(artifacts_dir.join("pools")),
             governance: PoolGovernanceStore::new(data_dir.join("governance")),
+            cache_locks: Arc::default(),
         }
     }
 
@@ -72,6 +82,7 @@ impl PoolState {
             research: FormulaPoolRepository::new(root.join("research").join("pools")),
             production: FormulaPoolRepository::new(root.join("pools")),
             governance: PoolGovernanceStore::new(root.join("governance")),
+            cache_locks: Arc::default(),
         }
     }
 
@@ -87,6 +98,15 @@ impl PoolState {
     /// The governance record for `id` (a fresh `Draft` when none exists yet).
     fn governance(&self, id: &str) -> Result<PoolGovernance, PoolError> {
         self.governance.read(id)
+    }
+
+    /// QE-483: the per-pool cache lock for `id`, created on first use. The caller holds it **across** the
+    /// `apply_cache_transition` read-modify-write (which runs off the async worker in `spawn_blocking`), so
+    /// two concurrent transitions on the same pool serialise instead of interleaving read→write. Distinct
+    /// pool ids get distinct locks, so unrelated pools never serialise (mirrors `index_lock`).
+    async fn cache_lock(&self, id: &str) -> Arc<AsyncMutex<()>> {
+        let mut map = self.cache_locks.lock().await;
+        Arc::clone(map.entry(id.to_owned()).or_default())
     }
 
     /// **Structural barrier 3** (design §13.6) — load a pool from the **production** root **only**, asserting
@@ -602,6 +622,10 @@ async fn production_seal(
 
     // Success ⇒ advance the cache Approved → Sealed (no vintage is minted).
     let cache = {
+        // QE-483: hold the per-pool cache lock ACROSS the read-modify-write (same discipline as the
+        // approve/reject/revoke path in `governance_action`).
+        let lock = pools.cache_lock(&id).await;
+        let _guard = lock.lock().await;
         let pools = Arc::clone(&pools);
         let task_id = id.clone();
         let actor_c = _actor.clone();
@@ -787,6 +811,10 @@ async fn governance_action(
     //    authoritative). Approve is idempotent at `Approved` (a second distinct sign-off records only an
     //    audit entry); every other edge goes through the guarded state machine.
     let cache = {
+        // QE-483: hold the per-pool cache lock ACROSS the read-modify-write so concurrent transitions on
+        // the same pool serialise (no lost update); unrelated pools take distinct locks.
+        let lock = pools.cache_lock(&id).await;
+        let _guard = lock.lock().await;
         let pools = Arc::clone(&pools);
         let task_id = id.clone();
         let actor_c = actor.clone();
@@ -903,6 +931,12 @@ enum CacheError {
 /// Apply the guarded lifecycle-cache transition. `Approve` is **idempotent at `Approved`** — a second
 /// distinct sign-off leaves the cache `Approved` (the audit log carries the two signatures); the first
 /// `Approve` advances `Draft → Approved`. Reject/revoke/seal go through the pure guarded machine.
+///
+/// QE-483: this is a **read-modify-write** over the rebuildable, audit-derived governance cache (the record
+/// is authoritative nowhere — the tamper-evident audit chain is the source of truth, and `seal_allowed`/
+/// `derive_signoff` re-derive lifecycle from the chain, never from this record). The RMW is **not** self-
+/// serialising; every caller MUST hold the per-pool [`PoolState::cache_lock`] across this call so two racing
+/// transitions on the same pool cannot interleave read→apply→write and lose an update.
 fn apply_cache_transition(
     pools: &PoolState,
     id: &str,
@@ -1270,5 +1304,119 @@ mod tests {
             PoolLifecycleState::Approved
         );
         assert!(!pools.governance_record_path(POOL_ID).exists());
+    }
+
+    // ---- QE-483: governance-cache RMW serialisation --------------------------------------------------
+
+    /// The caller-side discipline the governance handlers use: take the per-pool cache lock, then run the
+    /// blocking read-modify-write off the async worker while holding it.
+    async fn locked_transition(
+        pools: Arc<PoolState>,
+        id: String,
+        t: PoolTransition,
+    ) -> Result<PoolLifecycleState, String> {
+        let lock = pools.cache_lock(&id).await;
+        let _guard = lock.lock().await;
+        let p = Arc::clone(&pools);
+        let id2 = id.clone();
+        tokio::task::spawn_blocking(move || apply_cache_transition(&p, &id2, t, "actor", 2))
+            .await
+            .unwrap()
+            .map_err(|e| match e {
+                CacheError::Illegal(m) | CacheError::Io(m) => m,
+            })
+    }
+
+    #[tokio::test]
+    async fn per_pool_cache_locks_are_distinct_and_stable() {
+        let dir = tempfile::tempdir().unwrap();
+        let pools = PoolState::from_dirs(&dir.path().join("a"), &dir.path().join("d"));
+        let l1 = pools.cache_lock("p1").await;
+        let l1_again = pools.cache_lock("p1").await;
+        let l2 = pools.cache_lock("p2").await;
+        assert!(Arc::ptr_eq(&l1, &l1_again), "same pool ⇒ same lock");
+        assert!(
+            !Arc::ptr_eq(&l1, &l2),
+            "different pools ⇒ different locks (never needlessly serialised)"
+        );
+    }
+
+    #[tokio::test]
+    async fn racing_seal_and_revoke_on_same_pool_serialise_no_lost_update() {
+        let dir = tempfile::tempdir().unwrap();
+        let pools = Arc::new(PoolState::from_dirs(
+            &dir.path().join("a"),
+            &dir.path().join("d"),
+        ));
+        // Seed the pool at `Approved`.
+        let mut g = PoolGovernance::draft("p1");
+        g.apply(PoolTransition::Approve, "a@x.io", 1).unwrap();
+        pools.governance.write(&g).unwrap();
+
+        // Two racing transitions on the SAME pool: Seal (Approved→Sealed) and Revoke (Approved/Sealed→
+        // Revoked). Serialised, they converge to `Revoked` in EITHER lock order — Seal-then-Revoke
+        // (Approved→Sealed→Revoked) or Revoke-then-Seal (Approved→Revoked, then an illegal Seal that
+        // no-ops). An interleaved last-write-wins RMW could leave it `Sealed` (the revoke lost); the lock
+        // forbids that.
+        let a = tokio::spawn(locked_transition(
+            Arc::clone(&pools),
+            "p1".to_owned(),
+            PoolTransition::Seal,
+        ));
+        let b = tokio::spawn(locked_transition(
+            Arc::clone(&pools),
+            "p1".to_owned(),
+            PoolTransition::Revoke,
+        ));
+        let _ = a.await.unwrap();
+        let _ = b.await.unwrap();
+
+        assert_eq!(
+            pools.governance("p1").unwrap().state,
+            PoolLifecycleState::Revoked,
+            "serialised transitions converge to Revoked; no lost update leaves it Sealed"
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_revokes_on_same_pool_apply_exactly_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let pools = Arc::new(PoolState::from_dirs(
+            &dir.path().join("a"),
+            &dir.path().join("d"),
+        ));
+        let mut g = PoolGovernance::draft("p1");
+        g.apply(PoolTransition::Approve, "a@x.io", 1).unwrap();
+        pools.governance.write(&g).unwrap();
+
+        // Fan out several concurrent Revoke transitions. Serialised, exactly ONE succeeds (Approved→
+        // Revoked); the rest see the already-`Revoked` state and fail the illegal edge — the history
+        // carries exactly one Revoke record (no torn double-apply).
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            handles.push(tokio::spawn(locked_transition(
+                Arc::clone(&pools),
+                "p1".to_owned(),
+                PoolTransition::Revoke,
+            )));
+        }
+        let mut ok = 0usize;
+        for h in handles {
+            if h.await.unwrap().is_ok() {
+                ok += 1;
+            }
+        }
+        assert_eq!(ok, 1, "exactly one Revoke succeeds under serialisation");
+        let g = pools.governance("p1").unwrap();
+        assert_eq!(g.state, PoolLifecycleState::Revoked);
+        let revokes = g
+            .history
+            .iter()
+            .filter(|r| r.transition == PoolTransition::Revoke)
+            .count();
+        assert_eq!(
+            revokes, 1,
+            "no lost update / no double-apply in the history"
+        );
     }
 }
