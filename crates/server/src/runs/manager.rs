@@ -31,6 +31,12 @@ use super::store::RunStore;
 /// How many trailing bytes of subprocess stderr to keep as the failure message.
 const STDERR_TAIL_BYTES: usize = 4096;
 
+/// QE-481: the bounded interval that caps how often the supervisor drain persists `meta.json` **within a
+/// single stage** — a chatty `gen` stream no longer triggers an `atomic_write` per line. Stage transitions
+/// and the terminal `done` line always persist immediately, and the final accumulated state is always
+/// flushed. Purely operational cadence (monotonic `Instant`) — never a hashed field, so no QE-006 impact.
+const DRAIN_META_FLUSH_INTERVAL: Duration = Duration::from_millis(500);
+
 /// Reason recorded when a run is cooperatively halted by an operator (QE-452 Phase B `POST
 /// /api/runs/{id}/halt`). Because `RunStatus` stays 4-state (design §13.12 AC5), a halt is a terminal
 /// [`RunStatus::Failed`] carrying this distinguishing reason rather than a new wire variant.
@@ -1312,8 +1318,15 @@ async fn flow_backtest_phase(
     let _ = store.write_meta(meta);
 }
 
-/// Read subprocess stdout line by line: append each raw line to `stdout.log` and, on a `progress`
-/// line, update `meta.progress` and persist. Returns whether a terminal `done` line was seen.
+// --- QE-481 supervisor-drain guard region (start) — scanned by `drain_does_no_blocking_std_fs` ---
+//
+/// Read subprocess stdout line by line and drive the run's captured log + progress meta. QE-481: the async
+/// side does **only** the pipe read — it forwards each raw line over a bounded channel and never touches the
+/// filesystem. ALL synchronous `std::fs` work runs inside one [`spawn_blocking`] worker ([`drain_worker`]):
+/// a **single** persistent `stdout.log` append handle (opened once per run, not per line) plus the
+/// **coalesced** `write_meta` persistence. This mirrors the QE-411 `spawn_blocking` discipline so no blocking
+/// I/O ever parks a runtime worker thread for the lifetime of a running campaign. Returns whether a terminal
+/// `done` line was seen.
 async fn drain_stdout(
     stdout: Option<tokio::process::ChildStdout>,
     store: &RunStore,
@@ -1321,22 +1334,68 @@ async fn drain_stdout(
     spec: &RunSpec,
 ) -> bool {
     let Some(stdout) = stdout else { return false };
-    let log_path = store.stdout_path(&meta.id);
-    let mut lines = BufReader::new(stdout).lines();
+    let is_evolve = matches!(spec, RunSpec::Evolve(_));
+    let (tx, rx) = tokio::sync::mpsc::channel::<String>(256);
+
+    // The blocking worker owns the append handle + a working copy of `meta`, pulls forwarded lines via
+    // `blocking_recv`, and does every fs write off the async runtime.
+    let store = store.clone();
+    let mut owned = meta.clone();
+    let worker = tokio::task::spawn_blocking(move || {
+        let mut rx = rx;
+        let lines = std::iter::from_fn(move || rx.blocking_recv());
+        let done_seen = drain_worker(&store, &mut owned, is_evolve, lines);
+        (owned, done_seen)
+    });
+
+    // Async side: read lines off the child pipe and forward them (bounded channel ⇒ natural backpressure).
+    let mut reader = BufReader::new(stdout).lines();
+    while let Ok(Some(line)) = reader.next_line().await {
+        if tx.send(line).await.is_err() {
+            break; // worker gone
+        }
+    }
+    drop(tx); // close the channel so the worker's `blocking_recv` returns `None` and it finishes.
+
+    match worker.await {
+        Ok((owned, done_seen)) => {
+            *meta = owned; // hand the accumulated progress/train snapshots back to the supervisor.
+            done_seen
+        }
+        Err(_) => false,
+    }
+}
+
+/// QE-481: the blocking drain worker. Owns a **single** `stdout.log` append handle (opened once via
+/// [`RunStore::open_stdout_append`], never re-opened per line) and a working copy of `meta`; for each raw
+/// line it appends to the log and, on a progress-bearing line, updates `meta` and persists it — **coalesced**
+/// to stage transitions / [`DRAIN_META_FLUSH_INTERVAL`], so a chatty `gen` stream does not `atomic_write`
+/// per line. The terminal `done` line and the final accumulated state are always flushed. Only side effects
+/// are the store writes, so it is unit-tested with an in-memory line iterator. Returns whether a terminal
+/// `done` line was seen. The progress-line parsing / `Progress` / `GenSnapshot` semantics are unchanged from
+/// the per-line version — only *where* the I/O runs and *how often* meta is written changed.
+fn drain_worker<I: Iterator<Item = String>>(
+    store: &RunStore,
+    meta: &mut RunMeta,
+    is_evolve: bool,
+    lines: I,
+) -> bool {
+    // One persistent append handle for the whole run (QE-481: not re-opened per line).
+    let mut log = store.open_stdout_append(&meta.id).ok();
     let mut done_seen = false;
-    while let Ok(Some(line)) = lines.next_line().await {
-        // Append the raw line to the captured log (best-effort).
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_path)
-        {
+    let mut pending = false;
+    let mut last_stage: Option<String> = None;
+    let mut last_flush = Instant::now();
+
+    for line in lines {
+        // Append the raw line to the captured log (best-effort), reusing the single handle.
+        if let Some(f) = log.as_mut() {
             let _ = writeln!(f, "{line}");
         }
         match serde_json::from_str::<ProgressLine>(&line) {
             Ok(ProgressLine::Progress { pct, stage, msg }) => {
                 meta.progress = Progress { pct, stage, msg };
-                let _ = store.write_meta(meta);
+                pending = true;
             }
             Ok(ProgressLine::Gen {
                 pct,
@@ -1363,7 +1422,7 @@ async fn drain_stdout(
                     coverage_short,
                     best_fitness,
                 });
-                let _ = store.write_meta(meta);
+                pending = true;
             }
             Ok(ProgressLine::Ensemble {
                 pct,
@@ -1382,7 +1441,7 @@ async fn drain_stdout(
                     members,
                     score,
                 });
-                let _ = store.write_meta(meta);
+                pending = true;
             }
             Ok(ProgressLine::Gate {
                 pct,
@@ -1417,7 +1476,7 @@ async fn drain_stdout(
                     variance_trials,
                     distinct_evaluations,
                 });
-                let _ = store.write_meta(meta);
+                pending = true;
             }
             Ok(ProgressLine::Done {
                 protocol_version,
@@ -1439,7 +1498,7 @@ async fn drain_stdout(
                          continuing (progress may be interpreted on a best-effort basis)"
                     );
                 }
-                if matches!(spec, RunSpec::Evolve(_)) {
+                if is_evolve {
                     // QE-452 §13.3 load-bearing invariant: an evolve run produces a **pool**, NEVER a
                     // vintage. Assert the two lifecycles stay separated at the terminal line — a stray
                     // vintage from an evolve subprocess is a protocol breach; refuse to record it.
@@ -1456,18 +1515,38 @@ async fn drain_stdout(
                     }
                     if let Some(pool) = pool {
                         train_mut(meta).pool = Some(pool);
-                        let _ = store.write_meta(meta);
                     }
                 } else if let Some(vintage) = vintage {
                     train_mut(meta).vintage = Some(vintage);
-                    let _ = store.write_meta(meta);
                 }
+                // The terminal line ALWAYS flushes (never coalesced away) so the final state is persisted.
+                let _ = store.write_meta(meta);
+                pending = false;
+                last_stage = Some(meta.progress.stage.clone());
+                last_flush = Instant::now();
+                continue;
             }
             Ok(ProgressLine::Error { .. }) | Err(_) => {}
         }
+        // Coalesce: persist only on a stage transition or once the bounded interval has elapsed.
+        if pending {
+            let stage_changed = last_stage.as_deref() != Some(meta.progress.stage.as_str());
+            if stage_changed || last_flush.elapsed() >= DRAIN_META_FLUSH_INTERVAL {
+                let _ = store.write_meta(meta);
+                pending = false;
+                last_stage = Some(meta.progress.stage.clone());
+                last_flush = Instant::now();
+            }
+        }
+    }
+
+    // Final flush: guarantee the last accumulated progress/train snapshot is persisted despite throttling.
+    if pending {
+        let _ = store.write_meta(meta);
     }
     done_seen
 }
+// --- QE-481 supervisor-drain guard region (end) ---
 
 /// Mutable access to the run's [`TrainProgress`], created on first use. Backtest runs never emit the
 /// train variants, so `meta.train` stays `None` and their `meta.json` shape is unchanged.
@@ -2047,5 +2126,143 @@ mod tests {
         // The operator-halt outcome is `Failed` + a reason, not a new status.
         assert_eq!(serde_json::to_value(RunStatus::Failed).unwrap(), "failed");
         assert!(HALT_REASON.contains("halt"));
+    }
+
+    // ---- QE-481: supervisor-drain off the async worker + coalesced meta persistence ------------------
+
+    /// A minimal `train` run meta for the drain worker (id + Running, everything else default).
+    fn drain_meta(id: &str) -> RunMeta {
+        RunMeta {
+            id: id.to_owned(),
+            run_type: "train".to_owned(),
+            status: RunStatus::Running,
+            params: serde_json::Value::Null,
+            progress: Progress::default(),
+            train: None,
+            flow: None,
+            created_ms: 1,
+            started_ms: Some(2),
+            finished_ms: None,
+            exit: None,
+            error: None,
+            artifacts: Vec::new(),
+        }
+    }
+
+    /// QE-481 guard (widens QE-411 `handlers_do_no_blocking_std_fs` to the supervisor): the drain region
+    /// (`drain_stdout` / `drain_worker`) must contain **no** synchronous `std::fs::` token — every fs
+    /// primitive lives in `store.rs` and is reached only through `spawn_blocking`. The needle is built at
+    /// runtime so this assertion is not a self-match, and comment lines are dropped so prose never counts.
+    #[test]
+    fn drain_does_no_blocking_std_fs() {
+        let src = include_str!("manager.rs");
+        let start = src
+            .find("QE-481 supervisor-drain guard region (start)")
+            .expect("start marker present");
+        let end = src
+            .find("QE-481 supervisor-drain guard region (end)")
+            .expect("end marker present");
+        assert!(start < end, "markers ordered");
+        let region = &src[start..end];
+        let stripped: String = region
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let needle = format!("std{sep}fs{sep}", sep = "::");
+        assert!(
+            !stripped.contains(&needle),
+            "the supervisor drain must do NO synchronous `std::fs` on a runtime worker (QE-481) — \
+             fs primitives belong in store.rs behind spawn_blocking"
+        );
+    }
+
+    #[test]
+    fn drain_worker_opens_log_once_and_flushes_terminal_state() {
+        let tmp = std::env::temp_dir().join(format!("qe481-drain-{}", uuid::Uuid::new_v4()));
+        let store = RunStore::new(tmp.clone());
+        let mut meta = drain_meta("run-1");
+        store.init_run(&meta).unwrap();
+
+        // A chatty stream: 50 `gen` lines all in the SAME `search` stage (coalesced), then a `gate` line
+        // (stage change), then the terminal `done` carrying a vintage.
+        let mut lines = Vec::new();
+        for g in 1..=50usize {
+            lines.push(
+                serde_json::to_string(&ProgressLine::Gen {
+                    pct: (g as u8).min(99),
+                    stage: "search".to_owned(),
+                    generation: g,
+                    generations: 50,
+                    coverage: g,
+                    coverage_long: 0,
+                    coverage_short: 0,
+                    best_fitness: Some(g as f64),
+                })
+                .unwrap(),
+            );
+        }
+        lines.push(
+            serde_json::to_string(&ProgressLine::Gate {
+                pct: 95,
+                stage: "gate".to_owned(),
+                promoted: true,
+                failed: Vec::new(),
+                in_sample_sharpe: Some(1.0),
+                holdout_sharpe: Some(0.9),
+                dsr: Some(0.96),
+                spa_pvalue: Some(0.01),
+                n_trials: 100,
+                uncensored_pbo: None,
+                variance_trials: None,
+                distinct_evaluations: None,
+            })
+            .unwrap(),
+        );
+        lines.push(
+            serde_json::to_string(&ProgressLine::Done {
+                result: "result.json".to_owned(),
+                protocol_version: PROTOCOL_VERSION,
+                vintage: Some("vint-1".to_owned()),
+                pool: None,
+                synthetic: false,
+            })
+            .unwrap(),
+        );
+
+        let done = drain_worker(&store, &mut meta, false, lines.clone().into_iter());
+        assert!(done, "the terminal `done` line was seen");
+
+        // stdout.log is opened ONCE and carries EVERY raw line exactly once (init_run created it empty).
+        let log = std::fs::read_to_string(store.stdout_path("run-1")).unwrap();
+        assert_eq!(
+            log.lines().count(),
+            lines.len(),
+            "every raw line captured exactly once (single append handle)"
+        );
+
+        // The FINAL persisted meta reflects the terminal accumulated state despite the throttling.
+        let persisted = store.read_meta("run-1").unwrap().expect("meta persisted");
+        assert_eq!(persisted.progress.stage, "gate");
+        let train = persisted.train.expect("train snapshots persisted");
+        assert_eq!(
+            train.generation.expect("last gen flushed").generation,
+            50,
+            "the final gen snapshot survives coalescing"
+        );
+        assert!(train.gate.expect("gate flushed").promoted);
+        assert_eq!(
+            train.vintage.as_deref(),
+            Some("vint-1"),
+            "the terminal vintage is always flushed"
+        );
+        // The in-memory meta handed back to the supervisor matches the persisted terminal state.
+        assert_eq!(meta.progress.stage, "gate");
+        assert_eq!(
+            meta.train.as_ref().and_then(|t| t.vintage.as_deref()),
+            Some("vint-1")
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
