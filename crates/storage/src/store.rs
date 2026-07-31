@@ -266,6 +266,13 @@ impl MarketStore {
     /// index, keyed by the batch's first open-time. An empty batch writes nothing. Re-tagging a range
     /// (writing a later segment) never touches bar keys/values, so already-ingested data does not drift.
     ///
+    /// **Atomicity (QE-485).** The bar puts and their per-resolution provenance segments commit in a
+    /// **single** write transaction — they are all-or-nothing. A crash, panic, or process kill can never
+    /// leave real bars durably persisted with no covering segment (which the provenance fold would then
+    /// read as [`Provenance::Unknown`]/`Mixed` and permanently mislabel, since incremental ingest never
+    /// re-fetches already-covered slots). The bar key/value path is byte-identical to [`Self::put_bars`];
+    /// only the transaction boundary differs (one commit instead of two).
+    ///
     /// # Errors
     /// [`StorageError`] on an LMDB failure.
     pub fn put_bars_with_provenance(
@@ -275,9 +282,14 @@ impl MarketStore {
         provenance: Provenance,
         calibration: Calibration,
     ) -> Result<(), StorageError> {
-        self.put_bars(instrument, bars)?;
-        // One segment per (instrument, resolution) present in the batch: bars can carry mixed resolutions.
+        // Bars and their provenance segments share ONE wtxn (QE-485): the tag is present the instant the
+        // bars are. Same bar key/value path as `put_bars`, written into this txn rather than its own.
         let mut wtxn = self.env.write_txn()?;
+        for bar in bars {
+            let key = bar_key(instrument, bar.resolution(), bar.open_time());
+            self.bars.put(&mut wtxn, &key, bar)?;
+        }
+        // One segment per (instrument, resolution) present in the batch: bars can carry mixed resolutions.
         for resolution in Resolution::ALL {
             let times: Vec<Timestamp> = bars
                 .iter()
@@ -817,6 +829,95 @@ mod tests {
         assert_eq!(
             store.get_bar(&id, res, Timestamp::from_secs(100)).unwrap(),
             bar_before
+        );
+    }
+
+    /// QE-485: bars and their provenance segment commit atomically. After
+    /// `put_bars_with_provenance`, every `(instrument, resolution)` that has stored bars ALWAYS has a
+    /// covering provenance segment — real bars are never observed as `Unknown`. The single-txn boundary
+    /// (one `wtxn`, one `commit`) means there is no code path that persists bars without their segment;
+    /// this test asserts the observable invariant across every resolution present in a mixed batch.
+    #[test]
+    fn put_bars_with_provenance_commits_bars_and_segments_atomically() {
+        use crate::provenance::{Calibration, Provenance, ProvenanceSummary};
+        let dir = tempfile::tempdir().unwrap();
+        let store = open(dir.path());
+        let id = inst("BTCUSDT");
+
+        // A batch spanning two resolutions — each must end up with a covering segment.
+        store
+            .put_bars_with_provenance(
+                &id,
+                &[
+                    bar(Resolution::M5, 100, 100),
+                    bar(Resolution::M5, 200, 110),
+                    bar(Resolution::H1, 3600, 200),
+                ],
+                Provenance::Real,
+                Calibration::Uncalibrated,
+            )
+            .unwrap();
+
+        // Invariant: for EVERY resolution, bars present ⟺ a covering segment present. Never bars-without-tag.
+        for res in Resolution::ALL {
+            let has_bars = store.coverage_bounds(&id, res).unwrap().is_some();
+            let has_segment = !store.provenance_segments(&id, res).unwrap().is_empty();
+            assert_eq!(
+                has_bars, has_segment,
+                "{res:?}: bars and covering segment must be all-or-nothing",
+            );
+            // A stored bar is never folded as legacy `Unknown` — the segment is always there.
+            if has_bars {
+                assert_eq!(
+                    store
+                        .store_provenance_summary(std::slice::from_ref(&id), res)
+                        .unwrap(),
+                    ProvenanceSummary::Real,
+                    "{res:?}: real bars must summarise Real, never Unknown",
+                );
+            }
+        }
+    }
+
+    /// QE-485 AC #2: incremental ingest over already-covered slots is unaffected by the txn merge.
+    /// Re-invoking with an identical batch neither corrupts bars nor duplicates/mislabels the segment,
+    /// and the key-only coverage bounds (the re-fetch short-circuit input) stay byte-identical.
+    #[test]
+    fn reingesting_covered_slots_does_not_corrupt_bars_or_segments() {
+        use crate::provenance::{Calibration, Provenance};
+        let dir = tempfile::tempdir().unwrap();
+        let store = open(dir.path());
+        let id = inst("BTCUSDT");
+        let res = Resolution::M5;
+        let bars = [bar(res, 100, 100), bar(res, 200, 110)];
+
+        store
+            .put_bars_with_provenance(&id, &bars, Provenance::Real, Calibration::Uncalibrated)
+            .unwrap();
+        let bounds_first = store.coverage_bounds(&id, res).unwrap();
+        let segs_first = store.provenance_segments(&id, res).unwrap();
+        let bar_first = store.get_bar(&id, res, Timestamp::from_secs(100)).unwrap();
+
+        // Re-ingest the identical, already-covered batch.
+        store
+            .put_bars_with_provenance(&id, &bars, Provenance::Real, Calibration::Uncalibrated)
+            .unwrap();
+
+        // Coverage (the re-fetch short-circuit input), the single segment, and bar identity are unchanged.
+        assert_eq!(store.coverage_bounds(&id, res).unwrap(), bounds_first);
+        let segs_again = store.provenance_segments(&id, res).unwrap();
+        assert_eq!(
+            segs_again.len(),
+            1,
+            "one segment, not duplicated: {segs_again:?}"
+        );
+        assert_eq!(
+            segs_again, segs_first,
+            "segment must not drift on re-ingest"
+        );
+        assert_eq!(
+            store.get_bar(&id, res, Timestamp::from_secs(100)).unwrap(),
+            bar_first,
         );
     }
 }
