@@ -3,14 +3,27 @@
 //! "Regime-sensitive" optimisation and reporting need regime *tags*. This module labels history along
 //! two orthogonal, interpretable axes — **volatility** (`Calm`/`Volatile`) and **trend-vs-chop**
 //! (`Trending`/`Choppy`) — and builds a per-regime **expectancy table** for any strategy/ensemble return
-//! series. Both consumers — the DE objective (QE-127, in `qe-ensemble`) and validation reporting
-//! (QE-133) — import these pure functions over `qe_domain::Bar`; the labeller lives in `qe-signal`
-//! because it is the only crate both `qe-wfo` and `qe-ensemble` depend on (the QE-001/QE-132
-//! search⟂portfolio firewall keeps `qe-ensemble` off `qe-wfo`).
+//! series. These pure functions live in `qe-signal` because it is the only crate both `qe-wfo` and
+//! `qe-ensemble` depend on (the QE-001/QE-132 search⟂portfolio firewall keeps `qe-ensemble` off `qe-wfo`),
+//! so validation reporting (QE-133) and the DE objective's per-regime `expectancy_table` (QE-127, in
+//! `qe-ensemble`) can share them over `qe_domain::Bar`.
 //!
 //! Classification is deterministic (no HMM / EM fit): the volatility axis is a **median split** of the
 //! rolling realised volatility, and the trend axis is Kaufman's **efficiency ratio** against a fixed
 //! threshold. Strategy *conditioning* on regimes is out of scope (QE-125 produces tags only).
+//!
+//! ## `label_regimes` is full-sample / descriptive-only (QE-486)
+//!
+//! The volatility median split in [`label_regimes`] classifies **every** bar against the **full-sample**
+//! median of all rolling vols — a **future-informed** statistic: a bar early in the series is labelled
+//! Calm/Volatile using volatilities that only materialise later. That look-ahead is benign for its **only**
+//! current consumer, the **descriptive** holdout regime-composition bar tally over a *frozen* holdout
+//! (`holdout_regime_composition` in `crates/cli/src/jobs/train.rs`) — a count, not a selection input. It
+//! **must NOT** feed per-fold DE selection: a full-sample-median label wired into a fold would be a live
+//! look-ahead leak (no bar may use future data to influence selection). The QE-127 DE objective consumes
+//! [`expectancy_table`] over externally-supplied returns/labels for its per-regime term, **not** this
+//! full-sample labeller for per-fold selection. If a causal split is ever needed for selection, add a
+//! separate expanding/rolling-median labeller rather than routing these full-sample labels into a fold.
 
 use std::collections::BTreeMap;
 
@@ -123,6 +136,11 @@ fn log_return(p0: Decimal, p1: Decimal) -> f64 {
 /// undefined in the warm-up). The volatility axis is a **median split** of the rolling realised
 /// volatility (std-dev of log-returns over the window); the trend axis is Kaufman's **efficiency ratio**
 /// `|close[i] − close[i−W]| / Σ|close[k] − close[k−1]|` against `cfg.trend_threshold`. Deterministic.
+///
+/// **Full-sample / descriptive-only (QE-486).** The Calm/Volatile median is taken over **all** defined
+/// rolling vols across the whole series, so a bar's volatility label depends on **future** bars — a
+/// deliberate look-ahead that is fine for the descriptive holdout composition tally (the only consumer)
+/// but that **must not** feed per-fold selection. See the module docs.
 #[must_use]
 pub fn label_regimes(bars: &[Bar], cfg: &RegimeConfig) -> Vec<Option<Regime>> {
     let n = bars.len();
@@ -401,6 +419,47 @@ mod tests {
         assert!(
             high_seg > low_seg,
             "high-vol segment Volatile-rate {high_seg} should exceed low-vol {low_seg}"
+        );
+    }
+
+    #[test]
+    fn vol_median_split_is_full_sample_future_informed_hence_descriptive_only() {
+        // QE-486: the Calm/Volatile split classifies each bar against the FULL-SAMPLE median of all rolling
+        // vols — a future-informed statistic. Proof of the look-ahead: appending later high-volatility bars
+        // raises the median and RE-LABELS early bars whose own (past-only) rolling vol never changed. This
+        // is exactly why `label_regimes` is documented descriptive-only and must not feed per-fold
+        // selection (the consumer today is the train-only holdout composition tally).
+        let cfg = RegimeConfig::with_defaults();
+        // An early segment whose volatility RAMPS UP (swing amplitude grows), so its rolling vols span a
+        // range and the local median splits it: earlier bars Calm, later-early bars Volatile.
+        let early: Vec<f64> = (0..80)
+            .map(|i| {
+                let amp = 0.5 + 1.5 * (i as f64 / 80.0);
+                if i % 2 == 0 {
+                    100.0
+                } else {
+                    100.0 + amp
+                }
+            })
+            .collect();
+        let labels_short = label_regimes(&bars_from_closes(&early), &cfg);
+
+        let mut extended = early.clone();
+        extended.extend(choppy_closes(80, 8.0)); // a high-vol FUTURE tail that raises the full-sample median
+        let labels_long = label_regimes(&bars_from_closes(&extended), &cfg);
+
+        // Some early bar's volatility label flipped purely because of the future tail — its own window of
+        // past returns is byte-identical between the two runs, so only the full-sample median moved it.
+        let flipped = (cfg.window..early.len()).any(|i| {
+            matches!(
+                (labels_short[i], labels_long[i]),
+                (Some(a), Some(b)) if a.vol != b.vol
+            )
+        });
+        assert!(
+            flipped,
+            "the full-sample median makes an early bar's Vol label depend on FUTURE bars — a look-ahead the \
+             descriptive posture documents (and forbids from per-fold selection)"
         );
     }
 
