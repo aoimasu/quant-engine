@@ -16,6 +16,7 @@ use std::collections::BTreeMap;
 
 use qe_domain::Bar;
 use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::{Decimal, MathematicalOps};
 
 /// Default rolling window (bars) for the volatility / efficiency statistics.
 pub const DEFAULT_REGIME_WINDOW: usize = 20;
@@ -86,9 +87,34 @@ impl RegimeConfig {
 }
 
 /// Close price of `bar` as `f64` (prices are positive `Decimal`s; `to_f64` is lossless for the
-/// magnitudes here and only fails on non-finite, which a validated `Price` never is).
+/// magnitudes here and only fails on non-finite, which a validated `Price` never is). Used for the
+/// price-space **efficiency ratio** (no transcendental — cross-arch stable already).
 fn close_f64(bar: &Bar) -> f64 {
     bar.close().get().to_f64().unwrap_or(0.0)
+}
+
+/// Close price of `bar` as the exact `Decimal` — the input to the decimal log-return (QE-480).
+fn close_dec(bar: &Bar) -> Decimal {
+    bar.close().get()
+}
+
+/// The per-bar log-return `ln(p1 / p0)` computed in **`rust_decimal`** (QE-480), the sole transcendental
+/// in the regime labeller. `ln()` in `f64` is not IEEE-754 correctly-rounded, so its last bit is
+/// platform-dependent — on a knife-edge bar it can round differently on arm64 vs x86_64, flip a
+/// Calm↔Volatile label through the rolling-vol median split, change the sealed `regime_composition`, and
+/// therefore change the **vintage id**, violating QE-006. Decimal `MathematicalOps::checked_ln` is integer
+/// arithmetic, byte-reproducible on the pinned toolchain (mirroring the `powd` pattern in
+/// `qe_risk::slippage`), so the whole `rets → vols → median` chain is cross-arch stable before the f64
+/// hand-off to the composition tally. Non-positive prices or an undefined `ln` fail closed to `0.0`
+/// (mirrors the prior `p0 > 0 && p1 > 0` guard).
+fn log_return(p0: Decimal, p1: Decimal) -> f64 {
+    if p0 <= Decimal::ZERO || p1 <= Decimal::ZERO {
+        return 0.0;
+    }
+    match (p1 / p0).checked_ln() {
+        Some(r) => r.to_f64().unwrap_or(0.0),
+        None => 0.0,
+    }
 }
 
 /// Label each bar of `bars` along the volatility and trend axes (QE-125/D1).
@@ -106,15 +132,13 @@ pub fn label_regimes(bars: &[Bar], cfg: &RegimeConfig) -> Vec<Option<Regime>> {
     }
 
     let closes: Vec<f64> = bars.iter().map(close_f64).collect();
-    // log-returns; rets[k] is the return into bar k (k ≥ 1). rets[0] is unused.
+    // Exact decimal closes for the transcendental log-return (QE-480 — cross-arch determinism).
+    let closes_dec: Vec<Decimal> = bars.iter().map(close_dec).collect();
+    // log-returns; rets[k] is the return into bar k (k ≥ 1). rets[0] is unused. Computed in rust_decimal
+    // (QE-480) so the sole transcendental in the path is byte-reproducible across architectures.
     let mut rets = vec![0.0f64; n];
     for k in 1..n {
-        let (p0, p1) = (closes[k - 1], closes[k]);
-        rets[k] = if p0 > 0.0 && p1 > 0.0 {
-            (p1 / p0).ln()
-        } else {
-            0.0
-        };
+        rets[k] = log_return(closes_dec[k - 1], closes_dec[k]);
     }
 
     // Per-bar rolling volatility and efficiency ratio (None in the warm-up).
@@ -257,7 +281,7 @@ pub fn expectancy_table(returns: &[f64], labels: &[Option<Regime>]) -> Expectanc
 mod tests {
     use super::*;
     use qe_domain::{Bar, Price, Qty, Resolution, Timestamp};
-    use rust_decimal::Decimal;
+    use rust_decimal::{Decimal, MathematicalOps};
 
     /// A 5-minute bar at `i` whose OHLC are all `price` (flat candle — only the close drives regimes).
     fn flat_bar(i: usize, price: f64) -> Bar {
@@ -300,6 +324,36 @@ mod tests {
         (0..n)
             .map(|i| if i % 2 == 0 { 100.0 } else { 100.0 + amp })
             .collect()
+    }
+
+    #[test]
+    fn log_return_is_decimal_and_cross_arch_deterministic() {
+        // QE-480: the regime log-return is computed in rust_decimal (integer arithmetic, byte-reproducible
+        // on the pinned toolchain), not f64 `ln()` (last bit platform-dependent). Pin the result to the
+        // decimal computation and prove the helper matches it exactly and is repeatable.
+        let p0 = Decimal::new(10_000, 2); // 100.00
+        let p1 = Decimal::new(10_050, 2); // 100.50
+        let expected = (p1 / p0).checked_ln().unwrap().to_f64().unwrap();
+        assert_eq!(
+            log_return(p0, p1),
+            expected,
+            "log-return must be the decimal ln"
+        );
+        assert_eq!(
+            log_return(p0, p1),
+            log_return(p0, p1),
+            "the decimal log-return is deterministic (identical on repeat / across arches)"
+        );
+        // Non-positive prices fail closed to 0.0 (mirrors the prior p0>0 && p1>0 guard).
+        assert_eq!(log_return(Decimal::ZERO, p1), 0.0);
+        assert_eq!(log_return(p0, Decimal::ZERO), 0.0);
+
+        // A knife-edge series labels identically on repeat (the decimal path removes the platform-dependent
+        // rounding the f64 ln introduced at the median split).
+        let closes: Vec<f64> = (0..60).map(|i| 100.0 + (i as f64) * 0.01).collect();
+        let bars = bars_from_closes(&closes);
+        let cfg = RegimeConfig::with_defaults();
+        assert_eq!(label_regimes(&bars, &cfg), label_regimes(&bars, &cfg));
     }
 
     #[test]
