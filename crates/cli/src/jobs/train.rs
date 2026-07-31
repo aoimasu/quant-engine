@@ -56,8 +56,13 @@ use super::datetime::{format_ymd, parse_ymd_to_millis};
 use super::features::{catalogue_schema, check_schema, to_decision_bars};
 use super::{ProgressLine, RunError};
 
-/// The even CSCV block count for the small-budget robustness assessment (min meaningful value).
-const CSCV_BLOCKS: usize = 2;
+/// The even CSCV block count for the robustness assessment's PBO estimator (QE-478). `S = 8` gives
+/// `C(8,4) = 70` balanced partitions, so PBO is a smooth fraction over 70 logits rather than the
+/// degenerate `{0, 0.5, 1}` three-value estimator `S = 2` produced (`combinations(2,1)` = 2 partitions).
+/// A "probability of overfitting" that can only resolve to three points is not a probability; 70 partitions
+/// make the live `max_pbo = 0.5` gate a real threshold. Also the min strategy count the thin-run guard
+/// (`pool.len() < CSCV_BLOCKS`) requires before computing PBO — a thinner pool falls back to conservative.
+const CSCV_BLOCKS: usize = 8;
 /// The even CPCV block count `S` for the OOS distribution (QE-469): `C(6,3) = 20` held-out configurations
 /// ⇒ `φ = C(5,2) = 10` López de Prado paths — a powered distribution (`≥ DEFAULT_MIN_PATHS`) while keeping
 /// each block large enough for a real purged split on the train window.
@@ -857,13 +862,16 @@ pub fn run_train_job(
         &G1Criteria::with_defaults(),
     );
 
-    // ---- QE-469: CPCV out-of-sample DISTRIBUTION as a hard, FAIL-CLOSED promotion criterion ----------
-    // Replace the single G1 terminal-holdout point estimate with a DISTRIBUTION of held-out Sharpe/DSR:
-    // split the deployed ensemble's net-of-cost train series into `DEFAULT_CPCV_BLOCKS` contiguous blocks
-    // and, over every balanced `C(S,S/2)` partition, hold out `S/2` blocks under the SAME purge+embargo as
-    // `PurgedKFold` (`qe_validation::cpcv`, reusing `pbo.rs`'s enumeration + the PurgedKFold arithmetic).
-    // Each held-out path's DSR deflates against the SAME basis (`robustness.trial_variance` / `n_trials`)
-    // the G1 DSR uses, so the distribution is directly comparable to the point estimate it surrounds.
+    // ---- QE-469/QE-477: CPCV out-of-sample DISTRIBUTION as a hard, FAIL-CLOSED promotion criterion ------
+    // Replace the single G1 terminal-holdout point estimate with a DISTRIBUTION of GENUINELY held-out
+    // Sharpe/DSR. QE-477: the distribution is built over the frozen `holdout_returns` (the deployed
+    // ensemble's net-of-cost series on the untouched holdout `holdout_bars`), NOT the train-window
+    // `in_sample_returns` the ensemble was selected on — so every held-out configuration's Sharpe/DSR is
+    // measured on data outside the selection window and the "OOS" label is honest. Split the holdout series
+    // into `DEFAULT_CPCV_BLOCKS` contiguous blocks and, over every balanced `C(S,S/2)` partition, hold out
+    // `S/2` blocks under the SAME purge+embargo geometry as `PurgedKFold` (`qe_validation::cpcv`, reusing
+    // `pbo.rs`'s enumeration + the PurgedKFold arithmetic). Each held-out path's DSR deflates against the
+    // SAME basis (`robustness.trial_variance` / `n_trials`) the G1 DSR uses.
     //
     // AC #4 — the CPCV distribution is a REAL promotion criterion (not just recorded evidence): promotion
     // is conjoined with `CpcvGate::passes` (the LOWER `dsr_percentile` of held-out DSR ≥ floor). An
@@ -871,7 +879,7 @@ pub fn run_train_job(
     // `n_paths < min_paths` — makes `cpcv_gate_pass == false` and **flips the verdict to rejected**
     // (fail-closed), never default-accept. PBO stays primary and untouched; CPCV is additive.
     let cpcv_dist = qe_validation::CpcvDistribution::build(
-        &in_sample_returns,
+        &holdout_returns,
         DEFAULT_CPCV_BLOCKS,
         schema.max_lookback(),
         DEFAULT_LABEL_HORIZON,
@@ -970,6 +978,27 @@ pub fn run_train_job(
     let cpcv = cpcv_dist
         .as_ref()
         .map(|d| cpcv_summary(d, DEFAULT_CPCV_BLOCKS));
+    // ---- QE-476: seal the G1 promotion verdict into the hashed evidence (WRITE-BUT-MARK policy) --------
+    // Mirror the final `g1` decision (after the CPCV conjunction at the gate above) into the
+    // content-addressed vintage: the `promoted` flag plus each criterion's frozen name/value/threshold.
+    // The threshold each criterion was judged against is now pinned in the hash, so a later drift of a
+    // threshold constant cannot re-classify an already-sealed artifact. Write-but-mark: a G1-FAILED
+    // candidate is still sealed and written (preserving negative-result lineage), marked `promoted = false`
+    // — downstream selectors read `SealEvidence::is_promoted()` and refuse a non-promoted vintage. Every
+    // figure is rounded `hash_stable` (QE-482 precision) so the block round-trips byte-identically.
+    let promotion = Some(qe_vintage::PromotionVerdict {
+        promoted: g1.promoted,
+        criteria: g1
+            .criteria
+            .iter()
+            .map(|c| qe_vintage::SealedCriterion {
+                name: c.name.clone(),
+                passed: c.passed,
+                value: hash_stable(c.value),
+                threshold: hash_stable(c.threshold),
+            })
+            .collect(),
+    });
     let seal_evidence = qe_vintage::SealEvidence {
         dsr: hash_stable(robustness.dsr),
         pbo: hash_stable(robustness.pbo),
@@ -986,6 +1015,8 @@ pub fn run_train_job(
         fdr: None,
         // QE-469: the CPCV OOS distribution summary (the promotion-facing OOS evidence).
         cpcv,
+        // QE-476: the content-hashed G1 promotion verdict + frozen per-criterion thresholds.
+        promotion,
     };
     // The canonical net-of-cost holdout series on the DEPLOYED capacity-capped weights (QE-438), rounded to
     // a hash-stable precision so it round-trips byte-identically (same rule as `weights`).
@@ -1484,6 +1515,25 @@ mod tests {
         assert_eq!(search_pct(0, 8), 20);
         assert_eq!(search_pct(8, 8), 70);
         assert!((20..=70).contains(&search_pct(4, 8)));
+    }
+
+    #[test]
+    fn thin_pool_falls_back_to_conservative_pbo() {
+        // QE-478: with CSCV_BLOCKS raised to 8 (C(8,4)=70 partitions ⇒ a smooth PBO), the thin-run guard
+        // `pool.len() < CSCV_BLOCKS` must still fire — an under-powered pool falls back to the CONSERVATIVE
+        // robustness report (pbo = 1.0, dsr pinned to the floor), never a vacuous pass computed on too few
+        // strategies. A pool of `CSCV_BLOCKS - 1` strategies is under-powered.
+        let thin: Vec<Vec<f64>> = vec![vec![0.01, 0.02, -0.01, 0.0]; CSCV_BLOCKS - 1];
+        let no_bars: Vec<DecisionBar> = Vec::new();
+        let report = assess_robustness(&thin, &[], &[0.01, -0.02, 0.03], &no_bars, 100, 7);
+        assert_eq!(
+            report.pbo, 1.0,
+            "a pool thinner than CSCV_BLOCKS must fail closed to the conservative pbo = 1.0"
+        );
+        assert_eq!(
+            report.dsr, 0.0,
+            "the conservative report pins DSR to the floor"
+        );
     }
 
     #[test]
