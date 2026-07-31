@@ -333,7 +333,8 @@ mod tests {
         // Isolate ONE reject (design §5 "rejects all count toward N"). `illuminate` runs
         // `distinct.insert(hash)` + `total += 1` for EVERY offspring BEFORE the archive decides
         // accept/reject, so a dedup-rejected offspring is still counted. Here two offspring share the same
-        // canonical form AND behavioural series: the first fills the cell, the second is DedupRejected —
+        // canonical form AND behavioural series: the first fills the cell, the second (NOT strictly
+        // fitter, so QE-488's fitter-replacement rule does not apply) is DedupRejected —
         // total = 2 (both counted), distinct = 1 (same canonical hash), and only one enters the archive.
         let mut archive = ExprArchive::new();
         let mut distinct: HashSet<String> = HashSet::new();
@@ -368,7 +369,7 @@ mod tests {
         total += 1;
         let out2 = archive.insert(ExprElite {
             tree: tree.clone(),
-            fitness: 2.0,
+            fitness: 1.0,
             hash: hash2,
             series: series.clone(),
         });
@@ -376,7 +377,7 @@ mod tests {
         assert_eq!(
             out2,
             ExprInsert::DedupRejected,
-            "identical behavioural series in the same cell ⇒ dedup reject"
+            "identical behavioural series in the same cell, not strictly fitter ⇒ dedup reject"
         );
         assert_eq!(
             total, 2,

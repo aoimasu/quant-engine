@@ -106,11 +106,28 @@ impl ExprArchive {
         let cell = descriptor_for_tree(&elite.tree);
         let sub = self.cells.entry(cell).or_default();
 
-        // In-sample behavioural dedup against the target cell's existing elites.
-        for existing in sub.iter() {
-            if quantised_correlation(&existing.series, &elite.series) > DEDUP_THRESHOLD {
-                return ExprInsert::DedupRejected;
-            }
+        // In-sample behavioural dedup against the target cell's existing elites (QE-488). Find the
+        // nearest behavioural neighbour — the existing elite with the highest correlation above
+        // `DEDUP_THRESHOLD`, ties broken by lowest index (as in the worst-elite selection below). Apply
+        // the standard behavioural-archive replacement rule: a near-duplicate REPLACES that neighbour iff
+        // it is strictly fitter (crediting the operator via `ImprovedElite`, so a `local_refine` nudge
+        // that improves the cell is not penalised as `NoImprovement`); it is only rejected when it is not
+        // better than its neighbour (unchanged diversity protection). Cross-cell offspring never reach
+        // here — `descriptor_for_tree` already routed them to a different cell.
+        let nearest_dup = sub
+            .iter()
+            .enumerate()
+            .map(|(i, existing)| (i, quantised_correlation(&existing.series, &elite.series)))
+            .filter(|&(_, corr)| corr > DEDUP_THRESHOLD)
+            .max_by(|&(ia, ca), &(ib, cb)| ca.total_cmp(&cb).then_with(|| ib.cmp(&ia)))
+            .map(|(i, _)| i);
+        if let Some(idx) = nearest_dup {
+            return if elite.fitness > sub[idx].fitness {
+                sub[idx] = elite;
+                ExprInsert::ImprovedElite
+            } else {
+                ExprInsert::DedupRejected
+            };
         }
 
         if sub.is_empty() {
@@ -249,24 +266,79 @@ mod tests {
     }
 
     #[test]
-    fn behavioural_dedup_rejects_a_correlated_offspring() {
+    fn behavioural_dedup_rejects_a_non_fitter_correlated_offspring() {
         let mut arc = ExprArchive::new();
         let s = series(&[0, 1, 2, 3, 4, 5]);
         assert_eq!(
             arc.insert(elite(win(WinOp::Std, Field::Close, 20), 1.0, s.clone())),
             ExprInsert::NewCell
         );
-        // An identical-series offspring in the same cell is dedup-rejected.
+        // An identical-series offspring that is NOT strictly fitter is still dedup-rejected (QE-488:
+        // diversity protection is unchanged for non-improvements) — cell keeps the incumbent.
         assert_eq!(
-            arc.insert(elite(win(WinOp::Std, Field::Close, 20), 2.0, s.clone())),
+            arc.insert(elite(win(WinOp::Std, Field::Close, 20), 1.0, s.clone())),
             ExprInsert::DedupRejected
         );
+        assert_eq!(arc.total_elites(), 1);
         // An uncorrelated offspring in the same cell is accepted.
         let uncorr = series(&[3, 3, 0, 5, 1, 2]);
         assert_ne!(
             arc.insert(elite(win(WinOp::Std, Field::High, 20), 2.0, uncorr)),
             ExprInsert::DedupRejected
         );
+    }
+
+    /// QE-488: a `local_refine`-style +ε-fitness near-duplicate (correlation `> 0.95` with the same-cell
+    /// incumbent, strictly fitter) REPLACES the incumbent and credits the operator via `ImprovedElite` —
+    /// it is not penalised as a `DedupRejected`/`NoImprovement`. A strictly-worse near-duplicate is still
+    /// rejected, and the cell size never grows on a dedup-replace.
+    #[test]
+    fn fitter_near_duplicate_replaces_incumbent_and_is_credited() {
+        let mut arc = ExprArchive::new();
+        let s = series(&[0, 1, 2, 3, 4, 5]);
+        assert_eq!(
+            arc.insert(elite(win(WinOp::Std, Field::Close, 20), 1.0, s.clone())),
+            ExprInsert::NewCell
+        );
+
+        // Strictly-fitter near-duplicate → replaces the incumbent, credited as an improvement.
+        assert_eq!(
+            arc.insert(elite(win(WinOp::Std, Field::Close, 20), 2.0, s.clone())),
+            ExprInsert::ImprovedElite,
+        );
+        // Cell did not grow — the near-duplicate displaced its neighbour rather than joining it.
+        assert_eq!(arc.total_elites(), 1);
+        let cell = *arc.occupied_cells().next().unwrap();
+        assert!((arc.best_in(&cell).unwrap().fitness - 2.0).abs() < 1e-9);
+
+        // A strictly-worse near-duplicate is still rejected (incumbent 2.0 retained).
+        assert_eq!(
+            arc.insert(elite(win(WinOp::Std, Field::Close, 20), 1.5, s.clone())),
+            ExprInsert::DedupRejected,
+        );
+        assert_eq!(arc.total_elites(), 1);
+        assert!((arc.best_in(&cell).unwrap().fitness - 2.0).abs() < 1e-9);
+    }
+
+    /// QE-488: cross-cell diversity is preserved — an offspring landing in a distinct `ExprCell` is added
+    /// without any dedup comparison, exactly as before, even if its series correlates with another cell's
+    /// elite. Dedup is same-cell only (the offspring's descriptor routed it elsewhere).
+    #[test]
+    fn cross_cell_offspring_bypasses_dedup() {
+        let mut arc = ExprArchive::new();
+        let s = series(&[0, 1, 2, 3, 4, 5]);
+        // Volatility family (Std) cell.
+        assert_eq!(
+            arc.insert(elite(win(WinOp::Std, Field::Close, 20), 1.0, s.clone())),
+            ExprInsert::NewCell
+        );
+        // A Momentum family (Delta) tree lands in a DISTINCT cell — an identical series does not dedup it.
+        assert_eq!(
+            arc.insert(elite(win(WinOp::Delta, Field::Close, 10), 1.0, s.clone())),
+            ExprInsert::NewCell,
+        );
+        assert_eq!(arc.len(), 2, "distinct family cells, no cross-cell dedup");
+        assert_eq!(arc.total_elites(), 2);
     }
 
     #[test]
@@ -284,7 +356,12 @@ mod tests {
             match i {
                 0 => assert_eq!(out, ExprInsert::NewCell),
                 x if x < SUBPOP_SIZE => {
-                    assert!(matches!(out, ExprInsert::Added | ExprInsert::DedupRejected))
+                    // QE-488: a fitter near-duplicate may now replace an incumbent even before the cell
+                    // fills, so `ImprovedElite` is also admissible here.
+                    assert!(matches!(
+                        out,
+                        ExprInsert::Added | ExprInsert::DedupRejected | ExprInsert::ImprovedElite
+                    ))
                 }
                 _ => assert!(matches!(
                     out,
