@@ -130,8 +130,11 @@ pub struct SealEvidence {
     pub fdr: Option<f64>,
     /// The CPCV out-of-sample **distribution** summary (QE-469): the median/IQR/percentile of the held-out
     /// Sharpe/DSR distribution and the fraction of held-out paths clearing the DSR floor — the promotion-
-    /// facing OOS evidence that replaces the single G1 terminal-holdout point estimate. `None` on a path
-    /// that does not run CPCV (byte-identical to pre-QE-469 — see the struct doc). Content-addressed.
+    /// facing OOS evidence that replaces the single G1 terminal-holdout point estimate. **QE-477:** built
+    /// over the FROZEN HOLDOUT series (the deployed ensemble's net-of-cost returns on the untouched
+    /// holdout), **not** the in-sample selection window — so "out-of-sample" is literal, every held-out
+    /// configuration's Sharpe/DSR is measured outside the window the ensemble was chosen on. `None` on a
+    /// path that does not run CPCV (byte-identical to pre-QE-469 — see the struct doc). Content-addressed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cpcv: Option<CpcvSummary>,
     /// The sealed **G1 promotion verdict** (QE-476): the content-hashed mirror of the run-doc
@@ -158,7 +161,8 @@ impl SealEvidence {
 
 /// The CPCV out-of-sample distribution summary (QE-469 — López de Prado Ch. 12.4), persisted in the sealed
 /// [`SealEvidence`] so every downstream surface **reads** — never recomputes — the OOS distribution. Built
-/// by the seal path from `qe_validation::CpcvDistribution` over the deployed ensemble's net-of-cost series.
+/// by the seal path from `qe_validation::CpcvDistribution` over the deployed ensemble's net-of-cost
+/// **holdout** series (QE-477 — the frozen, untouched holdout, not the in-sample selection window).
 ///
 /// Carries the per-held-out-path Sharpe and DSR vectors (content-addressed by inclusion in the hashed
 /// content) plus the reduced summary the promotion gate and the report surface consume. Every field is a

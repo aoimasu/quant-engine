@@ -857,13 +857,16 @@ pub fn run_train_job(
         &G1Criteria::with_defaults(),
     );
 
-    // ---- QE-469: CPCV out-of-sample DISTRIBUTION as a hard, FAIL-CLOSED promotion criterion ----------
-    // Replace the single G1 terminal-holdout point estimate with a DISTRIBUTION of held-out Sharpe/DSR:
-    // split the deployed ensemble's net-of-cost train series into `DEFAULT_CPCV_BLOCKS` contiguous blocks
-    // and, over every balanced `C(S,S/2)` partition, hold out `S/2` blocks under the SAME purge+embargo as
-    // `PurgedKFold` (`qe_validation::cpcv`, reusing `pbo.rs`'s enumeration + the PurgedKFold arithmetic).
-    // Each held-out path's DSR deflates against the SAME basis (`robustness.trial_variance` / `n_trials`)
-    // the G1 DSR uses, so the distribution is directly comparable to the point estimate it surrounds.
+    // ---- QE-469/QE-477: CPCV out-of-sample DISTRIBUTION as a hard, FAIL-CLOSED promotion criterion ------
+    // Replace the single G1 terminal-holdout point estimate with a DISTRIBUTION of GENUINELY held-out
+    // Sharpe/DSR. QE-477: the distribution is built over the frozen `holdout_returns` (the deployed
+    // ensemble's net-of-cost series on the untouched holdout `holdout_bars`), NOT the train-window
+    // `in_sample_returns` the ensemble was selected on — so every held-out configuration's Sharpe/DSR is
+    // measured on data outside the selection window and the "OOS" label is honest. Split the holdout series
+    // into `DEFAULT_CPCV_BLOCKS` contiguous blocks and, over every balanced `C(S,S/2)` partition, hold out
+    // `S/2` blocks under the SAME purge+embargo geometry as `PurgedKFold` (`qe_validation::cpcv`, reusing
+    // `pbo.rs`'s enumeration + the PurgedKFold arithmetic). Each held-out path's DSR deflates against the
+    // SAME basis (`robustness.trial_variance` / `n_trials`) the G1 DSR uses.
     //
     // AC #4 — the CPCV distribution is a REAL promotion criterion (not just recorded evidence): promotion
     // is conjoined with `CpcvGate::passes` (the LOWER `dsr_percentile` of held-out DSR ≥ floor). An
@@ -871,7 +874,7 @@ pub fn run_train_job(
     // `n_paths < min_paths` — makes `cpcv_gate_pass == false` and **flips the verdict to rejected**
     // (fail-closed), never default-accept. PBO stays primary and untouched; CPCV is additive.
     let cpcv_dist = qe_validation::CpcvDistribution::build(
-        &in_sample_returns,
+        &holdout_returns,
         DEFAULT_CPCV_BLOCKS,
         schema.max_lookback(),
         DEFAULT_LABEL_HORIZON,
