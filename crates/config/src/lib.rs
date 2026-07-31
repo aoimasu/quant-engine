@@ -40,6 +40,18 @@ impl Config {
     /// Returns [`ConfigError::Load`] if sources cannot be read/parsed, or [`ConfigError::Invalid`]
     /// if a field fails validation.
     pub fn load(profile: Profile, base_path: &Path) -> Result<Self, ConfigError> {
+        // QE-474: fail closed on an absent base file. figment's `Toml::file` is missing-file-tolerant
+        // (an absent path yields an empty dict), and every field carries a serde default, so without this
+        // guard a missing base would silently boot on defaults (default universe, `seed = 0`) — violating
+        // the crate's fail-fast contract. Only the BASE layer is mandatory; the profile overlay and the
+        // `QE_` env layer stay optional below.
+        if !base_path.exists() {
+            return Err(ConfigError::Load(format!(
+                "config base file not found: {} (a missing config must be a hard stop, not a silent \
+                 default boot)",
+                base_path.display()
+            )));
+        }
         let mut fig = Figment::new().merge(Toml::file(base_path));
         if let Some(overlay) = profile_overlay_path(base_path, profile) {
             fig = fig.merge(Toml::file(overlay));
@@ -289,6 +301,37 @@ seed = 42
         assert_eq!(cfg.profile, Profile::Train);
         assert_eq!(cfg.bars.base, "5m");
         assert_eq!(cfg.determinism.seed, 42);
+    }
+
+    #[test]
+    fn load_fails_closed_when_base_file_is_absent() {
+        // QE-474: a missing base config is a hard stop for every profile — NOT an Ok-on-defaults boot.
+        let missing = Path::new("qe-474-definitely-absent-config.toml");
+        assert!(!missing.exists());
+        for profile in [Profile::Train, Profile::RuntimeSim, Profile::RuntimeLive] {
+            let err = Config::load(profile, missing).unwrap_err();
+            assert!(
+                matches!(err, ConfigError::Load(msg) if msg.contains("qe-474-definitely-absent-config.toml")),
+                "absent base must be a ConfigError::Load naming the path, got a defaulted config"
+            );
+        }
+    }
+
+    #[test]
+    fn load_succeeds_with_present_base_and_absent_overlay() {
+        // QE-474: only the BASE layer is mandatory — a present base with no `<stem>.<profile>.toml`
+        // overlay still loads (overlay skip-if-absent preserved).
+        use std::fs;
+        let dir = std::env::temp_dir().join(format!("qe474_base_{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("temp dir");
+        let base = dir.join("config.toml");
+        fs::write(&base, VALID).expect("write base");
+        // no `config.train.toml` overlay is created next to it ⇒ the overlay layer is skipped
+        let cfg =
+            Config::load(Profile::Train, &base).expect("present base + absent overlay must load");
+        assert_eq!(cfg.profile, Profile::Train);
+        assert_eq!(cfg.determinism.seed, 42);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
