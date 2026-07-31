@@ -106,14 +106,17 @@ fn quantize_fill(cfg: &BacktestConfig, price: Decimal, qty: Decimal) -> (Decimal
     }
 }
 
-/// Whether a (quantized) fill should execute: it must have positive size and, under a [`SymbolFilter`],
-/// clear `min_notional`. Mirrors — and subsumes — the historical `qty > 0` zero-floor guard, so with no
-/// filter the predicate is exactly `qty > 0`.
-fn fill_ok(cfg: &BacktestConfig, price: Decimal, qty: Decimal) -> bool {
+/// Whether a (quantized) fill should execute: it must have positive size and, when `enforce_min_notional`
+/// is set, clear the venue `min_notional`. The minNotional screen guards **entries** (opening/increasing
+/// exposure) — a venue rejects a too-small *new* order — but must never block an **exit**: a position must
+/// always be closable, or a sub-minNotional close would strand it open indefinitely. So callers pass
+/// `true` on entry fills and `false` on closing/reducing fills. Mirrors — and subsumes — the historical
+/// `qty > 0` zero-floor guard, so with no filter the predicate is exactly `qty > 0` on either side.
+fn fill_ok(cfg: &BacktestConfig, price: Decimal, qty: Decimal, enforce_min_notional: bool) -> bool {
     qty > Decimal::ZERO
         && match cfg.symbol_filter {
-            Some(f) => f.clears_min_notional(price, qty),
-            None => true,
+            Some(f) if enforce_min_notional => f.clears_min_notional(price, qty),
+            _ => true,
         }
 }
 
@@ -310,7 +313,7 @@ pub fn backtest_with_trades(
                         // symbol filter (the default) `(fill_price, qty)` and `fill_ok` reduce to the raw
                         // price and the historical `qty > 0` guard — byte-identical to the pre-QE-487 fill.
                         let (fill_price, qty) = quantize_fill(cfg, price, notional / price);
-                        if fill_ok(cfg, fill_price, qty) {
+                        if fill_ok(cfg, fill_price, qty, true) {
                             let side = match dir {
                                 Direction::Long => Side::Buy,
                                 Direction::Short => Side::Sell,
@@ -326,8 +329,10 @@ pub fn backtest_with_trades(
                         // SAME filter. Entries are flat-only and one fill lands per bar, so `pos_qty` is
                         // exactly the (already step-quantized) entry size ⇒ the close floor is a no-op and
                         // the position closes whole; with no filter this is the historical raw-price close.
+                        // minNotional is WAIVED on the exit (`enforce_min_notional = false`): a position
+                        // must always be closable, else a sub-minNotional close would strand it open.
                         let (fill_price, qty) = quantize_fill(cfg, price, pos_qty.abs());
-                        if fill_ok(cfg, fill_price, qty) {
+                        if fill_ok(cfg, fill_price, qty, false) {
                             let side = if pos_qty > Decimal::ZERO {
                                 Side::Sell
                             } else {
@@ -1455,6 +1460,32 @@ mod tests {
             "no fills ⇒ no position change ⇒ zero net P&L"
         );
         assert!(!res.accepted);
+    }
+
+    #[test]
+    fn min_notional_gates_entries_but_never_blocks_an_exit() {
+        // QE-487 review fix: minNotional screens ENTRIES (opening/increasing exposure) but must NEVER
+        // block an EXIT — a sub-minNotional close would otherwise strand the position open forever.
+        let cfg = BacktestConfig {
+            symbol_filter: Some(SymbolFilter {
+                step_size: Decimal::new(1, 8),
+                tick_size: Decimal::new(1, 8),
+                min_notional: Decimal::from(1_000),
+            }),
+            ..BacktestConfig::default()
+        };
+        let price = Decimal::from(100);
+        let qty = Decimal::new(5, 3); // 0.005 ⇒ notional 0.5 ≪ 1_000
+        assert!(
+            !fill_ok(&cfg, price, qty, true),
+            "a sub-minNotional ENTRY is rejected"
+        );
+        assert!(
+            fill_ok(&cfg, price, qty, false),
+            "a sub-minNotional EXIT must still fill — never strand a position"
+        );
+        // the positive-size zero-floor still holds on the exit side
+        assert!(!fill_ok(&cfg, price, Decimal::ZERO, false));
     }
 
     #[test]
