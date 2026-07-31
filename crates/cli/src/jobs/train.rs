@@ -56,8 +56,13 @@ use super::datetime::{format_ymd, parse_ymd_to_millis};
 use super::features::{catalogue_schema, check_schema, to_decision_bars};
 use super::{ProgressLine, RunError};
 
-/// The even CSCV block count for the small-budget robustness assessment (min meaningful value).
-const CSCV_BLOCKS: usize = 2;
+/// The even CSCV block count for the robustness assessment's PBO estimator (QE-478). `S = 8` gives
+/// `C(8,4) = 70` balanced partitions, so PBO is a smooth fraction over 70 logits rather than the
+/// degenerate `{0, 0.5, 1}` three-value estimator `S = 2` produced (`combinations(2,1)` = 2 partitions).
+/// A "probability of overfitting" that can only resolve to three points is not a probability; 70 partitions
+/// make the live `max_pbo = 0.5` gate a real threshold. Also the min strategy count the thin-run guard
+/// (`pool.len() < CSCV_BLOCKS`) requires before computing PBO — a thinner pool falls back to conservative.
+const CSCV_BLOCKS: usize = 8;
 /// The even CPCV block count `S` for the OOS distribution (QE-469): `C(6,3) = 20` held-out configurations
 /// ⇒ `φ = C(5,2) = 10` López de Prado paths — a powered distribution (`≥ DEFAULT_MIN_PATHS`) while keeping
 /// each block large enough for a real purged split on the train window.
@@ -1510,6 +1515,25 @@ mod tests {
         assert_eq!(search_pct(0, 8), 20);
         assert_eq!(search_pct(8, 8), 70);
         assert!((20..=70).contains(&search_pct(4, 8)));
+    }
+
+    #[test]
+    fn thin_pool_falls_back_to_conservative_pbo() {
+        // QE-478: with CSCV_BLOCKS raised to 8 (C(8,4)=70 partitions ⇒ a smooth PBO), the thin-run guard
+        // `pool.len() < CSCV_BLOCKS` must still fire — an under-powered pool falls back to the CONSERVATIVE
+        // robustness report (pbo = 1.0, dsr pinned to the floor), never a vacuous pass computed on too few
+        // strategies. A pool of `CSCV_BLOCKS - 1` strategies is under-powered.
+        let thin: Vec<Vec<f64>> = vec![vec![0.01, 0.02, -0.01, 0.0]; CSCV_BLOCKS - 1];
+        let no_bars: Vec<DecisionBar> = Vec::new();
+        let report = assess_robustness(&thin, &[], &[0.01, -0.02, 0.03], &no_bars, 100, 7);
+        assert_eq!(
+            report.pbo, 1.0,
+            "a pool thinner than CSCV_BLOCKS must fail closed to the conservative pbo = 1.0"
+        );
+        assert_eq!(
+            report.dsr, 0.0,
+            "the conservative report pins DSR to the floor"
+        );
     }
 
     #[test]

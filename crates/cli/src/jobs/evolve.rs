@@ -32,8 +32,10 @@ use serde::Serialize;
 use super::datetime::parse_ymd_to_millis;
 use super::{ProgressLine, RunError};
 
-/// Even CSCV block count for the small-budget uncensored-PBO estimate (minimum meaningful value).
-const CSCV_BLOCKS: usize = 2;
+/// Even CSCV block count for the uncensored-PBO estimate (QE-478). `S = 8` gives `C(8,4) = 70` balanced
+/// partitions, so the uncensored PBO is a smooth fraction over 70 logits rather than the degenerate
+/// `{0, 0.5, 1}` three-value estimator `S = 2` produced. Kept in lockstep with `train.rs`'s `CSCV_BLOCKS`.
+const CSCV_BLOCKS: usize = 8;
 /// Single-asset / single-window basis for the analytic trial floor in Phase A (cross-asset pooling and
 /// multi-window folds are later-phase engine work; the honest distinct-canonical count still drives `N`).
 const EVOLVE_WINDOWS: usize = 1;

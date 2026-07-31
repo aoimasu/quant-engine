@@ -181,6 +181,47 @@ mod tests {
     }
 
     #[test]
+    fn pbo_takes_smooth_values_with_eight_blocks() {
+        // QE-478: with S=8 (C(8,4)=70 balanced partitions) PBO is a smooth fraction over 70 logits, not the
+        // degenerate {0, 0.5, 1} three-value estimator S=2 (combinations(2,1)=2 partitions) can only yield.
+        // A pool with genuine time-rotating leadership makes the IS-best's OOS rank differ across partitions,
+        // so PBO lands strictly inside (0, 1) at a value that is NOT one of the three S=2 points — proving
+        // the estimator now has real resolution.
+        let t = 48;
+        let matrix: Vec<Vec<f64>> = (0..t)
+            .map(|i| {
+                let phase = i as f64 * 0.3;
+                let osc = 0.005 * ((i % 3) as f64 - 1.0); // within-block dispersion ⇒ finite Sharpe
+                vec![
+                    0.02 + 0.01 * phase.sin() + osc,
+                    0.02 + 0.01 * (phase + 1.5).sin() + osc,
+                    0.02 + 0.01 * (phase + 3.0).sin() + osc,
+                    0.015 + osc, // a steady middling strategy
+                ]
+            })
+            .collect();
+        let report = pbo_cscv(&matrix, 8).unwrap();
+        assert_eq!(report.n_combinations, 70, "C(8,4) = 70 balanced partitions");
+        assert!(
+            report.pbo > 0.0 && report.pbo < 1.0,
+            "PBO must be a smooth interior fraction, got {}",
+            report.pbo
+        );
+        assert!(
+            ![0.0, 0.5, 1.0].contains(&report.pbo),
+            "PBO {} must not be one of the three values the degenerate S=2 estimator produces",
+            report.pbo
+        );
+        // It is a genuine k/70 fraction (more than three attainable values).
+        let k = report.pbo * 70.0;
+        assert!(
+            (k - k.round()).abs() < 1e-9,
+            "PBO must be a multiple of 1/70, got {}",
+            report.pbo
+        );
+    }
+
+    #[test]
     fn overfit_matrix_has_high_pbo() {
         // Each strategy is great in exactly one half of time and terrible in the other, anti-correlated:
         // whoever wins IS loses OOS ⇒ PBO near 1. A within-block oscillation gives every block a genuine
