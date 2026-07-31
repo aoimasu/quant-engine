@@ -178,7 +178,13 @@ pub fn pairwise_corr_penalty(series: &[Vec<f64>], mode: CorrDeflation) -> CorrPe
     for (i, si) in series.iter().enumerate() {
         for sj in &series[i + 1..] {
             let n = si.len().min(sj.len());
-            sum += deflate_r(pearson(si, sj), n, mode).max(0.0);
+            // QE-484: correlate over the pair's COMMON PREFIX. `pearson` returns 0 for unequal-length
+            // inputs, so passing the untruncated `si`/`sj` would score a genuinely-correlated differing-
+            // length pair as *uncorrelated* (0) while still recording `effective_n = n` — the penalty and
+            // its sample size would rest on different point sets. Slicing both to `&_[..n]` puts them on
+            // the same `n` points; for the equal-length production path `n == si.len() == sj.len()`, so
+            // the slice is a no-op and the result is byte-identical.
+            sum += deflate_r(pearson(&si[..n], &sj[..n]), n, mode).max(0.0);
             pairs += 1;
             effective_n = effective_n.min(n);
         }
@@ -958,6 +964,40 @@ mod tests {
             pairwise_corr_penalty(&[vec![0.01; 10]], CorrDeflation::default()).effective_n,
             0
         );
+    }
+
+    #[test]
+    fn unequal_length_correlated_pair_scores_nonzero_over_the_common_prefix() {
+        // QE-484: a genuinely correlated pair of DIFFERENT lengths. Before the fix `pearson` saw the
+        // unequal lengths and returned 0 (scored as *uncorrelated*) while `effective_n` still recorded
+        // the min length — the penalty and its sample size rested on different point sets. Now both rest
+        // on the common prefix, so a real correlation contributes a nonzero penalty and `effective_n`
+        // equals that common length.
+        let long: Vec<f64> = (0..20).map(|i| i as f64).collect();
+        // Perfectly (positively) correlated with `long`'s first 14 points, but 6 points shorter.
+        let short: Vec<f64> = (0..14).map(|i| 2.0 * i as f64 + 1.0).collect();
+
+        // Raw (undeflated) penalty: the common-prefix Pearson is +1 ⇒ penalty 1, not 0.
+        let raw = pairwise_corr_penalty(&[long.clone(), short.clone()], CorrDeflation::None);
+        approx(raw.value, 1.0);
+        assert!(
+            raw.value > 0.0,
+            "correlated unequal-length pair must score > 0"
+        );
+        assert_eq!(
+            raw.effective_n, 14,
+            "effective_n must be the common prefix length, matching the correlated point set"
+        );
+
+        // And under the production significance-floor default (N = 14 > 3, r = 1 clears R(14)) it is
+        // still penalised — the fix is not an artefact of turning deflation off.
+        let deflated = pairwise_corr_penalty(&[long, short], CorrDeflation::default());
+        assert!(
+            deflated.value > 0.0,
+            "supra-threshold correlated unequal-length pair must stay penalised, got {}",
+            deflated.value
+        );
+        assert_eq!(deflated.effective_n, 14);
     }
 
     #[test]
