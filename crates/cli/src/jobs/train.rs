@@ -56,12 +56,13 @@ use super::datetime::{format_ymd, parse_ymd_to_millis};
 use super::features::{catalogue_schema, check_schema, to_decision_bars};
 use super::{ProgressLine, RunError};
 
-/// The even CSCV block count for the robustness assessment's PBO estimator (QE-478). `S = 8` gives
-/// `C(8,4) = 70` balanced partitions, so PBO is a smooth fraction over 70 logits rather than the
-/// degenerate `{0, 0.5, 1}` three-value estimator `S = 2` produced (`combinations(2,1)` = 2 partitions).
-/// A "probability of overfitting" that can only resolve to three points is not a probability; 70 partitions
-/// make the live `max_pbo = 0.5` gate a real threshold. Also the min strategy count the thin-run guard
-/// (`pool.len() < CSCV_BLOCKS`) requires before computing PBO — a thinner pool falls back to conservative.
+/// The even CSCV block count for the robustness assessment's PBO estimator (QE-478/QE-490). `S = 8` gives
+/// `C(8,4) = 70` balanced partitions of the **time** axis (`assess` transposes the strategy-major trial
+/// matrix to time-major before CSCV — QE-490), so PBO is a smooth fraction over 70 logits rather than the
+/// degenerate `{0, 0.5, 1}` three-value estimator `S = 2` produced. A "probability of overfitting" that can
+/// only resolve to three points is not a probability; 70 partitions over a correctly time-oriented split
+/// make the live `max_pbo = 0.5` gate a real threshold. The thin-run guard falls back to the conservative
+/// report unless there are ≥ 2 trials AND each series is ≥ `CSCV_BLOCKS` bars (enough time to form blocks).
 const CSCV_BLOCKS: usize = 8;
 /// The even CPCV block count `S` for the OOS distribution (QE-469): `C(6,3) = 20` held-out configurations
 /// ⇒ `φ = C(5,2) = 10` López de Prado paths — a powered distribution (`≥ DEFAULT_MIN_PATHS`) while keeping
@@ -1480,7 +1481,12 @@ fn assess_robustness(
         trial_variance: 0.0,
         variance_trials: 0,
     };
-    if pool.len() < CSCV_BLOCKS {
+    // Fail closed unless PBO can be computed on a correctly time-oriented split (QE-490): CSCV partitions
+    // the TIME axis, so the powering dimensions are the per-trial series length (≥ CSCV_BLOCKS bars, to form
+    // the blocks) and the trial count (≥ 2, to rank an IS-best against peers). A thinner run falls back to
+    // the conservative report rather than a vacuous PBO.
+    let series_len = pool.first().map_or(0, Vec::len);
+    if pool.len() < 2 || series_len < CSCV_BLOCKS {
         return conservative();
     }
     // SPA benchmark: the instrument's per-bar buy-&-hold return over the train window (aligned to the
@@ -1518,17 +1524,18 @@ mod tests {
     }
 
     #[test]
-    fn thin_pool_falls_back_to_conservative_pbo() {
-        // QE-478: with CSCV_BLOCKS raised to 8 (C(8,4)=70 partitions ⇒ a smooth PBO), the thin-run guard
-        // `pool.len() < CSCV_BLOCKS` must still fire — an under-powered pool falls back to the CONSERVATIVE
-        // robustness report (pbo = 1.0, dsr pinned to the floor), never a vacuous pass computed on too few
-        // strategies. A pool of `CSCV_BLOCKS - 1` strategies is under-powered.
-        let thin: Vec<Vec<f64>> = vec![vec![0.01, 0.02, -0.01, 0.0]; CSCV_BLOCKS - 1];
+    fn thin_time_series_falls_back_to_conservative_pbo() {
+        // QE-478/QE-490: PBO splits the TIME axis (C(8,4)=70 partitions ⇒ a smooth PBO), so an under-powered
+        // run is one whose per-trial return series are shorter than CSCV_BLOCKS bars — too few to form the
+        // time blocks. It must fail closed to the CONSERVATIVE report (pbo = 1.0, dsr pinned), never a
+        // vacuous pass. Series of length `CSCV_BLOCKS - 1` are under-powered even with a wide (10-trial) pool.
+        let short = CSCV_BLOCKS - 1;
+        let thin: Vec<Vec<f64>> = (0..10).map(|_| vec![0.01; short]).collect();
         let no_bars: Vec<DecisionBar> = Vec::new();
         let report = assess_robustness(&thin, &[], &[0.01, -0.02, 0.03], &no_bars, 100, 7);
         assert_eq!(
             report.pbo, 1.0,
-            "a pool thinner than CSCV_BLOCKS must fail closed to the conservative pbo = 1.0"
+            "trial series shorter than CSCV_BLOCKS must fail closed to the conservative pbo = 1.0"
         );
         assert_eq!(
             report.dsr, 0.0,

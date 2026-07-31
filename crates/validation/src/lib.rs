@@ -148,7 +148,14 @@ pub fn assess(
     cfg: &SpaConfig,
     seed: u64,
 ) -> Result<RobustnessReport, ValidationError> {
-    let pbo_report = pbo_cscv(stats.trial_returns, stats.cscv_blocks)?;
+    // QE-490: `trial_returns` is strategy-major (`trial_returns[k]` = trial k's return series), but CSCV
+    // splits the TIME axis and `pbo_cscv` consumes a time-major `[time][strategy]` matrix. Transpose here —
+    // the pre-fix call fed a strategy-major matrix, so `S` partitioned the (≤N) trial axis and the PBO was
+    // meaningless. The GP path (`uncensored_pbo`) already transposes; SPA/DSR keep the strategy-major series.
+    let pbo_report = pbo_cscv(
+        &pbo::columns_to_time_major(stats.trial_returns),
+        stats.cscv_blocks,
+    )?;
     // QE-414: the deflation bar's dispersion comes from the uncensored full-cell population, not the
     // (possibly top-N) CSCV `trial_returns`. Both are recorded so the basis is auditable.
     let trial_variance = trial_sharpe_variance(stats.variance_returns);
@@ -226,5 +233,31 @@ mod tests {
             assess(&stats, &SpaConfig::with_defaults(), 1),
             Err(ValidationError::OddBlockCount(3))
         ));
+    }
+
+    #[test]
+    fn assess_splits_the_time_axis_not_the_trial_axis() {
+        // QE-490: with FEWER trials (4) than CSCV blocks (8) but a long TIME series (80), a strategy-major
+        // matrix would make pbo_cscv see t = #trials = 4 < 8 and return EmptyMatrix — so `assess` would err.
+        // Transposing to time-major lets S = 8 partition the 80-step TIME axis and PBO computes. This asserts
+        // CSCV splits time, not the trial axis: it FAILS on the pre-fix (untransposed) call and passes now.
+        let trials: Vec<Vec<f64>> = (0..4)
+            .map(|k| {
+                (0..80)
+                    .map(|i| 0.01 + 0.001 * k as f64 + 0.002 * ((i % 5) as f64 - 2.0))
+                    .collect()
+            })
+            .collect();
+        let stats = VintageStats {
+            candidate_returns: &trials[0],
+            trial_returns: &trials,
+            variance_returns: &trials,
+            excess_over_benchmark: &trials,
+            n_trials: 64,
+            cscv_blocks: 8,
+        };
+        let report = assess(&stats, &SpaConfig::with_defaults(), 7)
+            .expect("time-major transpose lets S=8 partition the 80-step time axis (pre-QE-490 this errored)");
+        assert!((0.0..=1.0).contains(&report.pbo));
     }
 }

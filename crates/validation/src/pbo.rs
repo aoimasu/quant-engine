@@ -75,6 +75,19 @@ pub fn pbo_cscv(matrix: &[Vec<f64>], blocks: usize) -> Result<PboReport, Validat
     })
 }
 
+/// Transpose a **strategy-major** trial matrix (`cols[k][t]` = trial `k`'s return at time `t` — the natural
+/// `[strategy][time]` shape of a trial pool / [`crate::VintageStats::trial_returns`]) into the
+/// **time-major** `[time][strategy]` matrix [`pbo_cscv`] consumes (`matrix[t][k]`). CSCV must split the
+/// **time** axis; passing a strategy-major matrix would make `S` partition the trial axis and silently
+/// yield a meaningless PBO (QE-490). Truncates to the shortest series (mirrors the GP path's
+/// `uncensored_pbo`); an empty input yields an empty matrix.
+pub(crate) fn columns_to_time_major(cols: &[Vec<f64>]) -> Vec<Vec<f64>> {
+    let t = cols.iter().map(Vec::len).min().unwrap_or(0);
+    (0..t)
+        .map(|row| cols.iter().map(|c| c[row]).collect())
+        .collect()
+}
+
 /// Per-strategy Sharpe over the rows in (or out of) the in-sample blocks.
 fn perf_per_strategy(
     matrix: &[Vec<f64>],
