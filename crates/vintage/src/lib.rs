@@ -54,6 +54,32 @@ pub mod schema;
 /// no `VINTAGE_FORMAT_VERSION` change, no golden drift.
 pub const VINTAGE_FORMAT_VERSION: u16 = 8;
 
+/// The fixed **hash-stable rounding scale** (`10^12`) every hashed `f64` is canonicalised to before the
+/// content hash is computed (QE-482 / QE-416). The content hash is the digest of `serde_json`'s output,
+/// whose default float parser is not correctly-rounded: a 17-significant-digit `f64` can re-parse to a
+/// neighbouring `f64` that serialises one ULP differently, breaking the content-hash verify on reload.
+/// Rounding to 12 decimal places keeps every hashed `f64` inside the parser's exact range (far finer than
+/// any allocation / risk / statistic figure needs) so seal → load is byte-stable.
+///
+/// This is the **same** rule the train-job producer applies (`crates/cli/src/jobs/train.rs` `hash_stable`,
+/// `HASH_STABLE_SCALE = 1e12`); QE-482 lifts it here so [`Vintage::seal`] enforces the invariant at the
+/// type boundary and producer + type agree by construction. The producer helper stays as belt-and-braces.
+pub const HASH_STABLE_SCALE: f64 = 1e12;
+
+/// Round `value` to the fixed [`HASH_STABLE_SCALE`] precision so it serialises to a bounded-precision,
+/// round-trip-stable decimal (QE-482). Non-finite inputs pass through unchanged — [`VintageContent::validate`]
+/// rejects them at seal, so the rounding never has to reason about `NaN`/`∞`. Idempotent: rounding an
+/// already-rounded value is a no-op, so canonicalising producer output that already applied this rule
+/// leaves the hashed bytes unchanged.
+#[must_use]
+pub fn hash_stable(value: f64) -> f64 {
+    if value.is_finite() {
+        (value * HASH_STABLE_SCALE).round() / HASH_STABLE_SCALE
+    } else {
+        value
+    }
+}
+
 /// The persisted **seal evidence** (QE-467): the gate's own tradability + deflation outputs, carried into
 /// the sealed artefact so every downstream surface (inspector QE-456/457, leaderboard QE-466, flow
 /// QE-460) **reads** — never recomputes — them. Part of the hashed content (content-addressed).
@@ -398,6 +424,58 @@ impl VintageContent {
         (0..self.chromosomes.len()).map(|i| i.to_string()).collect()
     }
 
+    /// Canonicalise **every hashed `f64` field** to the fixed [`HASH_STABLE_SCALE`] precision (QE-482) —
+    /// `weights`, `worst_case_loss`, every `holdout_series` return, every [`SealEvidence`] scalar +
+    /// `Option`, and the [`CpcvSummary`] summary fields + per-path vectors. Called by [`Vintage::seal`]
+    /// **before** validation and hashing, so the hash-stable rounding invariant lives at the type boundary
+    /// that owns the hash — not only in the train-job producer. A future seal writer that constructs a
+    /// `VintageContent` without routing every f64 through the producer's rounding still seals a byte-stable
+    /// artefact, because `seal` rounds here by construction. Idempotent on already-rounded producer output
+    /// (rounding a rounded value is a no-op), so it introduces no drift for the existing seal path.
+    fn canonicalize(&mut self) {
+        for w in &mut self.weights {
+            *w = hash_stable(*w);
+        }
+        if let Some(loss) = self.worst_case_loss.as_mut() {
+            *loss = hash_stable(*loss);
+        }
+        for r in &mut self.holdout_series.returns {
+            *r = hash_stable(*r);
+        }
+        let ev = &mut self.seal_evidence;
+        ev.dsr = hash_stable(ev.dsr);
+        ev.pbo = hash_stable(ev.pbo);
+        ev.spa_pvalue = hash_stable(ev.spa_pvalue);
+        ev.realised_turnover = hash_stable(ev.realised_turnover);
+        ev.capacity_usd = hash_stable(ev.capacity_usd);
+        for opt in [
+            &mut ev.cost_stress_net_min,
+            &mut ev.uncensored_pbo,
+            &mut ev.ic,
+            &mut ev.fdr,
+        ] {
+            if let Some(v) = opt.as_mut() {
+                *v = hash_stable(*v);
+            }
+        }
+        if let Some(cpcv) = ev.cpcv.as_mut() {
+            cpcv.median_sharpe = hash_stable(cpcv.median_sharpe);
+            cpcv.sharpe_iqr_lo = hash_stable(cpcv.sharpe_iqr_lo);
+            cpcv.sharpe_iqr_hi = hash_stable(cpcv.sharpe_iqr_hi);
+            cpcv.sharpe_p05 = hash_stable(cpcv.sharpe_p05);
+            cpcv.sharpe_p95 = hash_stable(cpcv.sharpe_p95);
+            cpcv.median_dsr = hash_stable(cpcv.median_dsr);
+            cpcv.dsr_p05 = hash_stable(cpcv.dsr_p05);
+            cpcv.frac_dsr_ge_floor = hash_stable(cpcv.frac_dsr_ge_floor);
+            for x in &mut cpcv.path_sharpes {
+                *x = hash_stable(*x);
+            }
+            for x in &mut cpcv.path_dsrs {
+                *x = hash_stable(*x);
+            }
+        }
+    }
+
     /// Validate the artefact's structural invariants — `weights` aligned one-to-one with `chromosomes`
     /// and every weight finite, and `worst_case_loss` (if present) a finite non-negative fraction.
     /// Called by [`Vintage::seal`], so a silent upstream bug (a non-finite weight that would serialise
@@ -509,7 +587,11 @@ impl Vintage {
     /// # Errors
     /// [`VintageContent::validate`] errors (non-finite or misaligned weights), or a serialisation
     /// failure from [`VintageContent::content_hash`].
-    pub fn seal(content: VintageContent) -> Result<Self, VintageError> {
+    pub fn seal(mut content: VintageContent) -> Result<Self, VintageError> {
+        // QE-482: canonicalise every hashed f64 to the hash-stable precision at the type boundary, BEFORE
+        // validating and hashing, so the content-addressed reproducibility guarantee no longer depends on
+        // the producer having rounded every field. Idempotent on already-rounded input (no drift).
+        content.canonicalize();
         content.validate()?;
         let content_hash = content.content_hash()?;
         Ok(Vintage {
@@ -1113,6 +1195,63 @@ mod tests {
         let loaded = Vintage::load(buf.as_slice()).unwrap();
         assert_eq!(loaded.content.provenance, sealed.content.provenance);
         assert_eq!(loaded.content.provenance.consultation_count, 3);
+    }
+
+    #[test]
+    fn seal_is_invariant_to_sub_precision_noise() {
+        // QE-482 AC1 (idempotence): seal canonicalises every hashed f64 to the hash-stable precision, so
+        // sub-1e-12 noise (a producer that forgot to round, or a differently-rounded f64) does NOT change
+        // the vintage id — the rounding invariant lives at the type boundary, not only in the producer.
+        let clean = Vintage::seal(content()).unwrap();
+        let mut noisy = content();
+        noisy.weights[0] += 1e-15;
+        noisy.weights[1] -= 3e-15;
+        noisy.seal_evidence.dsr += 2e-15;
+        noisy.holdout_series.returns[0] += 1e-14;
+        if let Some(l) = noisy.worst_case_loss.as_mut() {
+            *l += 1e-15;
+        }
+        let sealed = Vintage::seal(noisy).unwrap();
+        assert_eq!(
+            sealed.content_hash, clean.content_hash,
+            "sub-precision noise must not move the vintage id"
+        );
+        // The stored content is the canonicalised content and round-trips + verifies from disk.
+        let mut buf: Vec<u8> = Vec::new();
+        sealed.write(&mut buf).unwrap();
+        Vintage::load(buf.as_slice()).unwrap();
+    }
+
+    #[test]
+    fn seal_canonicalises_a_non_hash_stable_field_to_its_rounded_twin() {
+        // QE-482 AC2 (canonicalise posture, proven): a VintageContent carrying a non-hash-stable f64 in the
+        // CPCV block seals to the SAME hash as its explicitly pre-rounded twin — seal is the single point of
+        // truth for hash-stable precision.
+        let raw = 0.123_456_789_012_999_f64; // a tail below 1e-12
+        let rounded = (raw * HASH_STABLE_SCALE).round() / HASH_STABLE_SCALE;
+        assert_ne!(
+            raw, rounded,
+            "the fixture must actually carry sub-precision noise"
+        );
+
+        let summary = |sharpe: f64| CpcvSummary {
+            blocks: 6,
+            n_paths: 20,
+            median_sharpe: sharpe,
+            path_sharpes: vec![sharpe],
+            path_dsrs: vec![0.97],
+            ..CpcvSummary::default()
+        };
+        let mut noisy = content();
+        noisy.seal_evidence.cpcv = Some(summary(raw));
+        let mut twin = content();
+        twin.seal_evidence.cpcv = Some(summary(rounded));
+
+        assert_eq!(
+            Vintage::seal(noisy).unwrap().content_hash,
+            Vintage::seal(twin).unwrap().content_hash,
+            "a non-hash-stable f64 must canonicalise to its rounded twin's hash"
+        );
     }
 
     #[test]
