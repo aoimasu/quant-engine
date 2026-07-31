@@ -69,6 +69,14 @@ pub struct SymbolFilter {
 
 impl SymbolFilter {
     /// Snap `price` to the nearest `tick_size` (exact `Decimal`); identity when `tick_size ≤ 0`.
+    ///
+    /// The nearest-tick snap assumes `(price / tick_size).round()` picks the correct tick, which holds
+    /// whenever the exact rational `price / tick_size` is representable in `Decimal`'s 28 significant
+    /// digits — true for every real venue tick grid (ticks and prices are short decimals, so the quotient
+    /// terminates well inside 28 digits). Only an exotic tick grid whose `price / tick_size` needed more
+    /// than 28 digits could round to the wrong side of a half-tick; such a grid would want a truncating
+    /// divide plus an explicit half-tick comparison instead. We deliberately keep the simple `round()`
+    /// form here — no behaviour change — because the exotic case does not arise in practice.
     #[must_use]
     fn quantize_price(&self, price: Decimal) -> Decimal {
         if self.tick_size > Decimal::ZERO {
@@ -1554,13 +1562,20 @@ mod tests {
     }
 
     #[test]
-    fn absent_symbol_filter_is_byte_identical_to_the_pre_filter_engine() {
-        // The default carries no symbol filter, so the fill path is byte-for-byte the pre-QE-487 engine —
-        // the invariant that keeps every existing (liquid-major) golden unchanged.
+    fn absent_filter_is_a_no_op_equal_to_an_explicitly_all_disabled_filter() {
+        // The `None` (absent) symbol filter is a no-op: it must produce exactly the same backtest as an
+        // explicit `Some` filter with every constraint disabled (step = tick = min_notional = 0), which
+        // provably reduces to the historical `qty > 0` fill path (no lot floor, no tick snap, no minNotional
+        // screen). We do NOT — and cannot — pin *pre-QE-487* behaviour here: a true pre-filter golden is not
+        // recoverable, and comparing `None` against the current engine would be self-referential. What this
+        // proves is internal consistency of the `None` path, so a future change that made `None` diverge from
+        // "no filtering at all" would fail.
         assert!(BacktestConfig::default().symbol_filter.is_none());
         let s = schema();
         let bars = uptrend_bars(&s, 160);
         let g = long_genome(2, 5_000);
+
+        // `None` must equal an explicit `symbol_filter: None` (same enum arm, sanity anchor).
         let explicit_none = BacktestConfig {
             symbol_filter: None,
             ..BacktestConfig::default()
@@ -1568,6 +1583,24 @@ mod tests {
         assert_eq!(
             backtest(&g, &bars, &explicit_none),
             backtest(&g, &bars, &BacktestConfig::default())
+        );
+
+        // The strengthening assertion: `None` must equal an explicit all-disabled filter. Every field is
+        // zero, so `quantize_qty`/`quantize_price` are identities and `fill_ok` reduces to `qty > 0` — i.e.
+        // this `Some` arm is a no-op filter. If the `None` path ever stopped meaning "no filtering", this
+        // would diverge and fail.
+        let all_disabled = BacktestConfig {
+            symbol_filter: Some(SymbolFilter {
+                step_size: Decimal::ZERO,
+                tick_size: Decimal::ZERO,
+                min_notional: Decimal::ZERO,
+            }),
+            ..BacktestConfig::default()
+        };
+        assert_eq!(
+            backtest(&g, &bars, &all_disabled),
+            backtest(&g, &bars, &BacktestConfig::default()),
+            "the None path must equal an explicitly all-disabled filter (both reduce to qty > 0)"
         );
     }
 
