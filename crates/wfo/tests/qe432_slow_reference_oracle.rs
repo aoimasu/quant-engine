@@ -577,6 +577,8 @@ fn random_backtest_cfg(rng: &mut DetRng, mult_lo: i64, mult_hi: i64) -> Backtest
         shocks: None,
         // QE-442: the oracle's reference loop sizes ungraded, so the optimised path must too here.
         graded: false,
+        // QE-487: the oracle checks the continuous fill path — no symbol filter (liquid-major).
+        symbol_filter: None,
     }
 }
 
