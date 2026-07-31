@@ -57,6 +57,10 @@ pub struct PoolState {
     /// evident audit chain stays authoritative). Keyed by pool id, so two racing approve/seal transitions on
     /// the **same** pool cannot interleave read→apply→write and lose an update, while unrelated pools are
     /// never needlessly serialised. Mirrors the run store's `index_lock` (`runs/manager.rs`).
+    ///
+    /// The map is bounded by **opportunistic eviction** ([`evict_cache_lock_if_idle`](Self::evict_cache_lock_if_idle)):
+    /// once a pool's transitions settle, its entry is removed, so the map holds only the pools with
+    /// in-flight governance transitions rather than growing once per distinct pool id for process life.
     cache_locks: Arc<AsyncMutex<HashMap<String, Arc<AsyncMutex<()>>>>>,
 }
 
@@ -103,10 +107,33 @@ impl PoolState {
     /// QE-483: the per-pool cache lock for `id`, created on first use. The caller holds it **across** the
     /// `apply_cache_transition` read-modify-write (which runs off the async worker in `spawn_blocking`), so
     /// two concurrent transitions on the same pool serialise instead of interleaving read→write. Distinct
-    /// pool ids get distinct locks, so unrelated pools never serialise (mirrors `index_lock`).
+    /// pool ids get distinct locks, so unrelated pools never serialise (mirrors `index_lock`). The caller
+    /// evicts the entry via [`evict_cache_lock_if_idle`](Self::evict_cache_lock_if_idle) once its
+    /// transition settles, so the map does not accumulate a lock per pool id for process life.
     async fn cache_lock(&self, id: &str) -> Arc<AsyncMutex<()>> {
         let mut map = self.cache_locks.lock().await;
         Arc::clone(map.entry(id.to_owned()).or_default())
+    }
+
+    /// QE-483: opportunistically evict a pool's cache lock once its transitions have settled, bounding the
+    /// `cache_locks` map. A caller invokes this AFTER dropping its own `Arc` clone of the lock (post-RMW).
+    /// Under the map lock, an entry whose `Arc::strong_count == 1` is held by the map **alone** — no other
+    /// caller currently holds a clone, and none can obtain one until this returns, because cloning (in
+    /// [`cache_lock`](Self::cache_lock)) and this removal are serialised by the **same** map lock. So the
+    /// removal is race-free: a concurrent caller that still holds a clone leaves `strong_count >= 2`, the
+    /// entry stays, and that caller evicts it when ITS transition settles. If evicted, a later transition on
+    /// the same pool simply re-creates a fresh lock (no other holder exists, so mutual exclusion is intact).
+    async fn evict_cache_lock_if_idle(&self, id: &str) {
+        let mut map = self.cache_locks.lock().await;
+        if map.get(id).is_some_and(|lock| Arc::strong_count(lock) == 1) {
+            map.remove(id);
+        }
+    }
+
+    /// Test-only: the number of live per-pool cache-lock entries (asserts eviction bounds the map).
+    #[cfg(test)]
+    async fn cache_locks_len(&self) -> usize {
+        self.cache_locks.lock().await.len()
     }
 
     /// **Structural barrier 3** (design §13.6) — load a pool from the **production** root **only**, asserting
@@ -634,6 +661,8 @@ async fn production_seal(
         })
         .await
     };
+    // QE-483: the lock clone dropped with the block above; opportunistically evict its now-idle entry.
+    pools.evict_cache_lock_if_idle(&id).await;
     match cache {
         Ok(Ok(_)) => {}
         Ok(Err(CacheError::Illegal(msg))) => {
@@ -827,6 +856,8 @@ async fn governance_action(
             Err(_) => return internal("governance cache task failed".to_owned()),
         }
     };
+    // QE-483: the lock clone dropped with the block above; opportunistically evict its now-idle entry.
+    pools.evict_cache_lock_if_idle(&id).await;
     let state = match cache {
         Ok(state) => state,
         Err(CacheError::Illegal(msg)) => {
@@ -1315,16 +1346,21 @@ mod tests {
         id: String,
         t: PoolTransition,
     ) -> Result<PoolLifecycleState, String> {
-        let lock = pools.cache_lock(&id).await;
-        let _guard = lock.lock().await;
-        let p = Arc::clone(&pools);
-        let id2 = id.clone();
-        tokio::task::spawn_blocking(move || apply_cache_transition(&p, &id2, t, "actor", 2))
-            .await
-            .unwrap()
-            .map_err(|e| match e {
-                CacheError::Illegal(m) | CacheError::Io(m) => m,
-            })
+        let result = {
+            let lock = pools.cache_lock(&id).await;
+            let _guard = lock.lock().await;
+            let p = Arc::clone(&pools);
+            let id2 = id.clone();
+            tokio::task::spawn_blocking(move || apply_cache_transition(&p, &id2, t, "actor", 2))
+                .await
+                .unwrap()
+                .map_err(|e| match e {
+                    CacheError::Illegal(m) | CacheError::Io(m) => m,
+                })
+        };
+        // Mirror the handler discipline: evict the now-idle lock once the clone above is dropped (QE-483).
+        pools.evict_cache_lock_if_idle(&id).await;
+        result
     }
 
     #[tokio::test]
@@ -1417,6 +1453,61 @@ mod tests {
         assert_eq!(
             revokes, 1,
             "no lost update / no double-apply in the history"
+        );
+    }
+
+    #[tokio::test]
+    async fn cache_locks_map_does_not_grow_after_transitions_settle() {
+        let dir = tempfile::tempdir().unwrap();
+        let pools = Arc::new(PoolState::from_dirs(
+            &dir.path().join("a"),
+            &dir.path().join("d"),
+        ));
+
+        // Drive several DISTINCT pools through a settled transition. Each seeds Draft→Approved then applies
+        // one more edge; once each caller drops its lock clone, the now-idle entry is evicted.
+        for i in 0..5 {
+            let id = format!("p{i}");
+            let mut g = PoolGovernance::draft(&id);
+            g.apply(PoolTransition::Approve, "a@x.io", 1).unwrap();
+            pools.governance.write(&g).unwrap();
+            let _ = locked_transition(Arc::clone(&pools), id, PoolTransition::Seal).await;
+        }
+
+        // Opportunistic eviction bounds the map — no per-pool lock lingers for process life once its
+        // transitions settle (each of the 5 distinct pools was evicted after its transition).
+        assert_eq!(
+            pools.cache_locks_len().await,
+            0,
+            "the cache-locks map is evicted down to empty after all transitions settle"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_in_flight_transition_keeps_its_lock_then_evicts() {
+        let dir = tempfile::tempdir().unwrap();
+        let pools = Arc::new(PoolState::from_dirs(
+            &dir.path().join("a"),
+            &dir.path().join("d"),
+        ));
+
+        // A caller still holding its clone (strong_count >= 2 with the map) is NOT evicted — a concurrent
+        // evict attempt is a no-op — so a live transition never loses its serialising lock mid-flight.
+        let held = pools.cache_lock("p1").await;
+        pools.evict_cache_lock_if_idle("p1").await;
+        assert_eq!(
+            pools.cache_locks_len().await,
+            1,
+            "a lock still held by a caller is not evicted"
+        );
+
+        // Once the caller drops its clone, the entry is idle (map holds the sole ref) and is evicted.
+        drop(held);
+        pools.evict_cache_lock_if_idle("p1").await;
+        assert_eq!(
+            pools.cache_locks_len().await,
+            0,
+            "the idle lock is evicted once no caller holds a clone"
         );
     }
 }
