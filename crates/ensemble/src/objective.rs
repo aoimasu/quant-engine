@@ -434,6 +434,27 @@ pub fn combined_returns(pool: &[Vec<f64>], members: &[usize]) -> Vec<f64> {
     combined_returns_weighted(pool, members, Weighting::EqualWeight)
 }
 
+/// How the objective's per-unit-risk denominator and diversification handling are modelled (QE-491).
+///
+/// **Background (QE-491, PR#182 finding R3.1).** The shipped objective charges diversification *twice*: the
+/// `mean/risk` term already prices the Markowitz diversification benefit (a lower combined volatility raises
+/// it), and the `− corr_weight·corr` term charges the *same* property again on a mis-scaled `∈ [0, 1]` axis
+/// that swamps the return signal at realistic per-bar Sharpe (~0.1). `RiskModel` selects between the shipped
+/// behaviour and the QE-491 Arm B that retires the redundant explicit penalty.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RiskModel {
+    /// Shipped QE-475 behaviour: realized-vol denominator **and** the explicit `− corr_weight·corr` penalty.
+    /// The default — byte-identical to the pre-QE-491 search, so every existing golden and v8 vintage is
+    /// unchanged.
+    #[default]
+    RealizedVol,
+    /// QE-491 Arm B (A/B only, never the default until the validation gate clears): retire the explicit
+    /// correlation penalty (`corr_weight` is ignored) and let the per-unit-risk term carry diversification.
+    /// **Step-0 scaffold** keeps the realized-vol denominator (shrinkage intensity δ ≡ 0); Step 1 replaces it
+    /// with a Ledoit–Wolf shrinkage denominator + a deflated-correlation admissibility cap (see QE-491).
+    ShrunkCorr,
+}
+
 /// Configuration for the ensemble [`objective`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ObjectiveConfig {
@@ -446,6 +467,9 @@ pub struct ObjectiveConfig {
     /// How the correlation penalty is deflated by the (fold-slice) sample size (QE-430). Defaults to the
     /// significance floor; set [`CorrDeflation::None`] to reproduce the raw-Pearson pre-QE-430 path.
     pub corr_deflation: CorrDeflation,
+    /// The risk model / diversification handling (QE-491). Default [`RiskModel::RealizedVol`] — the shipped
+    /// QE-475 objective. [`RiskModel::ShrunkCorr`] retires the explicit correlation penalty (A/B only).
+    pub risk_model: RiskModel,
 }
 
 impl ObjectiveConfig {
@@ -466,6 +490,7 @@ impl ObjectiveConfig {
             tail_weight: 1.0,
             corr_weight: 1.0,
             corr_deflation: CorrDeflation::default(),
+            risk_model: RiskModel::RealizedVol,
         }
     }
 }
@@ -560,7 +585,18 @@ pub fn objective_weighted(
             1.0
         }
     };
-    mean / risk + cfg.tail_weight * (tail / risk) - cfg.corr_weight * corr
+    let per_unit_risk = mean / risk + cfg.tail_weight * (tail / risk);
+    match cfg.risk_model {
+        // Shipped QE-475: diversification is charged explicitly on top of the per-unit-risk term. Parsed as
+        // `(mean/risk + tail_weight·tail/risk) - corr_weight·corr`, byte-identical to the pre-QE-491 line.
+        RiskModel::RealizedVol => per_unit_risk - cfg.corr_weight * corr,
+        // QE-491 Arm B (Step-0 scaffold): retire the redundant, mis-scaled explicit penalty — the
+        // per-unit-risk term already prices Markowitz diversification. `corr` is still computed (it is cheap
+        // and Step 1 reuses it for the deflated-correlation cap) but not subtracted. Shrinkage of `risk`
+        // (δ > 0) and the correlation cap land in Step 1 (QE-491); this scaffold keeps the realized-vol
+        // denominator so it is a pure retirement of the penalty, ready for A/B.
+        RiskModel::ShrunkCorr => per_unit_risk,
+    }
 }
 
 /// The ensemble objective on the **equal-weight** combined series — [`objective_weighted`] under
@@ -607,6 +643,58 @@ pub fn leave_one_out_min(pool: &[Vec<f64>], members: &[usize], cfg: &ObjectiveCo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn risk_model_defaults_to_realized_vol() {
+        // QE-491: the default objective is the shipped QE-475 behaviour, so every existing golden / v8
+        // vintage is byte-identical. Arm B (ShrunkCorr) is opt-in only.
+        assert_eq!(
+            ObjectiveConfig::with_defaults().risk_model,
+            RiskModel::RealizedVol
+        );
+        assert_eq!(
+            ObjectiveConfig::default().risk_model,
+            RiskModel::RealizedVol
+        );
+        assert_eq!(RiskModel::default(), RiskModel::RealizedVol);
+    }
+
+    #[test]
+    fn shrunk_corr_retires_the_explicit_correlation_penalty_exactly() {
+        // QE-491 Step-0 scaffold: ShrunkCorr drops the `− corr_weight·corr` term and is otherwise identical
+        // to RealizedVol (same per-unit-risk denominator, δ ≡ 0). So the two objectives differ by EXACTLY the
+        // retired penalty: ShrunkCorr == RealizedVol + corr_weight·corr. Proven on a correlated pair.
+        let a: Vec<f64> = (0..64)
+            .map(|i| 0.01 + 0.006 * ((i % 5) as f64 - 2.0))
+            .collect();
+        let b: Vec<f64> = a.iter().map(|x| 0.8 * x + 0.002).collect(); // strongly correlated with `a`
+        let pool = vec![a, b];
+        let members = [0usize, 1];
+        let legacy = ObjectiveConfig::with_defaults(); // RealizedVol
+        let arm_b = ObjectiveConfig {
+            risk_model: RiskModel::ShrunkCorr,
+            ..legacy
+        };
+
+        let series: Vec<Vec<f64>> = members.iter().map(|&m| pool[m].clone()).collect();
+        let corr = pairwise_corr_penalty(&series, legacy.corr_deflation).value;
+        assert!(
+            corr > 0.0,
+            "fixture must be correlated so the retired penalty is nonzero"
+        );
+
+        let o_legacy = objective_weighted(&pool, &members, &legacy, Weighting::EqualWeight);
+        let o_arm_b = objective_weighted(&pool, &members, &arm_b, Weighting::EqualWeight);
+        assert!(
+            (o_arm_b - (o_legacy + legacy.corr_weight * corr)).abs() < 1e-12,
+            "ShrunkCorr must equal the legacy objective with the correlation penalty retired: \
+             arm_b={o_arm_b} legacy={o_legacy} corr={corr}"
+        );
+        assert!(
+            o_arm_b > o_legacy,
+            "retiring a positive correlation penalty must raise the score"
+        );
+    }
 
     fn approx(a: f64, b: f64) {
         assert!((a - b).abs() < 1e-9, "{a} !~ {b}");
