@@ -789,25 +789,37 @@ async fn supervise(
     let stderr = child.stderr.take();
 
     // Drain stdout (progress → meta + stdout.log) and stderr (tail) concurrently to avoid a pipe
-    // deadlock if the child writes a lot to both. QE-454 §13.10: the whole drain is wrapped in a per-run
+    // deadlock if the child writes a lot to both. QE-454 §13.10: the pipe read is wrapped in a per-run
     // wall-clock deadline — a run that has not terminated by `run_deadline` is aborted (the child is killed
     // via `kill_on_drop` + an explicit `start_kill`) and terminally failed, so a runaway campaign can never
     // hold a supervisor open forever.
-    let drain = async {
-        let stdout_fut = drain_stdout(stdout, &store, &mut meta, &spec);
+    //
+    // QE-481 terminal-state guard: the blocking drain WORKER is spawned in THIS scope (not owned by the
+    // timeout future), so the deadline branch — which drops the pipe-read future — cannot orphan it. The
+    // worker is joined below BEFORE the terminal write, guaranteeing every worker `write_meta` happens-before
+    // the terminal transition (a dropped handle would let a stale `write_meta(status=Running)` land after the
+    // terminal `Failed` write and strand the run non-terminal).
+    let is_evolve = matches!(spec, RunSpec::Evolve(_));
+    let (tx, worker) = spawn_drain_worker(&store, &meta, is_evolve);
+    let read = async {
+        let stdout_fut = forward_stdout(stdout, tx);
         let stderr_fut = drain_stderr_tail(stderr);
         tokio::join!(stdout_fut, stderr_fut)
     };
-    let (done_seen, err_tail, deadline_exceeded) =
-        match tokio::time::timeout(run_deadline, drain).await {
-            Ok((done_seen, err_tail)) => (done_seen, err_tail, false),
-            Err(_) => {
-                // Ceiling hit: kill the child so its `wait()` returns promptly (drop also fires
-                // `kill_on_drop`), then fall through to the terminal-mark below.
-                let _ = child.start_kill();
-                (false, String::new(), true)
-            }
-        };
+    let (err_tail, deadline_exceeded) = match tokio::time::timeout(run_deadline, read).await {
+        Ok(((), err_tail)) => (err_tail, false),
+        Err(_) => {
+            // Ceiling hit: kill the child so its `wait()` returns promptly (drop also fires
+            // `kill_on_drop`), then fall through to the terminal-mark below.
+            let _ = child.start_kill();
+            (String::new(), true)
+        }
+    };
+    // Join the drain worker BEFORE the terminal write (QE-481): on the deadline branch the pipe-read future
+    // (and its `tx`) was already dropped, closing the channel; on the normal branch `forward_stdout` dropped
+    // `tx` itself. Either way the worker's `blocking_recv` now returns `None`, so awaiting it here lets it
+    // finish draining and makes all its writes strictly precede the terminal transition below.
+    let done_seen = join_drain_worker(worker, &mut meta).await;
 
     let exit = child.wait().await.ok().and_then(|s| s.code());
     meta.exit = exit;
@@ -958,19 +970,24 @@ async fn drain_child(
 ) -> (bool, Option<i32>, String, bool) {
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
-    let drain = async {
-        let stdout_fut = drain_stdout(stdout, store, meta, spec);
+    // QE-481 terminal-state guard (same as the single-child supervisor): spawn the blocking drain worker in
+    // THIS scope so the deadline branch — which drops the pipe-read future — cannot orphan it, then join it
+    // BEFORE returning so all its writes strictly precede the caller's terminal `finish_failed`/success write.
+    let is_evolve = matches!(spec, RunSpec::Evolve(_));
+    let (tx, worker) = spawn_drain_worker(store, meta, is_evolve);
+    let read = async {
+        let stdout_fut = forward_stdout(stdout, tx);
         let stderr_fut = drain_stderr_tail(stderr);
         tokio::join!(stdout_fut, stderr_fut)
     };
-    let (done_seen, err_tail, deadline_exceeded) =
-        match tokio::time::timeout(run_deadline, drain).await {
-            Ok((done_seen, err_tail)) => (done_seen, err_tail, false),
-            Err(_) => {
-                let _ = child.start_kill();
-                (false, String::new(), true)
-            }
-        };
+    let (err_tail, deadline_exceeded) = match tokio::time::timeout(run_deadline, read).await {
+        Ok(((), err_tail)) => (err_tail, false),
+        Err(_) => {
+            let _ = child.start_kill();
+            (String::new(), true)
+        }
+    };
+    let done_seen = join_drain_worker(worker, meta).await;
     let exit = child.wait().await.ok().and_then(|s| s.code());
     (done_seen, exit, err_tail, deadline_exceeded)
 }
@@ -1130,8 +1147,8 @@ async fn supervise_flow(
             return;
         }
     };
-    // `drain_stdout` folds the train sub-run's terminal `done` vintage + its G1 gate verdict into
-    // `meta.train`.
+    // `drain_child`'s drain worker folds the train sub-run's terminal `done` vintage + its G1 gate verdict
+    // into `meta.train`.
     let train_spec = RunSpec::Train(train_params);
     let (done, exit, err_tail, deadline) = drain_child(
         child,
@@ -1320,23 +1337,29 @@ async fn flow_backtest_phase(
 
 // --- QE-481 supervisor-drain guard region (start) — scanned by `drain_does_no_blocking_std_fs` ---
 //
-/// Read subprocess stdout line by line and drive the run's captured log + progress meta. QE-481: the async
-/// side does **only** the pipe read — it forwards each raw line over a bounded channel and never touches the
-/// filesystem. ALL synchronous `std::fs` work runs inside one [`spawn_blocking`] worker ([`drain_worker`]):
-/// a **single** persistent `stdout.log` append handle (opened once per run, not per line) plus the
-/// **coalesced** `write_meta` persistence. This mirrors the QE-411 `spawn_blocking` discipline so no blocking
-/// I/O ever parks a runtime worker thread for the lifetime of a running campaign. Returns whether a terminal
-/// `done` line was seen.
-async fn drain_stdout(
-    stdout: Option<tokio::process::ChildStdout>,
-    store: &RunStore,
-    meta: &mut RunMeta,
-    spec: &RunSpec,
-) -> bool {
-    let Some(stdout) = stdout else { return false };
-    let is_evolve = matches!(spec, RunSpec::Evolve(_));
-    let (tx, rx) = tokio::sync::mpsc::channel::<String>(256);
+/// Handle to the blocking stdout-drain worker: joining it yields the accumulated `(meta, done_seen)`.
+type DrainWorker = tokio::task::JoinHandle<(RunMeta, bool)>;
 
+/// QE-481: spawn the blocking stdout-drain worker and return its line `Sender` plus its [`JoinHandle`].
+/// ALL synchronous `std::fs` work runs inside this one [`spawn_blocking`] worker ([`drain_worker`]): a
+/// **single** persistent `stdout.log` append handle (opened once per run, not per line) plus the
+/// **coalesced** `write_meta` persistence. This mirrors the QE-411 `spawn_blocking` discipline so no blocking
+/// I/O ever parks a runtime worker thread for the lifetime of a running campaign.
+///
+/// **Ownership contract (QE-481 terminal-state guard).** The caller MUST keep the returned handle in a scope
+/// that OUTLIVES the timeout-wrapped pipe read, and MUST `await` it (via [`join_drain_worker`]) before any
+/// terminal (`finish_failed` / success) `write_meta`. A `spawn_blocking` task is **not** cancelled when its
+/// `JoinHandle` is dropped, so if the handle were owned by the timeout future it would be orphaned on the
+/// deadline branch: the worker would keep running, drain its buffered lines, and its final
+/// `write_meta(status=Running)` could land AFTER the supervisor's terminal `Failed` write — leaving the killed
+/// run persisted as `Running` forever (a QE-454 §13.10 deadline-guarantee breach). Awaiting the worker before
+/// the terminal write makes every worker write strictly happen-before it.
+fn spawn_drain_worker(
+    store: &RunStore,
+    meta: &RunMeta,
+    is_evolve: bool,
+) -> (tokio::sync::mpsc::Sender<String>, DrainWorker) {
+    let (tx, rx) = tokio::sync::mpsc::channel::<String>(256);
     // The blocking worker owns the append handle + a working copy of `meta`, pulls forwarded lines via
     // `blocking_recv`, and does every fs write off the async runtime.
     let store = store.clone();
@@ -1347,16 +1370,37 @@ async fn drain_stdout(
         let done_seen = drain_worker(&store, &mut owned, is_evolve, lines);
         (owned, done_seen)
     });
+    (tx, worker)
+}
 
-    // Async side: read lines off the child pipe and forward them (bounded channel ⇒ natural backpressure).
+/// QE-481: the async half of the stdout drain — reads lines off the child pipe and forwards each raw line to
+/// the blocking [`drain_worker`] over `tx` (bounded channel ⇒ natural backpressure). Does **only** the pipe
+/// read; it never touches the filesystem. This future is the one wrapped in the per-run deadline `timeout`;
+/// if it is dropped on the deadline branch, dropping `tx` closes the channel so the worker's `blocking_recv`
+/// returns `None` and it finishes — but the worker itself is joined by the caller (see [`spawn_drain_worker`]),
+/// never orphaned by this future's cancellation. With no stdout pipe it drops `tx` and returns immediately, so
+/// the worker still terminates.
+async fn forward_stdout(
+    stdout: Option<tokio::process::ChildStdout>,
+    tx: tokio::sync::mpsc::Sender<String>,
+) {
+    let Some(stdout) = stdout else {
+        return; // `tx` dropped here ⇒ empty run, worker sees `None` and finishes.
+    };
     let mut reader = BufReader::new(stdout).lines();
     while let Ok(Some(line)) = reader.next_line().await {
         if tx.send(line).await.is_err() {
             break; // worker gone
         }
     }
-    drop(tx); // close the channel so the worker's `blocking_recv` returns `None` and it finishes.
+    // `tx` dropped here, closing the channel so the worker's `blocking_recv` returns `None` and it finishes.
+}
 
+/// QE-481: join a drain worker spawned by [`spawn_drain_worker`], folding its accumulated progress/train
+/// snapshots back into `meta`. MUST be called before any terminal `write_meta` so the worker's writes strictly
+/// precede it (see [`spawn_drain_worker`]'s ownership contract). Returns whether a terminal `done` line was
+/// seen. On a worker panic the snapshots are left as-is and `false` is returned.
+async fn join_drain_worker(worker: DrainWorker, meta: &mut RunMeta) -> bool {
     match worker.await {
         Ok((owned, done_seen)) => {
             *meta = owned; // hand the accumulated progress/train snapshots back to the supervisor.
@@ -2150,7 +2194,8 @@ mod tests {
     }
 
     /// QE-481 guard (widens QE-411 `handlers_do_no_blocking_std_fs` to the supervisor): the drain region
-    /// (`drain_stdout` / `drain_worker`) must contain **no** synchronous `std::fs::` token — every fs
+    /// (`spawn_drain_worker` / `forward_stdout` / `drain_worker`) must contain **no** synchronous `std::fs::`
+    /// token — every fs
     /// primitive lives in `store.rs` and is reached only through `spawn_blocking`. The needle is built at
     /// runtime so this assertion is not a self-match, and comment lines are dropped so prose never counts.
     #[test]
