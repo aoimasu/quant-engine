@@ -510,6 +510,16 @@ fn return_volatility(returns: &[f64]) -> f64 {
 /// back to `1.0` for a zero-volatility (constant) or empty combined series, so the degenerate no-risk case
 /// stays in raw return units, deterministic and byte-identical to the pre-QE-475 behaviour.
 ///
+/// **QE-475 honest scope (verified by the `decorrelation_still_dominates_at_realistic_low_sharpe` test).** The
+/// per-unit-risk rescale lets mean growth *compete*, but under the **shipped unit weights** it does **not**
+/// by itself flip the ranking toward mean growth at realistic per-bar volatility. At a per-bar Sharpe ≈ 0.1
+/// (vol an order of magnitude above the per-bar mean) the return + tail terms together contribute only
+/// ≈ `2·Sharpe ≈ 0.2`, still below the `∈ [0, 1]` correlation penalty a correlated ensemble carries
+/// (≈ 0.5 at ρ ≈ 0.5), so a materially higher-mean **correlated** ensemble is still ranked *below* a
+/// near-zero-mean **decorrelated** one. Decorrelation only stops dominating once the per-bar Sharpe clears
+/// ≈ `corr_weight·corr / 2` (roughly Sharpe ≳ 0.25 at ρ ≈ 0.5). Whether to lower that footing (e.g. a
+/// sub-unit `corr_weight`) is a separate product decision, deliberately out of scope for QE-475.
+///
 /// The correlation penalty is a weight-independent, **scale-invariant** property of the member series, so
 /// it stays on the raw member series — QE-430's deflated penalty is untouched. An empty ensemble scores
 /// `−∞`.
@@ -828,6 +838,95 @@ mod tests {
             "the unscaled objective must (wrongly) prefer the decorrelated ensemble: hi={} lo={}",
             unscaled(&high),
             unscaled(&low)
+        );
+    }
+
+    #[test]
+    fn decorrelation_still_dominates_at_realistic_low_sharpe() {
+        // QE-475 review nit (R3.1): the sibling test above wins the flip only because its per-bar Sharpe is
+        // unrealistically high (drift O(1e-3) against noise of the same scale ⇒ Sharpe ≈ 1.5). At a
+        // *realistic* per-bar Sharpe ≈ 0.1 — where per-bar volatility is an **order of magnitude above** the
+        // per-bar mean — the per-unit-risk rescale does NOT flip the ranking toward mean growth under the
+        // shipped unit weights: a materially higher-mean but CORRELATED ensemble is still ranked *below* a
+        // near-zero-mean DECORRELATED one. This test pins that ACTUAL, honestly-documented behaviour (see the
+        // `objective_weighted` docstring) rather than an aspirational flip. Changing the objective weights to
+        // move this line is a separate product decision, explicitly out of scope for QE-475.
+        let n = 2000;
+        let mut draw = xorshift_stream(0xC0FF_EE12_3456_789A); // in [−0.5, 0.5)
+
+        // Shared zero-mean driver for the correlated ensemble.
+        let driver: Vec<f64> = (0..n).map(|_| draw()).collect();
+
+        // HIGH-mean, CORRELATED ensemble at REALISTIC vol: a small positive drift sitting under noise an
+        // order of magnitude larger ⇒ per-bar Sharpe ≈ 0.1; equal driver/idiosyncratic loading ⇒ ρ ≈ 0.5.
+        let drift_hi = 2.0e-4;
+        let a = 4.5e-3; // shared-driver loading
+        let b = 4.5e-3; // idiosyncratic loading (equal to `a` ⇒ corr ≈ 0.5)
+        let high: Vec<Vec<f64>> = (0..3)
+            .map(|_| {
+                (0..n)
+                    .map(|i| drift_hi + a * driver[i] + b * draw())
+                    .collect()
+            })
+            .collect();
+
+        // NEAR-ZERO-mean, DECORRELATED ensemble: negligible drift + independent noise at a comparable scale
+        // ⇒ pairwise correlation ≈ 0.
+        let drift_lo = 1.0e-5;
+        let c = 4.5e-3;
+        let low: Vec<Vec<f64>> = (0..3)
+            .map(|_| (0..n).map(|_| drift_lo + c * draw()).collect())
+            .collect();
+
+        let cfg = ObjectiveConfig::with_defaults();
+
+        // Fixture sanity: the correlated ensemble sits in [0.3, 0.7]; the decorrelated one ≈ 0.
+        let corr_hi = pairwise_corr_penalty(&high, CorrDeflation::None).value;
+        let corr_lo = pairwise_corr_penalty(&low, CorrDeflation::None).value;
+        assert!(
+            (0.3..=0.7).contains(&corr_hi),
+            "correlated ensemble must be realistically correlated: {corr_hi}"
+        );
+        assert!(
+            corr_lo < 0.15,
+            "decorrelated ensemble must be near-uncorrelated: {corr_lo}"
+        );
+
+        // The correlated ensemble is materially higher-mean, and its volatility is an order of magnitude
+        // above its mean (a realistic per-bar Sharpe ≈ 0.1, NOT the ≈ 1.5 of the sibling test).
+        let combined_stats = |series: &[Vec<f64>]| {
+            let members: Vec<usize> = (0..series.len()).collect();
+            let combined = combined_returns(series, &members);
+            let mean = combined.iter().sum::<f64>() / combined.len() as f64;
+            let vol = return_volatility(&combined);
+            (mean, vol)
+        };
+        let (mean_hi, vol_hi) = combined_stats(&high);
+        let (mean_lo, _vol_lo) = combined_stats(&low);
+        assert!(
+            mean_hi > 5.0 * mean_lo.abs(),
+            "the correlated ensemble must be materially higher-mean: {mean_hi} vs {mean_lo}"
+        );
+        // Realistic low Sharpe: per-bar vol is an order of magnitude above the per-bar mean.
+        assert!(
+            vol_hi > 8.0 * mean_hi,
+            "per-bar vol must be ~10x the per-bar mean (low Sharpe): vol={vol_hi} mean={mean_hi}"
+        );
+        assert!(
+            mean_hi / vol_hi < 0.15,
+            "per-bar Sharpe must be realistically low (~0.1): {}",
+            mean_hi / vol_hi
+        );
+
+        // ACTUAL behaviour under the shipped unit weights: at Sharpe ≈ 0.1 the return + tail terms
+        // (≈ 2·Sharpe ≈ 0.2) do NOT overcome the ρ ≈ 0.5 correlation penalty, so the DECORRELATED ensemble
+        // still wins. The per-unit-risk rescale narrowed the gap but did not flip it — documented honestly
+        // rather than asserted aspirationally.
+        let obj_hi = objective(&high, &[0, 1, 2], &cfg);
+        let obj_lo = objective(&low, &[0, 1, 2], &cfg);
+        assert!(
+            obj_lo > obj_hi,
+            "at realistic low Sharpe decorrelation still dominates under the shipped weights: hi={obj_hi} lo={obj_lo}"
         );
     }
 
