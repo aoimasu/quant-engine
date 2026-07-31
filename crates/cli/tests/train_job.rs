@@ -229,6 +229,32 @@ fn train_over_fixture_store_seals_verifiable_vintage() {
     );
     assert_eq!(outcome.result.vintage_id, outcome.vintage_id);
 
+    // QE-476 (R2.2): a real train seals the G1 promotion verdict into the content-hashed evidence
+    // (write-but-mark). Assert end-to-end that (a) the sealed vintage carries a verdict, (b) its `promoted`
+    // flag mirrors the run-doc G1 decision, and (c) at least one sealed criterion's FROZEN threshold equals
+    // the gate constant it was judged against — so a later drift of a threshold constant cannot re-classify
+    // this already-sealed artifact.
+    let sealed_verdict = loaded
+        .content
+        .seal_evidence
+        .promotion
+        .as_ref()
+        .expect("QE-476: a real train must seal the G1 promotion verdict");
+    assert_eq!(
+        sealed_verdict.promoted, outcome.result.g1.promoted,
+        "the sealed verdict's promoted flag must mirror the run-doc G1 decision"
+    );
+    let sealed_dsr = sealed_verdict
+        .criteria
+        .iter()
+        .find(|c| c.name == "dsr_exceeds_threshold")
+        .expect("the DSR criterion must be sealed into the verdict");
+    assert_eq!(
+        sealed_dsr.threshold,
+        qe_gate::DEFAULT_DSR_THRESHOLD,
+        "the sealed DSR threshold must be the frozen gate constant it was judged against"
+    );
+
     // QE-414: on the real fixture archive the DSR trial variance is estimated from the FULL cell
     // population (every occupied cell's champion), not the top-`MAX_POOL=10` ensemble pool. Prove the
     // population is genuinely broader than the top-10 pool and that the deflation basis is recorded.
