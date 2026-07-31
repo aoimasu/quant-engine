@@ -6,6 +6,16 @@
 //! return-decorrelation. All math is self-contained `f64`: `qe-ensemble` does **not** depend on `qe-wfo`
 //! (search ⟂ portfolio firewall, QE-001/QE-132).
 //!
+//! QE-475: the three terms are put on a common **per-unit-risk** footing so the trade-off above is a
+//! genuine one. Raw per-bar returns are O(1e-3) while the correlation penalty is `∈ [0, 1]`, so an
+//! unscaled `mean + tail − corr` would be dominated two-to-three orders of magnitude by decorrelation and
+//! the DE selection would collapse into a *pure* decorrelation search. [`objective_weighted`] instead
+//! divides the mean and CVaR terms by the combined-return volatility — a per-bar Sharpe and a normalised
+//! tail, both dimensionless and O(0.1..a few) — so **mean growth competes with decorrelation** on one
+//! scale. A zero-volatility (constant) or empty combined series has no risk to divide by, so the
+//! denominator falls back to `1.0` (raw return units): deterministic, never a divide-by-zero, and
+//! byte-identical to the pre-QE-475 constant-series behaviour.
+//!
 //! QE-438: membership is scored on the **deployed** weight vector, not equal-weight. The combined return
 //! the objective sees is built with the capacity-capped weights the vintage actually deploys (reusing
 //! [`weighted_combined`](crate::stress::weighted_combined) and the QE-128 [`cap_weights`](crate::capacity::cap_weights)
@@ -435,6 +445,14 @@ pub struct ObjectiveConfig {
 impl ObjectiveConfig {
     /// The defaults: `alpha = 0.05`, unit tail and correlation weights (QE-115), and the sample-size
     /// significance floor **on** (QE-430).
+    ///
+    /// QE-475: the **unit** `corr_weight` is now a genuinely balanced trade-off, not a decorrelation
+    /// override. Because [`objective_weighted`] expresses the return and tail terms per unit of risk
+    /// (dimensionless, O(0.1..a few)) they sit on the same scale as the `∈ [0, 1]` correlation penalty, so
+    /// a unit weight makes decorrelation *one* consideration among mean growth and tail control rather
+    /// than the two-to-three-orders-of-magnitude-dominant one it was under the old raw-return scale. The
+    /// weight is left at `1.0` (the deliberate QE-115 unit-weight choice) — it is the *scale mismatch*
+    /// that QE-475 fixes, not the constant.
     #[must_use]
     pub fn with_defaults() -> Self {
         ObjectiveConfig {
@@ -452,12 +470,43 @@ impl Default for ObjectiveConfig {
     }
 }
 
-/// The ensemble objective under the deployed `weighting` (QE-115/D3+D5, QE-438): `mean(combined) +
-/// tail_weight·CVaR(combined) − corr_weight·positive_mean_pairwise_corr(members)`, where `combined` is
-/// the members' **net-of-cost** returns combined under `weighting` (the capacity-capped weights the
-/// vintage deploys). The correlation penalty is a weight-independent property of the member series
-/// (scale-invariant), so it stays on the raw member series — QE-430's deflated penalty is untouched. An
-/// empty ensemble scores `−∞`.
+/// Population standard deviation of `returns` — the **per-unit-risk denominator** the objective rescales
+/// its return and tail terms by (QE-475). Empty or zero-variance (constant) series ⇒ `0.0`, the signal
+/// the caller reads to fall back to raw return units (per-unit-risk is undefined without risk). Pure
+/// `f64`, no RNG / wall-clock ⇒ determinism-safe.
+#[must_use]
+fn return_volatility(returns: &[f64]) -> f64 {
+    let n = returns.len();
+    if n == 0 {
+        return 0.0;
+    }
+    let mean = returns.iter().sum::<f64>() / n as f64;
+    let var = returns
+        .iter()
+        .map(|r| {
+            let d = r - mean;
+            d * d
+        })
+        .sum::<f64>()
+        / n as f64;
+    var.sqrt()
+}
+
+/// The ensemble objective under the deployed `weighting` (QE-115/D3+D5, QE-438, QE-475):
+/// `mean(combined)/risk + tail_weight·CVaR(combined)/risk − corr_weight·positive_mean_pairwise_corr(members)`,
+/// where `combined` is the members' **net-of-cost** returns combined under `weighting` (the capacity-capped
+/// weights the vintage deploys) and `risk` is the combined-return volatility.
+///
+/// QE-475 puts the three terms on one **per-unit-risk** scale: the mean and CVaR are divided by `risk`,
+/// turning them into a per-bar Sharpe and a normalised tail (both dimensionless, O(0.1..a few)), so mean
+/// growth genuinely competes with the `∈ [0, 1]` correlation penalty instead of being swamped by it — the
+/// balanced trade-off the module docstring promises, not a decorrelation-dominated search. `risk` falls
+/// back to `1.0` for a zero-volatility (constant) or empty combined series, so the degenerate no-risk case
+/// stays in raw return units, deterministic and byte-identical to the pre-QE-475 behaviour.
+///
+/// The correlation penalty is a weight-independent, **scale-invariant** property of the member series, so
+/// it stays on the raw member series — QE-430's deflated penalty is untouched. An empty ensemble scores
+/// `−∞`.
 #[must_use]
 pub fn objective_weighted(
     pool: &[Vec<f64>],
@@ -479,7 +528,23 @@ pub fn objective_weighted(
     // `pairwise_corr_penalty` sees the **actual fold-slice N** and deflates on it (QE-430).
     let member_series: Vec<Vec<f64>> = members.iter().map(|&m| pool[m].clone()).collect();
     let corr = pairwise_corr_penalty(&member_series, cfg.corr_deflation).value;
-    mean + cfg.tail_weight * tail - cfg.corr_weight * corr
+    // QE-475: rescale the return and tail terms per unit of risk so they share the correlation penalty's
+    // scale. A constant / empty combined series has no risk to divide by, so `risk` falls back to `1.0`
+    // (raw units) — no divide-by-zero, and identical to the pre-QE-475 constant-series objective. The
+    // fallback is triggered on volatility that is negligible **relative to the return magnitude**, not
+    // strictly zero: a genuinely-constant `f64` series still carries a rounding-scale (~1e-16 relative)
+    // volatility from the mean's summation/division, and dividing by that denormal would explode the
+    // score. Any series with real dispersion clears the relative floor by many orders of magnitude.
+    let risk = {
+        let vol = return_volatility(&combined);
+        let scale = combined.iter().map(|r| r.abs()).fold(0.0_f64, f64::max);
+        if vol > scale * 1e-9 {
+            vol
+        } else {
+            1.0
+        }
+    };
+    mean / risk + cfg.tail_weight * (tail / risk) - cfg.corr_weight * corr
 }
 
 /// The ensemble objective on the **equal-weight** combined series — [`objective_weighted`] under
@@ -666,6 +731,97 @@ mod tests {
         assert!(
             obj_ac > obj_ab,
             "decorrelated ensemble must beat the P&L-correlated one ({obj_ac} !> {obj_ab})"
+        );
+    }
+
+    #[test]
+    fn per_unit_risk_scaling_lets_a_higher_mean_correlated_ensemble_win() {
+        // QE-475 AC (intent a): on a REALISTIC-scale pool (per-bar returns ~1e-3, member correlations in
+        // 0.3–0.7), the per-unit-risk rescaling lets a materially higher-mean but CORRELATED ensemble be
+        // PREFERRED over a near-zero-mean DECORRELATED one — the balanced trade-off the docstring
+        // promises. The pre-QE-475 unscaled objective (`mean + tail − corr`) ranks them the other way
+        // (decorrelation-dominated), which this test also proves — so the rescale is what flips the order.
+        let n = 300;
+        let mut draw = xorshift_stream(0xC0FF_EE12_3456_789A); // in [−0.5, 0.5)
+
+        // Shared zero-mean driver for the correlated ensemble.
+        let driver: Vec<f64> = (0..n).map(|_| draw()).collect();
+
+        // HIGH-mean, CORRELATED ensemble: positive drift + a shared driver + idiosyncratic noise of equal
+        // loading ⇒ pairwise correlation ≈ 0.5, per-bar returns O(1e-3).
+        let drift_hi = 1.2e-3;
+        let a = 2.0e-3; // shared-driver loading
+        let b = 2.0e-3; // idiosyncratic loading (equal to `a` ⇒ corr ≈ 0.5)
+        let high: Vec<Vec<f64>> = (0..3)
+            .map(|_| {
+                (0..n)
+                    .map(|i| drift_hi + a * driver[i] + b * draw())
+                    .collect()
+            })
+            .collect();
+
+        // NEAR-ZERO-mean, DECORRELATED ensemble: negligible drift + independent noise at a comparable
+        // per-member scale ⇒ pairwise correlation ≈ 0.
+        let drift_lo = 3.0e-5;
+        let c = 2.8e-3;
+        let low: Vec<Vec<f64>> = (0..3)
+            .map(|_| (0..n).map(|_| drift_lo + c * draw()).collect())
+            .collect();
+
+        let cfg = ObjectiveConfig::with_defaults();
+
+        // Fixtures are realistic: the correlated ensemble sits in [0.3, 0.7]; the decorrelated one ≈ 0.
+        let corr_hi = pairwise_corr_penalty(&high, CorrDeflation::None).value;
+        let corr_lo = pairwise_corr_penalty(&low, CorrDeflation::None).value;
+        assert!(
+            (0.3..=0.7).contains(&corr_hi),
+            "correlated ensemble must be realistically correlated: {corr_hi}"
+        );
+        assert!(
+            corr_lo < 0.15,
+            "decorrelated ensemble must be near-uncorrelated: {corr_lo}"
+        );
+
+        // The correlated ensemble is materially higher-mean; the decorrelated one is near-zero-mean.
+        let combined_mean = |series: &[Vec<f64>]| {
+            let members: Vec<usize> = (0..series.len()).collect();
+            let combined = combined_returns(series, &members);
+            combined.iter().sum::<f64>() / combined.len() as f64
+        };
+        let mean_hi = combined_mean(&high);
+        let mean_lo = combined_mean(&low);
+        assert!(
+            mean_hi > 5.0 * mean_lo.abs(),
+            "the correlated ensemble must be materially higher-mean: {mean_hi} vs {mean_lo}"
+        );
+        // Realistic scale: per-bar combined returns are O(1e-3).
+        assert!(
+            (1e-4..1e-2).contains(&mean_hi),
+            "returns must be ~1e-3: {mean_hi}"
+        );
+
+        let obj_hi = objective(&high, &[0, 1, 2], &cfg);
+        let obj_lo = objective(&low, &[0, 1, 2], &cfg);
+        assert!(
+            obj_hi > obj_lo,
+            "per-unit-risk scaling must let the higher-mean correlated ensemble win: hi={obj_hi} lo={obj_lo}"
+        );
+
+        // Counter-check: the pre-QE-475 UNSCALED objective (mean + tail − corr, no per-unit-risk footing)
+        // ranks them the other way — decorrelation dominates — the exact defect QE-475 fixes.
+        let unscaled = |series: &[Vec<f64>]| {
+            let members: Vec<usize> = (0..series.len()).collect();
+            let combined = combined_returns(series, &members);
+            let m = combined.iter().sum::<f64>() / combined.len() as f64;
+            let tail = cvar(&combined, cfg.alpha).value;
+            let corr = pairwise_corr_penalty(series, cfg.corr_deflation).value;
+            m + cfg.tail_weight * tail - cfg.corr_weight * corr
+        };
+        assert!(
+            unscaled(&low) > unscaled(&high),
+            "the unscaled objective must (wrongly) prefer the decorrelated ensemble: hi={} lo={}",
+            unscaled(&high),
+            unscaled(&low)
         );
     }
 
