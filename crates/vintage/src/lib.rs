@@ -134,6 +134,26 @@ pub struct SealEvidence {
     /// that does not run CPCV (byte-identical to pre-QE-469 — see the struct doc). Content-addressed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cpcv: Option<CpcvSummary>,
+    /// The sealed **G1 promotion verdict** (QE-476): the content-hashed mirror of the run-doc
+    /// `G1Decision` — the `promoted` flag plus each criterion's frozen name/value/threshold. Under the
+    /// **write-but-mark** policy a G1-failed candidate is still sealed and written, marked
+    /// `promoted = false`, so downstream selectors read the verdict and refuse a non-promoted vintage.
+    /// Additive `Option` (`skip_serializing_if` when `None`), exactly the QE-454/QE-469 precedent, so a
+    /// verdict-less vintage serialises **byte-identically** to the pre-QE-476 artefact — no
+    /// `VINTAGE_FORMAT_VERSION` bump. When populated it enters the hashed content (content-addressed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub promotion: Option<PromotionVerdict>,
+}
+
+impl SealEvidence {
+    /// The **fail-closed** promotion read a downstream selector uses (QE-476): `true` only when a sealed
+    /// verdict is present **and** records `promoted = true`. A verdict-less vintage (`None`, e.g. a
+    /// pre-QE-476 or otherwise unmarked artifact) reads as **not promoted** — a selector refuses it rather
+    /// than default-accepting an artifact whose gate outcome the hash cannot vouch for.
+    #[must_use]
+    pub fn is_promoted(&self) -> bool {
+        self.promotion.as_ref().is_some_and(|v| v.promoted)
+    }
 }
 
 /// The CPCV out-of-sample distribution summary (QE-469 — López de Prado Ch. 12.4), persisted in the sealed
@@ -189,6 +209,37 @@ impl CpcvSummary {
             ("cpcv.frac_dsr_ge_floor", self.frac_dsr_ge_floor),
         ]
     }
+}
+
+/// One sealed G1 criterion's frozen evidence (QE-476): the criterion name, whether it passed, the
+/// observed value, and the **threshold it was judged against** — mirrors `qe_gate::CriterionResult` but
+/// lives in `qe-vintage` so the artefact format keeps no `qe-gate` dependency. Freezing the threshold into
+/// the hash is the point: a later drift of a threshold constant cannot silently re-classify an
+/// already-sealed artifact, because the value-vs-threshold comparison it was judged on is content-addressed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct SealedCriterion {
+    /// Short identifier for the criterion (matches the run-doc `G1Decision` criterion name).
+    pub name: String,
+    /// Whether this criterion passed.
+    pub passed: bool,
+    /// The observed value.
+    pub value: f64,
+    /// The threshold the value was compared against (frozen into the hash).
+    pub threshold: f64,
+}
+
+/// The sealed **G1 promotion verdict** (QE-476): the content-hashed mirror of the run-doc
+/// `qe_gate::G1Decision`, so a downstream selector reading only the content-addressed vintage — never the
+/// separate, non-content-addressed run doc — can tell a gate-passed artifact from a failed one and recover
+/// each criterion's frozen threshold. **Write-but-mark policy:** a G1-failed candidate is still sealed and
+/// written (preserving negative-result lineage for research), but carries `promoted = false`; a selector
+/// must read [`promoted`](Self::promoted) and refuse a non-promoted vintage.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct PromotionVerdict {
+    /// Whether the vintage cleared **every** G1 criterion (`true` iff gate-passed / promotable).
+    pub promoted: bool,
+    /// The per-criterion evidence with frozen thresholds, in evaluation order.
+    pub criteria: Vec<SealedCriterion>,
 }
 
 /// The canonical **net-of-cost holdout return series on the DEPLOYED capacity-capped weights** (QE-438),
@@ -474,6 +525,13 @@ impl VintageContent {
                 *x = hash_stable(*x);
             }
         }
+        // QE-476: canonicalise the sealed verdict's value/threshold (QE-482 hash-stable precision).
+        if let Some(verdict) = ev.promotion.as_mut() {
+            for c in &mut verdict.criteria {
+                c.value = hash_stable(c.value);
+                c.threshold = hash_stable(c.threshold);
+            }
+        }
     }
 
     /// Validate the artefact's structural invariants — `weights` aligned one-to-one with `chromosomes`
@@ -547,6 +605,20 @@ impl VintageContent {
             for (field, value) in cpcv_fields {
                 if !value.is_finite() {
                     return Err(VintageError::NonFiniteEvidence { field, value });
+                }
+            }
+        }
+        // QE-476: the sealed G1 verdict's per-criterion value/threshold must be finite (same round-trip
+        // reason — a non-finite value would serialise to JSON `null` and fail re-load).
+        if let Some(verdict) = &ev.promotion {
+            for c in &verdict.criteria {
+                for (field, value) in [
+                    ("promotion.value", c.value),
+                    ("promotion.threshold", c.threshold),
+                ] {
+                    if !value.is_finite() {
+                        return Err(VintageError::NonFiniteEvidence { field, value });
+                    }
                 }
             }
         }
@@ -1107,6 +1179,129 @@ mod tests {
         assert!(
             !json.contains("cpcv"),
             "an absent cpcv must not appear in the serialised content: {json}"
+        );
+    }
+
+    fn verdict(promoted: bool) -> PromotionVerdict {
+        PromotionVerdict {
+            promoted,
+            criteria: vec![
+                SealedCriterion {
+                    name: "dsr_exceeds_threshold".to_string(),
+                    passed: promoted,
+                    value: if promoted { 0.98 } else { 0.80 },
+                    threshold: 0.95, // the frozen DSR threshold
+                },
+                SealedCriterion {
+                    name: "pbo_below_overfit_threshold".to_string(),
+                    passed: true,
+                    value: 0.10,
+                    threshold: 0.5,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn sealed_verdict_recovers_promoted_and_thresholds_without_the_run_doc() {
+        // QE-476: a downstream reader recovers the promotion verdict + each criterion's frozen threshold
+        // from the sealed (content-addressed) artifact alone — no separate run doc needed.
+        let mut c = content();
+        c.seal_evidence.promotion = Some(verdict(true));
+        let sealed = Vintage::seal(c).unwrap();
+        let mut buf: Vec<u8> = Vec::new();
+        sealed.write(&mut buf).unwrap();
+        let loaded = Vintage::load(buf.as_slice()).unwrap();
+
+        assert!(loaded.content.seal_evidence.is_promoted());
+        let v = loaded.content.seal_evidence.promotion.as_ref().unwrap();
+        assert!(v.promoted);
+        let dsr_crit = v
+            .criteria
+            .iter()
+            .find(|c| c.name == "dsr_exceeds_threshold")
+            .expect("the DSR criterion is sealed");
+        assert_eq!(
+            dsr_crit.threshold, 0.95,
+            "the threshold is frozen in the hash"
+        );
+        assert!(dsr_crit.passed);
+    }
+
+    #[test]
+    fn a_drifted_threshold_constant_does_not_change_a_sealed_verdict() {
+        // QE-476: the recorded verdict is READ FROM THE HASH, not re-derived — so even if a threshold
+        // CONSTANT drifts in a later build, an already-sealed artifact's frozen threshold/value is
+        // unchanged (its content hash still verifies against the figures it was judged on).
+        let mut c = content();
+        c.seal_evidence.promotion = Some(verdict(true));
+        let sealed = Vintage::seal(c).unwrap();
+        let mut buf: Vec<u8> = Vec::new();
+        sealed.write(&mut buf).unwrap();
+        // Reload verifies the content hash: the sealed threshold cannot be silently re-derived to a drifted
+        // constant without breaking the hash. The frozen value is exactly what was sealed.
+        let loaded = Vintage::load(buf.as_slice()).unwrap();
+        let dsr_crit = loaded
+            .content
+            .seal_evidence
+            .promotion
+            .as_ref()
+            .unwrap()
+            .criteria
+            .iter()
+            .find(|c| c.name == "dsr_exceeds_threshold")
+            .unwrap();
+        assert_eq!(dsr_crit.threshold, 0.95);
+        assert_eq!(dsr_crit.value, 0.98);
+        loaded.verify().unwrap();
+    }
+
+    #[test]
+    fn a_failed_candidate_is_written_but_marked_non_promotable() {
+        // QE-476 write-but-mark: a G1-FAILED candidate is NOT un-writable — it seals, writes, and reloads,
+        // but carries promoted = false so a selector's fail-closed read refuses it.
+        let mut c = content();
+        c.seal_evidence.promotion = Some(verdict(false));
+        let sealed = Vintage::seal(c).unwrap();
+        assert!(!sealed.content.seal_evidence.is_promoted());
+
+        let dir = std::env::temp_dir().join(format!("qe-vintage-failed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let repo = VintageRepository::new(&dir);
+        repo.write(&sealed).unwrap(); // written, not refused
+        let loaded = repo.load(&sealed.content.vintage_id).unwrap();
+        assert!(
+            !loaded.content.seal_evidence.is_promoted(),
+            "a non-promoted vintage must read as not-promoted (a selector refuses it)"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn verdict_is_part_of_the_hash_and_absent_is_byte_identical() {
+        // Flipping the promoted flag (or any criterion figure) moves the vintage id — the verdict is
+        // content-addressed. And an absent verdict (default None) is OMITTED from the serialised content
+        // (skip_serializing_if), so a verdict-less vintage is byte-identical to pre-QE-476 (no bump).
+        let base = Vintage::seal(content()).unwrap();
+        assert!(base.content.seal_evidence.promotion.is_none());
+        assert!(
+            !base.content.seal_evidence.is_promoted(),
+            "None ⇒ fail-closed"
+        );
+        let json = serde_json::to_string(&base.content).unwrap();
+        assert!(
+            !json.contains("promotion"),
+            "an absent verdict must not appear in the serialised content: {json}"
+        );
+
+        let mut promoted = content();
+        promoted.seal_evidence.promotion = Some(verdict(true));
+        let mut failed = content();
+        failed.seal_evidence.promotion = Some(verdict(false));
+        assert_ne!(
+            Vintage::seal(promoted).unwrap().content_hash,
+            Vintage::seal(failed).unwrap().content_hash,
+            "the promotion verdict is part of the hashed content"
         );
     }
 

@@ -970,6 +970,27 @@ pub fn run_train_job(
     let cpcv = cpcv_dist
         .as_ref()
         .map(|d| cpcv_summary(d, DEFAULT_CPCV_BLOCKS));
+    // ---- QE-476: seal the G1 promotion verdict into the hashed evidence (WRITE-BUT-MARK policy) --------
+    // Mirror the final `g1` decision (after the CPCV conjunction at the gate above) into the
+    // content-addressed vintage: the `promoted` flag plus each criterion's frozen name/value/threshold.
+    // The threshold each criterion was judged against is now pinned in the hash, so a later drift of a
+    // threshold constant cannot re-classify an already-sealed artifact. Write-but-mark: a G1-FAILED
+    // candidate is still sealed and written (preserving negative-result lineage), marked `promoted = false`
+    // — downstream selectors read `SealEvidence::is_promoted()` and refuse a non-promoted vintage. Every
+    // figure is rounded `hash_stable` (QE-482 precision) so the block round-trips byte-identically.
+    let promotion = Some(qe_vintage::PromotionVerdict {
+        promoted: g1.promoted,
+        criteria: g1
+            .criteria
+            .iter()
+            .map(|c| qe_vintage::SealedCriterion {
+                name: c.name.clone(),
+                passed: c.passed,
+                value: hash_stable(c.value),
+                threshold: hash_stable(c.threshold),
+            })
+            .collect(),
+    });
     let seal_evidence = qe_vintage::SealEvidence {
         dsr: hash_stable(robustness.dsr),
         pbo: hash_stable(robustness.pbo),
@@ -986,6 +1007,8 @@ pub fn run_train_job(
         fdr: None,
         // QE-469: the CPCV OOS distribution summary (the promotion-facing OOS evidence).
         cpcv,
+        // QE-476: the content-hashed G1 promotion verdict + frozen per-criterion thresholds.
+        promotion,
     };
     // The canonical net-of-cost holdout series on the DEPLOYED capacity-capped weights (QE-438), rounded to
     // a hash-stable precision so it round-trips byte-identically (same rule as `weights`).
