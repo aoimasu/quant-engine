@@ -15,8 +15,11 @@
 //! structured `409` **before any state change**, and a sealed pool **never auto-mints a vintage** (§13.2).
 //! Sandbox lifecycle transitions may function; a sandbox seal cannot reach a production vintage.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use tokio::sync::Mutex as AsyncMutex;
 
 use axum::extract::{Path, State};
 use axum::response::{IntoResponse, Response};
@@ -31,7 +34,7 @@ use qe_run_protocol::EvolveArchive;
 use serde::Serialize;
 use serde_json::json;
 
-use crate::audit::{AuditAction, AuditLog, SignoffState};
+use crate::audit::{AuditAction, AuditLog, ChainStatus, SignoffState};
 use crate::auth::{require_approver, require_operator, AuthedEmail, RoleConfig};
 use crate::pool_seal::{seal_allowed, SealContext, SealDecision};
 use crate::runs::store::atomic_write;
@@ -49,6 +52,16 @@ pub struct PoolState {
     production: FormulaPoolRepository,
     /// The governance store (`<data_dir>/governance`) — the durable pool lifecycle, separate from the run.
     governance: PoolGovernanceStore,
+    /// QE-483: per-pool async locks serialising the governance-cache **read-modify-write** in
+    /// [`apply_cache_transition`] (the on-disk record is a rebuildable, audit-derived cache; the tamper-
+    /// evident audit chain stays authoritative). Keyed by pool id, so two racing approve/seal transitions on
+    /// the **same** pool cannot interleave read→apply→write and lose an update, while unrelated pools are
+    /// never needlessly serialised. Mirrors the run store's `index_lock` (`runs/manager.rs`).
+    ///
+    /// The map is bounded by **opportunistic eviction** ([`evict_cache_lock_if_idle`](Self::evict_cache_lock_if_idle)):
+    /// once a pool's transitions settle, its entry is removed, so the map holds only the pools with
+    /// in-flight governance transitions rather than growing once per distinct pool id for process life.
+    cache_locks: Arc<AsyncMutex<HashMap<String, Arc<AsyncMutex<()>>>>>,
 }
 
 impl PoolState {
@@ -60,6 +73,7 @@ impl PoolState {
             research: FormulaPoolRepository::new(artifacts_dir.join("research").join("pools")),
             production: FormulaPoolRepository::new(artifacts_dir.join("pools")),
             governance: PoolGovernanceStore::new(data_dir.join("governance")),
+            cache_locks: Arc::default(),
         }
     }
 
@@ -72,6 +86,7 @@ impl PoolState {
             research: FormulaPoolRepository::new(root.join("research").join("pools")),
             production: FormulaPoolRepository::new(root.join("pools")),
             governance: PoolGovernanceStore::new(root.join("governance")),
+            cache_locks: Arc::default(),
         }
     }
 
@@ -87,6 +102,38 @@ impl PoolState {
     /// The governance record for `id` (a fresh `Draft` when none exists yet).
     fn governance(&self, id: &str) -> Result<PoolGovernance, PoolError> {
         self.governance.read(id)
+    }
+
+    /// QE-483: the per-pool cache lock for `id`, created on first use. The caller holds it **across** the
+    /// `apply_cache_transition` read-modify-write (which runs off the async worker in `spawn_blocking`), so
+    /// two concurrent transitions on the same pool serialise instead of interleaving read→write. Distinct
+    /// pool ids get distinct locks, so unrelated pools never serialise (mirrors `index_lock`). The caller
+    /// evicts the entry via [`evict_cache_lock_if_idle`](Self::evict_cache_lock_if_idle) once its
+    /// transition settles, so the map does not accumulate a lock per pool id for process life.
+    async fn cache_lock(&self, id: &str) -> Arc<AsyncMutex<()>> {
+        let mut map = self.cache_locks.lock().await;
+        Arc::clone(map.entry(id.to_owned()).or_default())
+    }
+
+    /// QE-483: opportunistically evict a pool's cache lock once its transitions have settled, bounding the
+    /// `cache_locks` map. A caller invokes this AFTER dropping its own `Arc` clone of the lock (post-RMW).
+    /// Under the map lock, an entry whose `Arc::strong_count == 1` is held by the map **alone** — no other
+    /// caller currently holds a clone, and none can obtain one until this returns, because cloning (in
+    /// [`cache_lock`](Self::cache_lock)) and this removal are serialised by the **same** map lock. So the
+    /// removal is race-free: a concurrent caller that still holds a clone leaves `strong_count >= 2`, the
+    /// entry stays, and that caller evicts it when ITS transition settles. If evicted, a later transition on
+    /// the same pool simply re-creates a fresh lock (no other holder exists, so mutual exclusion is intact).
+    async fn evict_cache_lock_if_idle(&self, id: &str) {
+        let mut map = self.cache_locks.lock().await;
+        if map.get(id).is_some_and(|lock| Arc::strong_count(lock) == 1) {
+            map.remove(id);
+        }
+    }
+
+    /// Test-only: the number of live per-pool cache-lock entries (asserts eviction bounds the map).
+    #[cfg(test)]
+    async fn cache_locks_len(&self) -> usize {
+        self.cache_locks.lock().await.len()
     }
 
     /// **Structural barrier 3** (design §13.6) — load a pool from the **production** root **only**, asserting
@@ -480,6 +527,50 @@ async fn production_seal(
         Err(e) => return internal(format!("failed to read audit log: {e}")),
     };
 
+    // QE-473: verify the tamper-evident hash-chain BEFORE any seal decision. `derive_signoff`/`seal_allowed`
+    // count `approve` events reading only `action`/`subject_hash`/`actor_email` — they NEVER touch
+    // `entry_hash`/`hmac`/`prev_hash`, so forged `approve` lines (garbage HMAC/linkage) would otherwise
+    // satisfy dual sign-off. Fold the pure, in-memory chain check into a blocking task (no second
+    // `read_all`, off the async worker); a broken chain is fail-closed here — do NOT resolve the launcher,
+    // run `seal_allowed`, or mark-sealed on unverified append-only bytes.
+    let chain = {
+        let audit = Arc::clone(&audit);
+        let entries = entries.clone();
+        match tokio::task::spawn_blocking(move || audit.verify_chain(&entries)).await {
+            Ok(c) => c,
+            Err(_) => return internal("audit chain verification task failed".to_owned()),
+        }
+    };
+    if let ChainStatus::BrokenAt { seq } = chain {
+        // Same rejected-attempt branch as any other hard-block: append a rejected-seal audit entry and
+        // return `409` with the named chain-integrity blocker. `resolve_launcher`/`seal_allowed`/mark-sealed
+        // are never reached.
+        let blocker = format!("audit chain integrity check failed at seq {seq} — refusing to seal");
+        if let Err(e) = audit
+            .append(
+                &_actor,
+                AuditAction::Reject,
+                &pool.content.lineage.pool_hash,
+                "",
+                "",
+                "",
+                ts,
+            )
+            .await
+        {
+            tracing::warn!(pool_id = %id, error = %e, "failed to append rejected-seal audit entry (broken chain)");
+        }
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": "production seal refused — audit chain integrity check failed",
+                "pool_id": id,
+                "blockers": [blocker],
+            })),
+        )
+            .into_response();
+    }
+
     // Carry-forward #1: resolve the launcher server-side — the pool-bound launch entry first, then the
     // live run-bound entry via pool_id → run_id → launch entry. ALWAYS resolved server-side. An unresolved
     // launcher is left `None` and becomes a `launcher_unresolved` BLOCK inside `seal_allowed` (never passed
@@ -558,6 +649,10 @@ async fn production_seal(
 
     // Success ⇒ advance the cache Approved → Sealed (no vintage is minted).
     let cache = {
+        // QE-483: hold the per-pool cache lock ACROSS the read-modify-write (same discipline as the
+        // approve/reject/revoke path in `governance_action`).
+        let lock = pools.cache_lock(&id).await;
+        let _guard = lock.lock().await;
         let pools = Arc::clone(&pools);
         let task_id = id.clone();
         let actor_c = _actor.clone();
@@ -566,6 +661,8 @@ async fn production_seal(
         })
         .await
     };
+    // QE-483: the lock clone dropped with the block above; opportunistically evict its now-idle entry.
+    pools.evict_cache_lock_if_idle(&id).await;
     match cache {
         Ok(Ok(_)) => {}
         Ok(Err(CacheError::Illegal(msg))) => {
@@ -743,6 +840,10 @@ async fn governance_action(
     //    authoritative). Approve is idempotent at `Approved` (a second distinct sign-off records only an
     //    audit entry); every other edge goes through the guarded state machine.
     let cache = {
+        // QE-483: hold the per-pool cache lock ACROSS the read-modify-write so concurrent transitions on
+        // the same pool serialise (no lost update); unrelated pools take distinct locks.
+        let lock = pools.cache_lock(&id).await;
+        let _guard = lock.lock().await;
         let pools = Arc::clone(&pools);
         let task_id = id.clone();
         let actor_c = actor.clone();
@@ -755,6 +856,8 @@ async fn governance_action(
             Err(_) => return internal("governance cache task failed".to_owned()),
         }
     };
+    // QE-483: the lock clone dropped with the block above; opportunistically evict its now-idle entry.
+    pools.evict_cache_lock_if_idle(&id).await;
     let state = match cache {
         Ok(state) => state,
         Err(CacheError::Illegal(msg)) => {
@@ -859,6 +962,12 @@ enum CacheError {
 /// Apply the guarded lifecycle-cache transition. `Approve` is **idempotent at `Approved`** — a second
 /// distinct sign-off leaves the cache `Approved` (the audit log carries the two signatures); the first
 /// `Approve` advances `Draft → Approved`. Reject/revoke/seal go through the pure guarded machine.
+///
+/// QE-483: this is a **read-modify-write** over the rebuildable, audit-derived governance cache (the record
+/// is authoritative nowhere — the tamper-evident audit chain is the source of truth, and `seal_allowed`/
+/// `derive_signoff` re-derive lifecycle from the chain, never from this record). The RMW is **not** self-
+/// serialising; every caller MUST hold the per-pool [`PoolState::cache_lock`] across this call so two racing
+/// transitions on the same pool cannot interleave read→apply→write and lose an update.
 fn apply_cache_transition(
     pools: &PoolState,
     id: &str,
@@ -975,4 +1084,430 @@ fn internal(msg: String) -> Response {
         Json(json!({ "error": msg })),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::audit::AuditEntry;
+    use crate::runs::CliJobSpawner;
+    use qe_formula_pool::{
+        DeflationSummary, FormulaGateEvidence, PoolFormula, PoolGovernance, PoolLineage,
+        POOL_FORMAT_VERSION,
+    };
+    use rust_decimal::Decimal;
+    use sha2::{Digest, Sha256};
+    use std::path::Path;
+
+    const POOL_ID: &str = "campaign-1";
+    const POOL_HASH: &str = "poolhash-1";
+
+    fn dec(n: i64, scale: u32) -> Decimal {
+        Decimal::new(n, scale)
+    }
+
+    fn h(s: &str) -> String {
+        use std::fmt::Write as _;
+        let mut out = String::new();
+        for b in Sha256::digest(s.as_bytes()) {
+            let _ = write!(out, "{b:02x}");
+        }
+        out
+    }
+
+    /// A production-mode pool that clears every §13.5 hard-block (mirrors the `pool_seal` happy-path pool).
+    fn passing_production_pool() -> FormulaPool {
+        let mut formulas = vec![
+            PoolFormula {
+                sexpr: "rank(close,20)".to_owned(),
+                formula_hash: h("rank(close,20)"),
+            },
+            PoolFormula {
+                sexpr: "zscore(high,50)".to_owned(),
+                formula_hash: h("zscore(high,50)"),
+            },
+        ];
+        formulas.sort_by(|a, b| a.formula_hash.cmp(&b.formula_hash));
+        let gate_evidence = formulas
+            .iter()
+            .map(|f| FormulaGateEvidence {
+                formula_hash: f.formula_hash.clone(),
+                ic_two_fold_same_sign_fdr_pass: true,
+                cost_stress_min_net_log_growth: dec(5, 3),
+                realised_turnover_frac: dec(20, 2),
+                capacity_usd: Decimal::from(300_000),
+                within_caps_and_stratum_deflated: true,
+                random_entry_null_pass: true,
+            })
+            .collect();
+        let content = FormulaPoolContent {
+            format_version: POOL_FORMAT_VERSION,
+            pool_id: POOL_ID.to_owned(),
+            mode: PoolMode::Production,
+            formulas,
+            deflation: DeflationSummary {
+                gp_aware: true,
+                distinct_evaluations: 500_000,
+                n_trials: 500_000,
+                analytic_floor: 7_200,
+                variance_trials: 500_000,
+                trial_variance: dec(2, 2),
+                expected_max_sharpe: dec(9, 0),
+                champion_dsr: dec(98, 2),
+                uncensored_pbo: Some(dec(2, 1)),
+            },
+            gate_evidence: Some(gate_evidence),
+            lineage: PoolLineage {
+                campaign_id: POOL_ID.to_owned(),
+                seed: 7,
+                mode: PoolMode::Production,
+                code_commit: "commit".to_owned(),
+                input_snapshot_id: "snap".to_owned(),
+                config_hash: "cfg".to_owned(),
+                pool_hash: POOL_HASH.to_owned(),
+            },
+        };
+        FormulaPool::seal(content).expect("passing pool seals")
+    }
+
+    fn audit_log(dir: &Path) -> Arc<AuditLog> {
+        Arc::new(AuditLog::new(
+            dir.join("audit").join("log.jsonl"),
+            b"test-key".to_vec(),
+            false,
+        ))
+    }
+
+    /// A dummy manager (the resolve-launcher store path is never hit on these tests — the launch entry is
+    /// pool-bound, so `launcher_for_pool` resolves without touching the run store).
+    fn dummy_manager(dir: &Path) -> Arc<RunManager> {
+        Arc::new(RunManager::new(
+            dir.join("runs"),
+            Arc::new(CliJobSpawner::new(std::path::PathBuf::from("/bin/false"))),
+            1,
+        ))
+    }
+
+    /// Seed the governance cache to `Approved` so the `Approved → Sealed` edge is legal.
+    fn seed_approved(pools: &PoolState) {
+        let mut g = PoolGovernance::draft(POOL_ID);
+        g.apply(PoolTransition::Approve, "a@x.io", 1).unwrap();
+        pools.governance.write(&g).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_valid_chain_with_two_distinct_signoffs_seals() {
+        let dir = tempfile::tempdir().unwrap();
+        let audit = audit_log(dir.path());
+        // A genuine chain: pool-bound launch (launcher ≠ approvers) + two distinct approvals on the hash.
+        audit
+            .append(
+                "launcher@x.io",
+                AuditAction::Launch,
+                POOL_ID,
+                "run-1",
+                "",
+                "",
+                1,
+            )
+            .await
+            .unwrap();
+        audit
+            .append("a@x.io", AuditAction::Approve, POOL_HASH, "", "", "", 1)
+            .await
+            .unwrap();
+        audit
+            .append("b@x.io", AuditAction::Approve, POOL_HASH, "", "", "", 1)
+            .await
+            .unwrap();
+        assert!(audit.verify_chain(&audit.read_all().unwrap()).is_ok());
+
+        let pools = Arc::new(PoolState::from_dirs(
+            &dir.path().join("artifacts"),
+            &dir.path().join("data"),
+        ));
+        seed_approved(&pools);
+        let manager = dummy_manager(dir.path());
+        let pool = passing_production_pool();
+
+        let resp = production_seal(
+            Arc::clone(&pools),
+            Arc::clone(&audit),
+            manager,
+            POOL_ID.to_owned(),
+            "sealer@x.io".to_owned(),
+            pool,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK, "the happy path must seal");
+        // The cache advanced to Sealed and the governance record was written.
+        assert_eq!(
+            pools.governance(POOL_ID).unwrap().state,
+            PoolLifecycleState::Sealed
+        );
+        assert!(pools.governance_record_path(POOL_ID).exists());
+    }
+
+    #[tokio::test]
+    async fn a_forged_chain_with_two_bad_hmac_approvals_refuses_to_seal() {
+        let dir = tempfile::tempdir().unwrap();
+        let audit = audit_log(dir.path());
+        // A genuine launch (seq 0), then TWO FORGED approve lines (distinct emails bound to the pool_hash,
+        // garbage entry_hash/hmac) — these satisfy `derive_signoff`'s hash-blind count but must be caught by
+        // `verify_chain` at seq 1.
+        audit
+            .append(
+                "launcher@x.io",
+                AuditAction::Launch,
+                POOL_ID,
+                "run-1",
+                "",
+                "",
+                1,
+            )
+            .await
+            .unwrap();
+        let mut entries = audit.read_all().unwrap();
+        let prev = entries[0].entry_hash.clone();
+        entries.push(AuditEntry {
+            seq: 1,
+            ts_ms: 1,
+            actor_email: "attacker-a@evil.com".to_owned(),
+            action: AuditAction::Approve,
+            subject_hash: POOL_HASH.to_owned(),
+            run_id: String::new(),
+            vintage_id: String::new(),
+            evidence_hash: String::new(),
+            prev_hash: prev,
+            entry_hash: "0".repeat(64),
+            hmac: "0".repeat(64),
+        });
+        entries.push(AuditEntry {
+            seq: 2,
+            ts_ms: 1,
+            actor_email: "attacker-b@evil.com".to_owned(),
+            action: AuditAction::Approve,
+            subject_hash: POOL_HASH.to_owned(),
+            run_id: String::new(),
+            vintage_id: String::new(),
+            evidence_hash: String::new(),
+            prev_hash: "0".repeat(64),
+            entry_hash: "0".repeat(64),
+            hmac: "0".repeat(64),
+        });
+        // Rewrite the JSONL with the forged tail.
+        let mut buf = String::new();
+        for e in &entries {
+            buf.push_str(&serde_json::to_string(e).unwrap());
+            buf.push('\n');
+        }
+        std::fs::write(audit.path(), buf.as_bytes()).unwrap();
+        assert_eq!(
+            audit.verify_chain(&audit.read_all().unwrap()),
+            ChainStatus::BrokenAt { seq: 1 }
+        );
+
+        let pools = Arc::new(PoolState::from_dirs(
+            &dir.path().join("artifacts"),
+            &dir.path().join("data"),
+        ));
+        seed_approved(&pools);
+        let manager = dummy_manager(dir.path());
+        let pool = passing_production_pool();
+
+        let resp = production_seal(
+            Arc::clone(&pools),
+            Arc::clone(&audit),
+            manager,
+            POOL_ID.to_owned(),
+            "sealer@x.io".to_owned(),
+            pool,
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::CONFLICT,
+            "a broken chain must refuse to seal"
+        );
+        // mark-sealed was NEVER reached: the cache stays Approved and no governance record was written.
+        assert_eq!(
+            pools.governance(POOL_ID).unwrap().state,
+            PoolLifecycleState::Approved
+        );
+        assert!(!pools.governance_record_path(POOL_ID).exists());
+    }
+
+    // ---- QE-483: governance-cache RMW serialisation --------------------------------------------------
+
+    /// The caller-side discipline the governance handlers use: take the per-pool cache lock, then run the
+    /// blocking read-modify-write off the async worker while holding it.
+    async fn locked_transition(
+        pools: Arc<PoolState>,
+        id: String,
+        t: PoolTransition,
+    ) -> Result<PoolLifecycleState, String> {
+        let result = {
+            let lock = pools.cache_lock(&id).await;
+            let _guard = lock.lock().await;
+            let p = Arc::clone(&pools);
+            let id2 = id.clone();
+            tokio::task::spawn_blocking(move || apply_cache_transition(&p, &id2, t, "actor", 2))
+                .await
+                .unwrap()
+                .map_err(|e| match e {
+                    CacheError::Illegal(m) | CacheError::Io(m) => m,
+                })
+        };
+        // Mirror the handler discipline: evict the now-idle lock once the clone above is dropped (QE-483).
+        pools.evict_cache_lock_if_idle(&id).await;
+        result
+    }
+
+    #[tokio::test]
+    async fn per_pool_cache_locks_are_distinct_and_stable() {
+        let dir = tempfile::tempdir().unwrap();
+        let pools = PoolState::from_dirs(&dir.path().join("a"), &dir.path().join("d"));
+        let l1 = pools.cache_lock("p1").await;
+        let l1_again = pools.cache_lock("p1").await;
+        let l2 = pools.cache_lock("p2").await;
+        assert!(Arc::ptr_eq(&l1, &l1_again), "same pool ⇒ same lock");
+        assert!(
+            !Arc::ptr_eq(&l1, &l2),
+            "different pools ⇒ different locks (never needlessly serialised)"
+        );
+    }
+
+    #[tokio::test]
+    async fn racing_seal_and_revoke_on_same_pool_serialise_no_lost_update() {
+        let dir = tempfile::tempdir().unwrap();
+        let pools = Arc::new(PoolState::from_dirs(
+            &dir.path().join("a"),
+            &dir.path().join("d"),
+        ));
+        // Seed the pool at `Approved`.
+        let mut g = PoolGovernance::draft("p1");
+        g.apply(PoolTransition::Approve, "a@x.io", 1).unwrap();
+        pools.governance.write(&g).unwrap();
+
+        // Two racing transitions on the SAME pool: Seal (Approved→Sealed) and Revoke (Approved/Sealed→
+        // Revoked). Serialised, they converge to `Revoked` in EITHER lock order — Seal-then-Revoke
+        // (Approved→Sealed→Revoked) or Revoke-then-Seal (Approved→Revoked, then an illegal Seal that
+        // no-ops). An interleaved last-write-wins RMW could leave it `Sealed` (the revoke lost); the lock
+        // forbids that.
+        let a = tokio::spawn(locked_transition(
+            Arc::clone(&pools),
+            "p1".to_owned(),
+            PoolTransition::Seal,
+        ));
+        let b = tokio::spawn(locked_transition(
+            Arc::clone(&pools),
+            "p1".to_owned(),
+            PoolTransition::Revoke,
+        ));
+        let _ = a.await.unwrap();
+        let _ = b.await.unwrap();
+
+        assert_eq!(
+            pools.governance("p1").unwrap().state,
+            PoolLifecycleState::Revoked,
+            "serialised transitions converge to Revoked; no lost update leaves it Sealed"
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_revokes_on_same_pool_apply_exactly_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let pools = Arc::new(PoolState::from_dirs(
+            &dir.path().join("a"),
+            &dir.path().join("d"),
+        ));
+        let mut g = PoolGovernance::draft("p1");
+        g.apply(PoolTransition::Approve, "a@x.io", 1).unwrap();
+        pools.governance.write(&g).unwrap();
+
+        // Fan out several concurrent Revoke transitions. Serialised, exactly ONE succeeds (Approved→
+        // Revoked); the rest see the already-`Revoked` state and fail the illegal edge — the history
+        // carries exactly one Revoke record (no torn double-apply).
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            handles.push(tokio::spawn(locked_transition(
+                Arc::clone(&pools),
+                "p1".to_owned(),
+                PoolTransition::Revoke,
+            )));
+        }
+        let mut ok = 0usize;
+        for h in handles {
+            if h.await.unwrap().is_ok() {
+                ok += 1;
+            }
+        }
+        assert_eq!(ok, 1, "exactly one Revoke succeeds under serialisation");
+        let g = pools.governance("p1").unwrap();
+        assert_eq!(g.state, PoolLifecycleState::Revoked);
+        let revokes = g
+            .history
+            .iter()
+            .filter(|r| r.transition == PoolTransition::Revoke)
+            .count();
+        assert_eq!(
+            revokes, 1,
+            "no lost update / no double-apply in the history"
+        );
+    }
+
+    #[tokio::test]
+    async fn cache_locks_map_does_not_grow_after_transitions_settle() {
+        let dir = tempfile::tempdir().unwrap();
+        let pools = Arc::new(PoolState::from_dirs(
+            &dir.path().join("a"),
+            &dir.path().join("d"),
+        ));
+
+        // Drive several DISTINCT pools through a settled transition. Each seeds Draft→Approved then applies
+        // one more edge; once each caller drops its lock clone, the now-idle entry is evicted.
+        for i in 0..5 {
+            let id = format!("p{i}");
+            let mut g = PoolGovernance::draft(&id);
+            g.apply(PoolTransition::Approve, "a@x.io", 1).unwrap();
+            pools.governance.write(&g).unwrap();
+            let _ = locked_transition(Arc::clone(&pools), id, PoolTransition::Seal).await;
+        }
+
+        // Opportunistic eviction bounds the map — no per-pool lock lingers for process life once its
+        // transitions settle (each of the 5 distinct pools was evicted after its transition).
+        assert_eq!(
+            pools.cache_locks_len().await,
+            0,
+            "the cache-locks map is evicted down to empty after all transitions settle"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_in_flight_transition_keeps_its_lock_then_evicts() {
+        let dir = tempfile::tempdir().unwrap();
+        let pools = Arc::new(PoolState::from_dirs(
+            &dir.path().join("a"),
+            &dir.path().join("d"),
+        ));
+
+        // A caller still holding its clone (strong_count >= 2 with the map) is NOT evicted — a concurrent
+        // evict attempt is a no-op — so a live transition never loses its serialising lock mid-flight.
+        let held = pools.cache_lock("p1").await;
+        pools.evict_cache_lock_if_idle("p1").await;
+        assert_eq!(
+            pools.cache_locks_len().await,
+            1,
+            "a lock still held by a caller is not evicted"
+        );
+
+        // Once the caller drops its clone, the entry is idle (map holds the sole ref) and is evicted.
+        drop(held);
+        pools.evict_cache_lock_if_idle("p1").await;
+        assert_eq!(
+            pools.cache_locks_len().await,
+            0,
+            "the idle lock is evicted once no caller holds a clone"
+        );
+    }
 }

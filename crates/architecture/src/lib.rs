@@ -34,23 +34,51 @@ pub fn workspace_root() -> PathBuf {
 /// not breach the production firewall). Section headers are classified structurally (a quote-aware
 /// dotted-key parse), so the dependency-table / platform / inline forms are all caught — not just the
 /// repo's usual `qe-foo.workspace = true` lines.
+///
+/// **Edges resolve by the dependency's TARGET, not the manifest key (QE-489).** A `package = "qe-…"`
+/// rename (`foo = { package = "qe-live" }`) is recorded as an edge to its real package, and a workspace
+/// `path = "../<crate>"` dep is recorded as an internal edge to that crate — *regardless of the key's
+/// prefix* — so an internal crate pulled under a non-`qe-` key cannot bypass the firewall. Both the
+/// dependency-table (`[dependencies.foo]` with a `package`/`path` body) and inline-table
+/// (`foo = { package = … }`) forms are handled, not only the bare `qe-foo.workspace = true` shape.
 #[must_use]
 pub fn parse_manifest(text: &str) -> (Option<String>, BTreeSet<String>) {
+    parse_manifest_with_aliases(text, &BTreeMap::new())
+}
+
+/// Like [`parse_manifest`], but resolves a member's `key.workspace = true` line whose key is **not**
+/// `qe-`-prefixed through the root `[workspace.dependencies]` `aliases` map (QE-489). This closes the last
+/// bypass: an internal crate aliased under a non-`qe-` root key (`sneaky = { package = "qe-runtime" }`)
+/// and pulled by a member as `sneaky.workspace = true` carries no `package`/`path` on the member line, so
+/// only the root alias reveals its real target. Build `aliases` with [`workspace_alias_targets`] from the
+/// root manifest; [`dependency_graph`] does this. An empty map reduces to the bare-key behaviour.
+#[must_use]
+fn parse_manifest_with_aliases(
+    text: &str,
+    aliases: &BTreeMap<String, String>,
+) -> (Option<String>, BTreeSet<String>) {
     let mut kind = SectionKind::Other;
     let mut name = None;
     let mut deps = BTreeSet::new();
+    // Pending dependency-table (`[dependencies.<key>]`): the key comes from the header, but its
+    // `package`/`path` target may appear on later body lines, so it is finalised at the next header/EOF.
+    let mut table: Option<PendingTable> = None;
     for raw in text.lines() {
         let line = raw.trim();
         if line.starts_with('#') {
             continue;
         }
         if line.starts_with('[') {
+            finalize_table(&mut deps, table.take(), aliases);
             kind = classify_section(line);
-            // A `[dependencies.qe-foo]` table names the dependency in the header itself.
-            if let SectionKind::ProdDepTable(dep) = &kind {
-                if dep.starts_with("qe-") {
-                    deps.insert(dep.clone());
-                }
+            // A `[dependencies.<key>]` table names the dependency KEY in the header; its target
+            // (`package`/`path`) is resolved from the body lines that follow.
+            if let SectionKind::ProdDepTable(key) = &kind {
+                table = Some(PendingTable {
+                    key: key.clone(),
+                    package: None,
+                    path: None,
+                });
             }
             continue;
         }
@@ -58,17 +86,209 @@ pub fn parse_manifest(text: &str) -> (Option<String>, BTreeSet<String>) {
             SectionKind::Package if line.starts_with("name") => {
                 name = quoted_value(line);
             }
-            SectionKind::ProdDeps if line.starts_with("qe-") => {
-                let dep: String = line
+            // Inline dependency line (`qe-foo.workspace = true`, `foo = { package = "qe-live" }`,
+            // `foo = { path = "../live" }`): resolve the edge by its target.
+            SectionKind::ProdDeps => {
+                let key: String = line
                     .chars()
                     .take_while(|c| *c != '.' && *c != ' ' && *c != '=' && *c != '\t')
                     .collect();
-                deps.insert(dep);
+                if !key.is_empty() {
+                    let package = assigned_value(line, "package");
+                    let path = assigned_value(line, "path");
+                    if let Some(target) =
+                        resolve_internal_target(&key, package.as_deref(), path.as_deref(), aliases)
+                    {
+                        deps.insert(target);
+                    }
+                }
+            }
+            // Body of a `[dependencies.<key>]` table: capture its `package`/`path` target.
+            SectionKind::ProdDepTable(_) => {
+                if let Some(t) = table.as_mut() {
+                    if let Some(v) = assigned_value(line, "package") {
+                        t.package = Some(v);
+                    }
+                    if let Some(v) = assigned_value(line, "path") {
+                        t.path = Some(v);
+                    }
+                }
             }
             _ => {}
         }
     }
+    finalize_table(&mut deps, table, aliases);
     (name, deps)
+}
+
+/// Parse the **root** `Cargo.toml`'s `[workspace.dependencies]` table into `alias key → internal target
+/// crate`, for every entry that resolves to a workspace-member crate — via a `package = "qe-…"` rename or a
+/// `path` into the workspace (QE-489). A member's `key.workspace = true` line inherits this target, so an
+/// internal crate aliased under a **non-`qe-` root key** (e.g. `sneaky = { package = "qe-runtime" }`) is
+/// still resolved to its real crate and cannot slip past the firewall. External aliases (`serde`, `tokio`,
+/// …) resolve to nothing and are omitted. Both the inline (`key = { package = … }`) and dependency-table
+/// (`[workspace.dependencies.key]`) forms are handled.
+#[must_use]
+fn workspace_alias_targets(root_text: &str) -> BTreeMap<String, String> {
+    /// Record `t`'s alias→internal-target edge into `out`, if it resolves internal. Root aliases resolve
+    /// on their own `package`/`path` (never through another alias), so an empty alias map is passed.
+    fn record(t: PendingTable, out: &mut BTreeMap<String, String>) {
+        if let Some(target) = resolve_internal_target(
+            &t.key,
+            t.package.as_deref(),
+            t.path.as_deref(),
+            &BTreeMap::new(),
+        ) {
+            out.insert(t.key, target);
+        }
+    }
+
+    let mut aliases = BTreeMap::new();
+    // Whether we are inside `[workspace.dependencies]` (inline entries) …
+    let mut in_ws_deps = false;
+    // … or inside a `[workspace.dependencies.<key>]` table (its `package`/`path` come from body lines).
+    let mut table: Option<PendingTable> = None;
+    for raw in root_text.lines() {
+        let line = raw.trim();
+        if line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with('[') {
+            if let Some(t) = table.take() {
+                record(t, &mut aliases);
+            }
+            let inner = line.trim_start_matches('[').trim_end_matches(']');
+            let segs = split_dotted_key(inner);
+            in_ws_deps = false;
+            if segs.len() >= 2 && segs[0] == "workspace" && segs[1] == "dependencies" {
+                match segs.get(2) {
+                    None => in_ws_deps = true,
+                    Some(key) => {
+                        table = Some(PendingTable {
+                            key: key.clone(),
+                            package: None,
+                            path: None,
+                        });
+                    }
+                }
+            }
+            continue;
+        }
+        if in_ws_deps {
+            let key: String = line
+                .chars()
+                .take_while(|c| *c != '.' && *c != ' ' && *c != '=' && *c != '\t')
+                .collect();
+            if !key.is_empty() {
+                let package = assigned_value(line, "package");
+                let path = assigned_value(line, "path");
+                record(PendingTable { key, package, path }, &mut aliases);
+            }
+        } else if let Some(t) = table.as_mut() {
+            if let Some(v) = assigned_value(line, "package") {
+                t.package = Some(v);
+            }
+            if let Some(v) = assigned_value(line, "path") {
+                t.path = Some(v);
+            }
+        }
+    }
+    if let Some(t) = table {
+        record(t, &mut aliases);
+    }
+    aliases
+}
+
+/// A `[dependencies.<key>]` table awaiting its target: the header key plus any `package`/`path` read from
+/// the body lines.
+struct PendingTable {
+    key: String,
+    package: Option<String>,
+    path: Option<String>,
+}
+
+/// Finalise a pending dependency-table into `deps`, resolving its edge by target (QE-489). `aliases`
+/// resolves a non-`qe-` key that inherits its target from the root `[workspace.dependencies]`.
+fn finalize_table(
+    deps: &mut BTreeSet<String>,
+    table: Option<PendingTable>,
+    aliases: &BTreeMap<String, String>,
+) {
+    if let Some(t) = table {
+        if let Some(target) =
+            resolve_internal_target(&t.key, t.package.as_deref(), t.path.as_deref(), aliases)
+        {
+            deps.insert(target);
+        }
+    }
+}
+
+/// Resolve a dependency to its internal firewall edge target, or `None` when it is external (QE-489).
+///
+/// Precedence: a `package = "qe-…"` rename resolves the edge by its real package (whatever the key); a
+/// `path = "../<crate>"` into the workspace is an internal edge mapped to that crate's package name via
+/// the `crates/<dir>` ⇒ `qe-<dir>` convention (again, whatever the key); a bare key is internal iff it is
+/// itself `qe-`-named; finally a non-`qe-` bare key (a `key.workspace = true` with no local `package`/
+/// `path`) is resolved through the root `[workspace.dependencies]` `aliases` map, so an internal crate
+/// aliased under a non-`qe-` root key is still caught (QE-489). A `package`-renamed or `path`-referenced
+/// *external* crate stays external.
+fn resolve_internal_target(
+    key: &str,
+    package: Option<&str>,
+    path: Option<&str>,
+    aliases: &BTreeMap<String, String>,
+) -> Option<String> {
+    if let Some(pkg) = package {
+        return pkg.starts_with("qe-").then(|| pkg.to_string());
+    }
+    if let Some(p) = path {
+        if let Some(target) = workspace_target_from_path(p) {
+            return Some(target);
+        }
+    }
+    if key.starts_with("qe-") {
+        return Some(key.to_string());
+    }
+    aliases.get(key).cloned()
+}
+
+/// Map a workspace `path = "../<crate>"` dependency to the target crate's package name, or `None` when the
+/// path is not a crate directory (e.g. a `src/main.rs` bin path). The final path segment is the crate
+/// **directory**; the workspace convention `crates/<dir>` ⇒ package `qe-<dir>` gives its package name (a
+/// segment already `qe-`-prefixed is taken verbatim). Any relative crate path is treated as internal, so
+/// a non-`qe-` key over a `path` dep cannot slip past the firewall (fail-closed).
+fn workspace_target_from_path(path: &str) -> Option<String> {
+    let seg = path
+        .trim_end_matches('/')
+        .rsplit('/')
+        .find(|s| !s.is_empty() && *s != "..")?;
+    if seg.contains('.') {
+        return None; // a file path (has an extension), not a crate directory
+    }
+    if seg.starts_with("qe-") {
+        Some(seg.to_string())
+    } else {
+        Some(format!("qe-{seg}"))
+    }
+}
+
+/// Find the double-quoted value assigned to `key` (`key = "value"`) anywhere in `text`, matching `key`
+/// only where it is immediately followed (modulo whitespace) by `=` — so `path` inside a *value*
+/// (`"../path"`) or as a substring of another key never matches. Deterministic, quote-delimited.
+fn assigned_value(text: &str, key: &str) -> Option<String> {
+    let mut rest = text;
+    while let Some(pos) = rest.find(key) {
+        let after = rest[pos + key.len()..].trim_start();
+        if let Some(value_part) = after.strip_prefix('=') {
+            let value_part = value_part.trim_start();
+            if let Some(inner) = value_part.strip_prefix('"') {
+                let end = inner.find('"')?;
+                return Some(inner[..end].to_string());
+            }
+        }
+        rest = &rest[pos + key.len()..];
+    }
+    None
 }
 
 /// The role of a `Cargo.toml` section for firewall parsing.
@@ -149,7 +369,14 @@ fn quoted_value(line: &str) -> Option<String> {
 /// If the `crates/` directory cannot be read (the workspace layout is broken).
 #[must_use]
 pub fn dependency_graph() -> Graph {
-    let crates_dir = workspace_root().join("crates");
+    let root = workspace_root();
+    // QE-489: the root `[workspace.dependencies]` alias map, so a member's `key.workspace = true` under a
+    // non-`qe-` key resolves to its real internal target (an unreadable root manifest fails closed to the
+    // bare-key behaviour — the same as before this backstop existed).
+    let aliases = std::fs::read_to_string(root.join("Cargo.toml"))
+        .map(|text| workspace_alias_targets(&text))
+        .unwrap_or_default();
+    let crates_dir = root.join("crates");
     let mut graph = Graph::new();
     let entries = std::fs::read_dir(&crates_dir)
         .unwrap_or_else(|e| panic!("cannot read {}: {e}", crates_dir.display()));
@@ -158,7 +385,7 @@ pub fn dependency_graph() -> Graph {
         let Ok(text) = std::fs::read_to_string(&manifest) else {
             continue; // not a crate directory
         };
-        let (name, deps) = parse_manifest(&text);
+        let (name, deps) = parse_manifest_with_aliases(&text, &aliases);
         if let Some(name) = name {
             graph.insert(name, deps);
         }
@@ -457,5 +684,267 @@ name = \"some-debian-package\"
             ("qe-runtime", &["qe-venue"]),
         ]);
         assert!(check_firewall(&g, &firewall_rules()).is_empty());
+    }
+
+    /// QE-489: an internal crate pulled under a **non-`qe-` key** is resolved by its `package =` target,
+    /// not the key — so a `package` rename cannot make the edge invisible. Both inline-table and
+    /// dependency-table forms resolve to the real target crate.
+    #[test]
+    fn package_rename_under_non_qe_key_resolves_to_target() {
+        // Inline-table form: `foo = { package = "qe-runtime" }`.
+        let inline = "\
+[package]
+name = \"qe-wfo\"
+
+[dependencies]
+foo = { package = \"qe-runtime\", version = \"0.1\" }
+serde = { workspace = true }
+";
+        let (name, deps) = parse_manifest(inline);
+        assert_eq!(name.as_deref(), Some("qe-wfo"));
+        assert!(
+            deps.contains("qe-runtime"),
+            "renamed internal dep must resolve to its package target: {deps:?}"
+        );
+        assert!(
+            !deps.contains("foo"),
+            "the key must not be the edge: {deps:?}"
+        );
+        assert!(!deps.contains("serde"), "external dep stays out: {deps:?}");
+
+        // Dependency-table form: `[dependencies.foo]` with a `package` body line.
+        let table = "\
+[package]
+name = \"qe-wfo\"
+
+[dependencies.foo]
+package = \"qe-runtime\"
+version = \"0.1\"
+";
+        let (_, deps) = parse_manifest(table);
+        assert!(
+            deps.contains("qe-runtime") && !deps.contains("foo"),
+            "table-form package rename must resolve to target: {deps:?}"
+        );
+    }
+
+    /// QE-489: a bare `path = "../<crate>"` dep is an internal edge regardless of the key's prefix,
+    /// mapped to the target crate's package name. Both inline and table forms are covered.
+    #[test]
+    fn path_dep_under_non_qe_key_resolves_to_internal_target() {
+        let inline = "\
+[package]
+name = \"qe-wfo\"
+
+[dependencies]
+search = { path = \"../search\" }
+";
+        let (_, deps) = parse_manifest(inline);
+        assert!(
+            deps.contains("qe-search"),
+            "a `path` dep under a non-qe key must produce an internal edge: {deps:?}"
+        );
+        assert!(
+            !deps.contains("search"),
+            "the key must not be the edge: {deps:?}"
+        );
+
+        let table = "\
+[package]
+name = \"qe-wfo\"
+
+[dependencies.search]
+path = \"../search\"
+";
+        let (_, deps) = parse_manifest(table);
+        assert!(
+            deps.contains("qe-search"),
+            "table-form path dep must resolve internal: {deps:?}"
+        );
+    }
+
+    /// QE-489 regression: the idiomatic, key-named forms still resolve exactly as before — including the
+    /// live `qe-domain = { path = "../domain" }` shape (the sole real `path` dep), whose key *and* target
+    /// agree, so it is caught either way.
+    #[test]
+    fn idiomatic_and_live_path_forms_still_caught() {
+        let toml = "\
+[package]
+name = \"qe-config\"
+
+[dependencies]
+qe-domain = { path = \"../domain\" }
+qe-signal.workspace = true
+serde.workspace = true
+";
+        let (name, deps) = parse_manifest(toml);
+        assert_eq!(name.as_deref(), Some("qe-config"));
+        assert_eq!(
+            deps,
+            ["qe-domain", "qe-signal"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect()
+        );
+    }
+
+    /// QE-489 end-to-end: a forbidden edge introduced by RENAMING the key (so the manifest never mentions
+    /// `qe-runtime` as a key) is now caught by the firewall — the bypass is closed fail-closed.
+    #[test]
+    fn firewall_catches_a_forbidden_edge_hidden_behind_a_key_rename() {
+        // `qe-wfo` must not reach `qe-runtime`; here it does, disguised under a non-qe key.
+        let wfo_manifest = "\
+[package]
+name = \"qe-wfo\"
+
+[dependencies]
+qe-signal.workspace = true
+sneaky = { package = \"qe-runtime\" }
+";
+        let (name, deps) = parse_manifest(wfo_manifest);
+        let mut graph = Graph::new();
+        graph.insert(name.unwrap(), deps);
+        graph.insert("qe-runtime".to_string(), BTreeSet::new());
+
+        let violations = check_firewall(&graph, &firewall_rules());
+        assert!(
+            violations.contains(&Violation {
+                upstream: "qe-wfo".into(),
+                forbidden: "qe-runtime".into(),
+            }),
+            "renamed-key edge must breach the firewall: {violations:?}"
+        );
+    }
+
+    /// QE-489: dev-dependencies remain excluded even when they use a `package`/`path` target form.
+    #[test]
+    fn dev_dependencies_with_target_forms_stay_excluded() {
+        let toml = "\
+[package]
+name = \"qe-wfo\"
+
+[dev-dependencies]
+foo = { package = \"qe-runtime\" }
+bar = { path = \"../ensemble\" }
+
+[dev-dependencies.baz]
+package = \"qe-venue\"
+";
+        let (_, deps) = parse_manifest(toml);
+        assert!(
+            deps.is_empty(),
+            "no dev-dependency (in any target form) enters the production firewall: {deps:?}"
+        );
+    }
+
+    /// QE-489 backstop: an internal crate aliased in the **root** `[workspace.dependencies]` under a
+    /// non-`qe-` key, then pulled by a member as `key.workspace = true`, was invisible to the firewall —
+    /// the member line carries no `package`/`path`, so only the root alias reveals its real target. The
+    /// firewall now parses the root manifest and resolves the alias, closing the bypass fail-closed.
+    #[test]
+    fn root_workspace_alias_under_non_qe_key_is_resolved_and_caught() {
+        // The root manifest: internal crates aliased under non-`qe-` keys (both inline `package`/`path`
+        // and the dependency-table form), plus external aliases that must stay external.
+        let root = "\
+[workspace]
+members = [\"crates/*\"]
+
+[workspace.dependencies]
+serde = { version = \"1\", features = [\"derive\"] }
+qe-signal = { path = \"crates/signal\" }
+sneaky = { package = \"qe-runtime\" }
+by_path = { path = \"crates/venue\" }
+
+[workspace.dependencies.tabled]
+package = \"qe-ensemble\"
+version = \"0.1\"
+";
+        let aliases = workspace_alias_targets(root);
+        assert_eq!(
+            aliases.get("sneaky").map(String::as_str),
+            Some("qe-runtime")
+        );
+        assert_eq!(aliases.get("by_path").map(String::as_str), Some("qe-venue"));
+        assert_eq!(
+            aliases.get("tabled").map(String::as_str),
+            Some("qe-ensemble")
+        );
+        assert!(
+            !aliases.contains_key("serde"),
+            "external alias must be omitted: {aliases:?}"
+        );
+
+        // A member that pulls the internal crate under the non-`qe-` key via `key.workspace = true` — no
+        // `package`/`path` on the member line, so only the root alias can reveal the edge.
+        let member = "\
+[package]
+name = \"qe-wfo\"
+
+[dependencies]
+qe-signal.workspace = true
+sneaky.workspace = true
+";
+        let (name, deps) = parse_manifest_with_aliases(member, &aliases);
+        assert_eq!(name.as_deref(), Some("qe-wfo"));
+        assert!(
+            deps.contains("qe-runtime"),
+            "root-aliased internal dep must resolve to its real target: {deps:?}"
+        );
+        assert!(
+            !deps.contains("sneaky"),
+            "the key is not the edge: {deps:?}"
+        );
+
+        // Sanity — WITHOUT the root aliases the edge is invisible (the bug this closes): proves the fix is
+        // load-bearing, not vacuous.
+        let (_, blind) = parse_manifest(member);
+        assert!(
+            !blind.contains("qe-runtime"),
+            "bare parse cannot see the root alias (the bypass): {blind:?}"
+        );
+
+        // End-to-end: the firewall now breaches on the disguised `qe-wfo → qe-runtime` edge.
+        let mut graph = Graph::new();
+        graph.insert(name.unwrap(), deps);
+        graph.insert("qe-runtime".to_string(), BTreeSet::new());
+        let violations = check_firewall(&graph, &firewall_rules());
+        assert!(
+            violations.contains(&Violation {
+                upstream: "qe-wfo".into(),
+                forbidden: "qe-runtime".into(),
+            }),
+            "root-aliased renamed edge must breach the firewall: {violations:?}"
+        );
+    }
+
+    /// QE-489 determinism: `parse_manifest` output is order-stable (a `BTreeSet`), independent of the
+    /// order deps appear in the manifest text.
+    #[test]
+    fn parse_manifest_output_is_order_stable() {
+        let a = "\
+[package]
+name = \"qe-wfo\"
+
+[dependencies]
+qe-signal.workspace = true
+qe-domain.workspace = true
+foo = { package = \"qe-runtime\" }
+";
+        let b = "\
+[package]
+name = \"qe-wfo\"
+
+[dependencies]
+foo = { package = \"qe-runtime\" }
+qe-domain.workspace = true
+qe-signal.workspace = true
+";
+        let (_, da) = parse_manifest(a);
+        let (_, db) = parse_manifest(b);
+        assert_eq!(da, db);
+        assert_eq!(
+            da.into_iter().collect::<Vec<_>>(),
+            vec!["qe-domain", "qe-runtime", "qe-signal"]
+        );
     }
 }

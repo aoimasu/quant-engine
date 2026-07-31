@@ -3,19 +3,33 @@
 //! "Regime-sensitive" optimisation and reporting need regime *tags*. This module labels history along
 //! two orthogonal, interpretable axes — **volatility** (`Calm`/`Volatile`) and **trend-vs-chop**
 //! (`Trending`/`Choppy`) — and builds a per-regime **expectancy table** for any strategy/ensemble return
-//! series. Both consumers — the DE objective (QE-127, in `qe-ensemble`) and validation reporting
-//! (QE-133) — import these pure functions over `qe_domain::Bar`; the labeller lives in `qe-signal`
-//! because it is the only crate both `qe-wfo` and `qe-ensemble` depend on (the QE-001/QE-132
-//! search⟂portfolio firewall keeps `qe-ensemble` off `qe-wfo`).
+//! series. These pure functions live in `qe-signal` because it is the only crate both `qe-wfo` and
+//! `qe-ensemble` depend on (the QE-001/QE-132 search⟂portfolio firewall keeps `qe-ensemble` off `qe-wfo`),
+//! so validation reporting (QE-133) and the DE objective's per-regime `expectancy_table` (QE-127, in
+//! `qe-ensemble`) can share them over `qe_domain::Bar`.
 //!
 //! Classification is deterministic (no HMM / EM fit): the volatility axis is a **median split** of the
 //! rolling realised volatility, and the trend axis is Kaufman's **efficiency ratio** against a fixed
 //! threshold. Strategy *conditioning* on regimes is out of scope (QE-125 produces tags only).
+//!
+//! ## `label_regimes` is full-sample / descriptive-only (QE-486)
+//!
+//! The volatility median split in [`label_regimes`] classifies **every** bar against the **full-sample**
+//! median of all rolling vols — a **future-informed** statistic: a bar early in the series is labelled
+//! Calm/Volatile using volatilities that only materialise later. That look-ahead is benign for its **only**
+//! current consumer, the **descriptive** holdout regime-composition bar tally over a *frozen* holdout
+//! (`holdout_regime_composition` in `crates/cli/src/jobs/train.rs`) — a count, not a selection input. It
+//! **must NOT** feed per-fold DE selection: a full-sample-median label wired into a fold would be a live
+//! look-ahead leak (no bar may use future data to influence selection). The QE-127 DE objective consumes
+//! [`expectancy_table`] over externally-supplied returns/labels for its per-regime term, **not** this
+//! full-sample labeller for per-fold selection. If a causal split is ever needed for selection, add a
+//! separate expanding/rolling-median labeller rather than routing these full-sample labels into a fold.
 
 use std::collections::BTreeMap;
 
 use qe_domain::Bar;
 use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::{Decimal, MathematicalOps};
 
 /// Default rolling window (bars) for the volatility / efficiency statistics.
 pub const DEFAULT_REGIME_WINDOW: usize = 20;
@@ -86,9 +100,34 @@ impl RegimeConfig {
 }
 
 /// Close price of `bar` as `f64` (prices are positive `Decimal`s; `to_f64` is lossless for the
-/// magnitudes here and only fails on non-finite, which a validated `Price` never is).
+/// magnitudes here and only fails on non-finite, which a validated `Price` never is). Used for the
+/// price-space **efficiency ratio** (no transcendental — cross-arch stable already).
 fn close_f64(bar: &Bar) -> f64 {
     bar.close().get().to_f64().unwrap_or(0.0)
+}
+
+/// Close price of `bar` as the exact `Decimal` — the input to the decimal log-return (QE-480).
+fn close_dec(bar: &Bar) -> Decimal {
+    bar.close().get()
+}
+
+/// The per-bar log-return `ln(p1 / p0)` computed in **`rust_decimal`** (QE-480), the sole transcendental
+/// in the regime labeller. `ln()` in `f64` is not IEEE-754 correctly-rounded, so its last bit is
+/// platform-dependent — on a knife-edge bar it can round differently on arm64 vs x86_64, flip a
+/// Calm↔Volatile label through the rolling-vol median split, change the sealed `regime_composition`, and
+/// therefore change the **vintage id**, violating QE-006. Decimal `MathematicalOps::checked_ln` is integer
+/// arithmetic, byte-reproducible on the pinned toolchain (mirroring the `powd` pattern in
+/// `qe_risk::slippage`), so the whole `rets → vols → median` chain is cross-arch stable before the f64
+/// hand-off to the composition tally. Non-positive prices or an undefined `ln` fail closed to `0.0`
+/// (mirrors the prior `p0 > 0 && p1 > 0` guard).
+fn log_return(p0: Decimal, p1: Decimal) -> f64 {
+    if p0 <= Decimal::ZERO || p1 <= Decimal::ZERO {
+        return 0.0;
+    }
+    match (p1 / p0).checked_ln() {
+        Some(r) => r.to_f64().unwrap_or(0.0),
+        None => 0.0,
+    }
 }
 
 /// Label each bar of `bars` along the volatility and trend axes (QE-125/D1).
@@ -97,6 +136,11 @@ fn close_f64(bar: &Bar) -> f64 {
 /// undefined in the warm-up). The volatility axis is a **median split** of the rolling realised
 /// volatility (std-dev of log-returns over the window); the trend axis is Kaufman's **efficiency ratio**
 /// `|close[i] − close[i−W]| / Σ|close[k] − close[k−1]|` against `cfg.trend_threshold`. Deterministic.
+///
+/// **Full-sample / descriptive-only (QE-486).** The Calm/Volatile median is taken over **all** defined
+/// rolling vols across the whole series, so a bar's volatility label depends on **future** bars — a
+/// deliberate look-ahead that is fine for the descriptive holdout composition tally (the only consumer)
+/// but that **must not** feed per-fold selection. See the module docs.
 #[must_use]
 pub fn label_regimes(bars: &[Bar], cfg: &RegimeConfig) -> Vec<Option<Regime>> {
     let n = bars.len();
@@ -106,15 +150,13 @@ pub fn label_regimes(bars: &[Bar], cfg: &RegimeConfig) -> Vec<Option<Regime>> {
     }
 
     let closes: Vec<f64> = bars.iter().map(close_f64).collect();
-    // log-returns; rets[k] is the return into bar k (k ≥ 1). rets[0] is unused.
+    // Exact decimal closes for the transcendental log-return (QE-480 — cross-arch determinism).
+    let closes_dec: Vec<Decimal> = bars.iter().map(close_dec).collect();
+    // log-returns; rets[k] is the return into bar k (k ≥ 1). rets[0] is unused. Computed in rust_decimal
+    // (QE-480) so the sole transcendental in the path is byte-reproducible across architectures.
     let mut rets = vec![0.0f64; n];
     for k in 1..n {
-        let (p0, p1) = (closes[k - 1], closes[k]);
-        rets[k] = if p0 > 0.0 && p1 > 0.0 {
-            (p1 / p0).ln()
-        } else {
-            0.0
-        };
+        rets[k] = log_return(closes_dec[k - 1], closes_dec[k]);
     }
 
     // Per-bar rolling volatility and efficiency ratio (None in the warm-up).
@@ -257,7 +299,7 @@ pub fn expectancy_table(returns: &[f64], labels: &[Option<Regime>]) -> Expectanc
 mod tests {
     use super::*;
     use qe_domain::{Bar, Price, Qty, Resolution, Timestamp};
-    use rust_decimal::Decimal;
+    use rust_decimal::{Decimal, MathematicalOps};
 
     /// A 5-minute bar at `i` whose OHLC are all `price` (flat candle — only the close drives regimes).
     fn flat_bar(i: usize, price: f64) -> Bar {
@@ -300,6 +342,36 @@ mod tests {
         (0..n)
             .map(|i| if i % 2 == 0 { 100.0 } else { 100.0 + amp })
             .collect()
+    }
+
+    #[test]
+    fn log_return_is_decimal_and_cross_arch_deterministic() {
+        // QE-480: the regime log-return is computed in rust_decimal (integer arithmetic, byte-reproducible
+        // on the pinned toolchain), not f64 `ln()` (last bit platform-dependent). Pin the result to the
+        // decimal computation and prove the helper matches it exactly and is repeatable.
+        let p0 = Decimal::new(10_000, 2); // 100.00
+        let p1 = Decimal::new(10_050, 2); // 100.50
+        let expected = (p1 / p0).checked_ln().unwrap().to_f64().unwrap();
+        assert_eq!(
+            log_return(p0, p1),
+            expected,
+            "log-return must be the decimal ln"
+        );
+        assert_eq!(
+            log_return(p0, p1),
+            log_return(p0, p1),
+            "the decimal log-return is deterministic (identical on repeat / across arches)"
+        );
+        // Non-positive prices fail closed to 0.0 (mirrors the prior p0>0 && p1>0 guard).
+        assert_eq!(log_return(Decimal::ZERO, p1), 0.0);
+        assert_eq!(log_return(p0, Decimal::ZERO), 0.0);
+
+        // A knife-edge series labels identically on repeat (the decimal path removes the platform-dependent
+        // rounding the f64 ln introduced at the median split).
+        let closes: Vec<f64> = (0..60).map(|i| 100.0 + (i as f64) * 0.01).collect();
+        let bars = bars_from_closes(&closes);
+        let cfg = RegimeConfig::with_defaults();
+        assert_eq!(label_regimes(&bars, &cfg), label_regimes(&bars, &cfg));
     }
 
     #[test]
@@ -347,6 +419,47 @@ mod tests {
         assert!(
             high_seg > low_seg,
             "high-vol segment Volatile-rate {high_seg} should exceed low-vol {low_seg}"
+        );
+    }
+
+    #[test]
+    fn vol_median_split_is_full_sample_future_informed_hence_descriptive_only() {
+        // QE-486: the Calm/Volatile split classifies each bar against the FULL-SAMPLE median of all rolling
+        // vols — a future-informed statistic. Proof of the look-ahead: appending later high-volatility bars
+        // raises the median and RE-LABELS early bars whose own (past-only) rolling vol never changed. This
+        // is exactly why `label_regimes` is documented descriptive-only and must not feed per-fold
+        // selection (the consumer today is the train-only holdout composition tally).
+        let cfg = RegimeConfig::with_defaults();
+        // An early segment whose volatility RAMPS UP (swing amplitude grows), so its rolling vols span a
+        // range and the local median splits it: earlier bars Calm, later-early bars Volatile.
+        let early: Vec<f64> = (0..80)
+            .map(|i| {
+                let amp = 0.5 + 1.5 * (i as f64 / 80.0);
+                if i % 2 == 0 {
+                    100.0
+                } else {
+                    100.0 + amp
+                }
+            })
+            .collect();
+        let labels_short = label_regimes(&bars_from_closes(&early), &cfg);
+
+        let mut extended = early.clone();
+        extended.extend(choppy_closes(80, 8.0)); // a high-vol FUTURE tail that raises the full-sample median
+        let labels_long = label_regimes(&bars_from_closes(&extended), &cfg);
+
+        // Some early bar's volatility label flipped purely because of the future tail — its own window of
+        // past returns is byte-identical between the two runs, so only the full-sample median moved it.
+        let flipped = (cfg.window..early.len()).any(|i| {
+            matches!(
+                (labels_short[i], labels_long[i]),
+                (Some(a), Some(b)) if a.vol != b.vol
+            )
+        });
+        assert!(
+            flipped,
+            "the full-sample median makes an early bar's Vol label depend on FUTURE bars — a look-ahead the \
+             descriptive posture documents (and forbids from per-fold selection)"
         );
     }
 

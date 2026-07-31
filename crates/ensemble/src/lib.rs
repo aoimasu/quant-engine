@@ -33,7 +33,7 @@ pub use objective::{
     leave_one_out_min, leave_one_out_min_weighted, min_significant_r, objective,
     objective_weighted, pairwise_corr_penalty, pearson, positive_mean_pairwise_corr,
     provenance_aware_penalty, stress_overlay, CorrDeflation, CorrPenalty, ObjectiveConfig,
-    ProvenancePenalty, TailRisk, Weighting, DEFAULT_ALPHA, DEFAULT_FISHER_LAMBDA,
+    ProvenancePenalty, RiskModel, TailRisk, Weighting, DEFAULT_ALPHA, DEFAULT_FISHER_LAMBDA,
     DEFAULT_SIGNIFICANCE_Z,
 };
 pub use regime::{

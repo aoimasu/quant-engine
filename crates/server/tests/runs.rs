@@ -1041,6 +1041,60 @@ while true; do sleep 0.05; done
     );
 }
 
+/// QE-481 §13.10 regression (deadline-race terminal-state guard): a run that FLOODS progress lines right up
+/// to the wall-clock ceiling must still end in a terminal state — the deadline branch drops the pipe-read
+/// future while the blocking drain worker is actively persisting `Running` snapshots, and the supervisor
+/// JOINS that worker BEFORE its terminal `Failed` write. Without the join, a late worker `write_meta(status
+/// = Running)` could land after the terminal write and strand the killed run non-terminal. This drives the
+/// worker HARD at the instant the ceiling fires and asserts the FINAL persisted status is terminal — never
+/// left `running`. Mirrors [`a_run_past_the_wall_clock_ceiling_is_aborted_and_failed`]'s harness.
+#[tokio::test]
+async fn a_deadline_race_with_a_progress_burst_ends_terminal_never_running() {
+    let tmp = TempDir::new().unwrap();
+    // A job that floods progress lines with no delay, forever — the drain worker is mid-`write_meta`
+    // (`Running`) at the moment the deadline fires (the exact race the join-before-terminal-write closes).
+    let script = tmp.path().join("job_flood.sh");
+    write_script(
+        &script,
+        r#"#!/bin/sh
+i=0
+while true; do
+  i=$((i + 1))
+  printf '{"t":"progress","pct":%d,"stage":"scan","msg":"burst"}\n' "$((i % 100))"
+done
+"#,
+    );
+    let (app, _m) =
+        app_and_manager_supervised(tmp.path(), &script, 2, 1, Duration::from_millis(200));
+
+    let (status, body) = post_run(&app, &create_evolve_body()).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let id = body["id"].as_str().unwrap().to_owned();
+
+    // The deadline branch fires while the burst is in flight; the FINAL persisted status is terminal.
+    let meta = poll_status(&app, &id, "failed", TIMEOUT).await;
+    assert_eq!(
+        meta["status"], "failed",
+        "the deadline branch persists a terminal status: {meta}"
+    );
+    assert!(
+        meta["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("wall-clock ceiling"),
+        "the failure names the wall-clock ceiling: {meta}"
+    );
+
+    // The guard's core guarantee: NO late drain-worker write flips it back to `running`. Re-read the
+    // persisted meta after a settle window — it must stay terminal, never reverting to `running`.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let (_, again) = get(&app, &format!("/api/runs/{id}")).await;
+    assert_eq!(
+        again["status"], "failed",
+        "stays terminal — no orphaned `Running` write lands after the terminal transition: {again}"
+    );
+}
+
 /// §13.10: the separate evolve semaphore (default 1) serialises evolve campaigns — a second campaign stays
 /// `queued` behind the first even though the shared worker pool has spare capacity.
 #[tokio::test]

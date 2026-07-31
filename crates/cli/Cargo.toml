@@ -57,3 +57,6 @@ thiserror.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# QE-477: reconstruct the CPCV held-out path Sharpes from the sealed holdout series to prove the OOS
+# distribution is built on the holdout, not the in-sample selection window.
+qe-validation.workspace = true

@@ -48,6 +48,86 @@ pub struct Bar {
     pub funding_rate: Option<Decimal>,
 }
 
+/// A per-instrument **exchange symbol filter** (QE-487): the venue's lot-size (`step_size`), tick-size
+/// (`tick_size`), and `min_notional` constraints, as exact [`Decimal`]s so quantization stays
+/// byte-reproducible (never `f64` in the money path). At a fill the order size is floored **down** to a
+/// whole multiple of `step_size` (never rounded up), the fill price is snapped to the nearest
+/// `tick_size`, and any order whose post-quantization notional is below `min_notional` is rejected (no
+/// fill) — modelling that a real venue will not fill a fractional lot, an off-tick price, or a dust order.
+/// A zero field disables that constraint. `BacktestConfig::symbol_filter` is `None` by default, so the
+/// deployed liquid-major backtests (where step/tick are tiny relative to sizes) are byte-unchanged; a
+/// filter is supplied only for instruments where realisability matters.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SymbolFilter {
+    /// Lot size: the fill quantity is floored down to a whole multiple of this (`0` ⇒ no lot rounding).
+    pub step_size: Decimal,
+    /// Tick size: the fill price is snapped to the nearest multiple of this (`0` ⇒ no tick rounding).
+    pub tick_size: Decimal,
+    /// Minimum order notional: an order whose post-quantization `|price·qty|` is below this is rejected.
+    pub min_notional: Decimal,
+}
+
+impl SymbolFilter {
+    /// Snap `price` to the nearest `tick_size` (exact `Decimal`); identity when `tick_size ≤ 0`.
+    ///
+    /// The nearest-tick snap assumes `(price / tick_size).round()` picks the correct tick, which holds
+    /// whenever the exact rational `price / tick_size` is representable in `Decimal`'s 28 significant
+    /// digits — true for every real venue tick grid (ticks and prices are short decimals, so the quotient
+    /// terminates well inside 28 digits). Only an exotic tick grid whose `price / tick_size` needed more
+    /// than 28 digits could round to the wrong side of a half-tick; such a grid would want a truncating
+    /// divide plus an explicit half-tick comparison instead. We deliberately keep the simple `round()`
+    /// form here — no behaviour change — because the exotic case does not arise in practice.
+    #[must_use]
+    fn quantize_price(&self, price: Decimal) -> Decimal {
+        if self.tick_size > Decimal::ZERO {
+            (price / self.tick_size).round() * self.tick_size
+        } else {
+            price
+        }
+    }
+
+    /// Floor `qty` **down** to a whole multiple of `step_size` (toward zero for the non-negative fill
+    /// sizes here; never rounds size up); identity when `step_size ≤ 0`.
+    #[must_use]
+    fn quantize_qty(&self, qty: Decimal) -> Decimal {
+        if self.step_size > Decimal::ZERO {
+            (qty / self.step_size).floor() * self.step_size
+        } else {
+            qty
+        }
+    }
+
+    /// Whether the (quantized) order clears the exchange minimum notional `|price·qty| ≥ min_notional`.
+    #[must_use]
+    fn clears_min_notional(&self, price: Decimal, qty: Decimal) -> bool {
+        (price * qty).abs() >= self.min_notional
+    }
+}
+
+/// Quantize a fill's `(price, qty)` through `cfg`'s optional [`SymbolFilter`]. With no filter (the
+/// default) the pair passes through untouched, so the fill path is byte-identical to the pre-QE-487
+/// engine.
+fn quantize_fill(cfg: &BacktestConfig, price: Decimal, qty: Decimal) -> (Decimal, Decimal) {
+    match cfg.symbol_filter {
+        Some(f) => (f.quantize_price(price), f.quantize_qty(qty)),
+        None => (price, qty),
+    }
+}
+
+/// Whether a (quantized) fill should execute: it must have positive size and, when `enforce_min_notional`
+/// is set, clear the venue `min_notional`. The minNotional screen guards **entries** (opening/increasing
+/// exposure) — a venue rejects a too-small *new* order — but must never block an **exit**: a position must
+/// always be closable, or a sub-minNotional close would strand it open indefinitely. So callers pass
+/// `true` on entry fills and `false` on closing/reducing fills. Mirrors — and subsumes — the historical
+/// `qty > 0` zero-floor guard, so with no filter the predicate is exactly `qty > 0` on either side.
+fn fill_ok(cfg: &BacktestConfig, price: Decimal, qty: Decimal, enforce_min_notional: bool) -> bool {
+    qty > Decimal::ZERO
+        && match cfg.symbol_filter {
+            Some(f) if enforce_min_notional => f.clears_min_notional(price, qty),
+            _ => true,
+        }
+}
+
 /// Backtest configuration.
 #[derive(Debug, Clone)]
 pub struct BacktestConfig {
@@ -72,6 +152,11 @@ pub struct BacktestConfig {
     /// is selected and reported on its graded conviction; the money is exact `Decimal`, so it stays
     /// determinism-safe and batch/streaming identical.
     pub graded: bool,
+    /// QE-487: optional per-instrument exchange **symbol filter** (lot / tick / minNotional). `None` (the
+    /// default) is the pre-QE-487 continuous fill path — infinitely divisible size at the raw bar price —
+    /// so every existing (liquid-major) backtest is byte-identical. `Some` quantizes each fill's size and
+    /// price and rejects sub-minNotional orders at both fill sites, modelling realisability for thin names.
+    pub symbol_filter: Option<SymbolFilter>,
 }
 
 impl Default for BacktestConfig {
@@ -82,6 +167,7 @@ impl Default for BacktestConfig {
             windows: DEFAULT_WINDOWS,
             shocks: None,
             graded: false,
+            symbol_filter: None,
         }
     }
 }
@@ -231,32 +317,41 @@ pub fn backtest_with_trades(
                 match order {
                     Pending::Enter(dir, strength) => {
                         let notional = size_frac * strength * equity_prev;
-                        let qty = notional / price;
-                        if qty > Decimal::ZERO {
+                        // QE-487: snap the fill to the venue's tick/lot and screen minNotional. With no
+                        // symbol filter (the default) `(fill_price, qty)` and `fill_ok` reduce to the raw
+                        // price and the historical `qty > 0` guard — byte-identical to the pre-QE-487 fill.
+                        let (fill_price, qty) = quantize_fill(cfg, price, notional / price);
+                        if fill_ok(cfg, fill_price, qty, true) {
                             let side = match dir {
                                 Direction::Long => Side::Buy,
                                 Direction::Short => Side::Sell,
                             };
-                            apply_fill(&mut cash, &mut pos_qty, side, qty, price, adv, cfg);
+                            apply_fill(&mut cash, &mut pos_qty, side, qty, fill_price, adv, cfg);
                             entry_bar = Some(i);
                             trades += 1;
-                            open = Some((i, dir, price));
+                            open = Some((i, dir, fill_price));
                         }
                     }
                     Pending::Close => {
-                        let qty = pos_qty.abs();
-                        if qty > Decimal::ZERO {
+                        // QE-487: the close side snaps price to tick and floors size to the lot with the
+                        // SAME filter. Entries are flat-only and one fill lands per bar, so `pos_qty` is
+                        // exactly the (already step-quantized) entry size ⇒ the close floor is a no-op and
+                        // the position closes whole; with no filter this is the historical raw-price close.
+                        // minNotional is WAIVED on the exit (`enforce_min_notional = false`): a position
+                        // must always be closable, else a sub-minNotional close would strand it open.
+                        let (fill_price, qty) = quantize_fill(cfg, price, pos_qty.abs());
+                        if fill_ok(cfg, fill_price, qty, false) {
                             let side = if pos_qty > Decimal::ZERO {
                                 Side::Sell
                             } else {
                                 Side::Buy
                             };
-                            apply_fill(&mut cash, &mut pos_qty, side, qty, price, adv, cfg);
+                            apply_fill(&mut cash, &mut pos_qty, side, qty, fill_price, adv, cfg);
                             entry_bar = None;
                             if let Some((entry_idx, dir, entry_px)) = open.take() {
                                 let return_frac = match dir {
-                                    Direction::Long => (price - entry_px) / entry_px,
-                                    Direction::Short => (entry_px - price) / entry_px,
+                                    Direction::Long => (fill_price - entry_px) / entry_px,
+                                    Direction::Short => (entry_px - fill_price) / entry_px,
                                 }
                                 .to_f64()
                                 .unwrap_or(0.0);
@@ -265,7 +360,7 @@ pub fn backtest_with_trades(
                                     exit_idx: i,
                                     side: dir,
                                     entry_px,
-                                    exit_px: price,
+                                    exit_px: fill_price,
                                     return_frac,
                                 });
                             }
@@ -1310,5 +1405,221 @@ mod tests {
             taxed.net_pnl,
             base.net_pnl
         );
+    }
+
+    // --- QE-487 exchange symbol filters (lot / tick / minNotional) at the fill site -----------------
+
+    #[test]
+    fn symbol_filter_floors_qty_snaps_price_and_screens_min_notional() {
+        // The quantization primitive, in exact `Decimal`: size floors DOWN to the lot, price snaps to the
+        // nearest tick, and a sub-minNotional order is screened out.
+        let f = SymbolFilter {
+            step_size: Decimal::new(1, 3), // 0.001
+            tick_size: Decimal::new(5, 1), // 0.5
+            min_notional: Decimal::from(10),
+        };
+        // 0.00567 floors down to the 0.001 lot → 0.005 (never rounds size up).
+        assert_eq!(f.quantize_qty(Decimal::new(567, 5)), Decimal::new(5, 3));
+        // 100.30 snaps to the nearest 0.5 tick → 100.50.
+        assert_eq!(
+            f.quantize_price(Decimal::new(10030, 2)),
+            Decimal::new(1005, 1)
+        );
+        // Post-quantization notional 100.5 · 0.005 = 0.5025 < 10 ⇒ rejected …
+        assert!(!f.clears_min_notional(Decimal::new(1005, 1), Decimal::new(5, 3)));
+        // … while a larger order (0.2 · 100 = 20 ≥ 10) clears.
+        assert!(f.clears_min_notional(Decimal::from(100), Decimal::new(2, 1)));
+        // Zero fields disable each constraint (identity).
+        let off = SymbolFilter {
+            step_size: Decimal::ZERO,
+            tick_size: Decimal::ZERO,
+            min_notional: Decimal::ZERO,
+        };
+        assert_eq!(off.quantize_qty(Decimal::new(567, 5)), Decimal::new(567, 5));
+        assert_eq!(
+            off.quantize_price(Decimal::new(10030, 2)),
+            Decimal::new(10030, 2)
+        );
+    }
+
+    #[test]
+    fn sub_min_notional_entries_are_rejected_with_no_position_change() {
+        // AC: a sub-minNotional order is rejected — no fill, no position change. The long genome sizes
+        // each entry at ≈ size_frac·equity ≈ 0.5 notional; a 1_000 minNotional screens out every entry.
+        let s = schema();
+        let bars = uptrend_bars(&s, 160);
+        let g = long_genome(2, 5_000);
+        let cfg = BacktestConfig {
+            symbol_filter: Some(SymbolFilter {
+                step_size: Decimal::new(1, 8),      // 1e-8 (does not bind)
+                tick_size: Decimal::new(1, 8),      // 1e-8 (does not bind)
+                min_notional: Decimal::from(1_000), // ≫ the ~0.5 order notional ⇒ every entry rejected
+            }),
+            ..BacktestConfig::default()
+        };
+        let res = backtest(&g, &bars, &cfg);
+        assert_eq!(
+            res.trades, 0,
+            "all sub-minNotional entries must be rejected"
+        );
+        assert_eq!(
+            res.net_pnl,
+            Decimal::ZERO,
+            "no fills ⇒ no position change ⇒ zero net P&L"
+        );
+        assert!(!res.accepted);
+    }
+
+    #[test]
+    fn min_notional_gates_entries_but_never_blocks_an_exit() {
+        // QE-487 review fix: minNotional screens ENTRIES (opening/increasing exposure) but must NEVER
+        // block an EXIT — a sub-minNotional close would otherwise strand the position open forever.
+        let cfg = BacktestConfig {
+            symbol_filter: Some(SymbolFilter {
+                step_size: Decimal::new(1, 8),
+                tick_size: Decimal::new(1, 8),
+                min_notional: Decimal::from(1_000),
+            }),
+            ..BacktestConfig::default()
+        };
+        let price = Decimal::from(100);
+        let qty = Decimal::new(5, 3); // 0.005 ⇒ notional 0.5 ≪ 1_000
+        assert!(
+            !fill_ok(&cfg, price, qty, true),
+            "a sub-minNotional ENTRY is rejected"
+        );
+        assert!(
+            fill_ok(&cfg, price, qty, false),
+            "a sub-minNotional EXIT must still fill — never strand a position"
+        );
+        // the positive-size zero-floor still holds on the exit side
+        assert!(!fill_ok(&cfg, price, Decimal::ZERO, false));
+    }
+
+    #[test]
+    fn coarse_lot_step_floors_the_filled_size_at_the_fill_site() {
+        // AC (end-to-end): a coarse lot step floors each entry's qty DOWN to a multiple of 0.001 at the
+        // fill site, materially shrinking the filled long book vs the continuous fills — so a winning
+        // uptrend earns strictly less net P&L, with an identical trade sequence (sizing is decision-blind).
+        let s = schema();
+        let bars = uptrend_bars(&s, 160);
+        let g = long_genome(2, 5_000); // per-entry qty ranges ≈ 0.0019–0.005 across the price ramp
+        let continuous = backtest(&g, &bars, &BacktestConfig::default());
+        let coarse = backtest(
+            &g,
+            &bars,
+            &BacktestConfig {
+                symbol_filter: Some(SymbolFilter {
+                    step_size: Decimal::new(1, 3), // 0.001 — coarse enough to bind on those qtys
+                    tick_size: Decimal::new(1, 2), // 0.01 (integral prices ⇒ price unchanged)
+                    min_notional: Decimal::ZERO,   // never reject; isolate the step-flooring effect
+                }),
+                ..BacktestConfig::default()
+            },
+        );
+        assert_eq!(
+            coarse.trades, continuous.trades,
+            "step-flooring must not change the trade sequence"
+        );
+        assert!(continuous.net_pnl > Decimal::ZERO && coarse.net_pnl > Decimal::ZERO);
+        assert!(
+            coarse.net_pnl < continuous.net_pnl,
+            "flooring qty to the lot step must shrink the filled size ⇒ less net P&L: coarse {} !< continuous {}",
+            coarse.net_pnl,
+            continuous.net_pnl
+        );
+    }
+
+    #[test]
+    fn liquid_major_tiny_filters_match_continuous_within_tolerance() {
+        // AC: a liquid-major instrument with tiny step/tick produces P&L within tolerance of today's
+        // continuous fills — the deployed universe is unaffected in practice.
+        let s = schema();
+        let bars = uptrend_bars(&s, 160);
+        let g = long_genome(2, 5_000);
+        let continuous = backtest(&g, &bars, &BacktestConfig::default());
+        let filtered = backtest(
+            &g,
+            &bars,
+            &BacktestConfig {
+                symbol_filter: Some(SymbolFilter {
+                    step_size: Decimal::new(1, 8), // 1e-8 satoshi-class lot
+                    tick_size: Decimal::new(1, 2), // 0.01 tick (integral prices ⇒ snap is exact)
+                    min_notional: Decimal::new(1, 8),
+                }),
+                ..BacktestConfig::default()
+            },
+        );
+        assert_eq!(
+            filtered.trades, continuous.trades,
+            "tiny filters must not change the trade sequence"
+        );
+        let diff = (filtered.net_pnl - continuous.net_pnl).abs();
+        assert!(
+            diff < Decimal::new(1, 3),
+            "tiny step/tick P&L must match continuous within tolerance: diff {diff}"
+        );
+    }
+
+    #[test]
+    fn absent_filter_is_a_no_op_equal_to_an_explicitly_all_disabled_filter() {
+        // The `None` (absent) symbol filter is a no-op: it must produce exactly the same backtest as an
+        // explicit `Some` filter with every constraint disabled (step = tick = min_notional = 0), which
+        // provably reduces to the historical `qty > 0` fill path (no lot floor, no tick snap, no minNotional
+        // screen). We do NOT — and cannot — pin *pre-QE-487* behaviour here: a true pre-filter golden is not
+        // recoverable, and comparing `None` against the current engine would be self-referential. What this
+        // proves is internal consistency of the `None` path, so a future change that made `None` diverge from
+        // "no filtering at all" would fail.
+        assert!(BacktestConfig::default().symbol_filter.is_none());
+        let s = schema();
+        let bars = uptrend_bars(&s, 160);
+        let g = long_genome(2, 5_000);
+
+        // `None` must equal an explicit `symbol_filter: None` (same enum arm, sanity anchor).
+        let explicit_none = BacktestConfig {
+            symbol_filter: None,
+            ..BacktestConfig::default()
+        };
+        assert_eq!(
+            backtest(&g, &bars, &explicit_none),
+            backtest(&g, &bars, &BacktestConfig::default())
+        );
+
+        // The strengthening assertion: `None` must equal an explicit all-disabled filter. Every field is
+        // zero, so `quantize_qty`/`quantize_price` are identities and `fill_ok` reduces to `qty > 0` — i.e.
+        // this `Some` arm is a no-op filter. If the `None` path ever stopped meaning "no filtering", this
+        // would diverge and fail.
+        let all_disabled = BacktestConfig {
+            symbol_filter: Some(SymbolFilter {
+                step_size: Decimal::ZERO,
+                tick_size: Decimal::ZERO,
+                min_notional: Decimal::ZERO,
+            }),
+            ..BacktestConfig::default()
+        };
+        assert_eq!(
+            backtest(&g, &bars, &all_disabled),
+            backtest(&g, &bars, &BacktestConfig::default()),
+            "the None path must equal an explicitly all-disabled filter (both reduce to qty > 0)"
+        );
+    }
+
+    #[test]
+    fn quantized_fills_are_deterministic() {
+        // QE-006: the quantized path is a pure function of (genome, bars, cfg) — two runs are byte-equal.
+        let s = schema();
+        let bars = single_entry_uptrend(&s, 40);
+        let g = long_genome(2, 5_000);
+        let cfg = BacktestConfig {
+            min_trades: 1,
+            windows: 2,
+            symbol_filter: Some(SymbolFilter {
+                step_size: Decimal::new(1, 3),
+                tick_size: Decimal::new(5, 1),
+                min_notional: Decimal::new(1, 4),
+            }),
+            ..BacktestConfig::default()
+        };
+        assert_eq!(backtest(&g, &bars, &cfg), backtest(&g, &bars, &cfg));
     }
 }

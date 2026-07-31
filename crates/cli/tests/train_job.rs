@@ -141,6 +141,32 @@ fn train_over_fixture_store_seals_verifiable_vintage() {
         "the gate's lower DSR percentile is ≤ the median (a real distribution, not a point)"
     );
 
+    // QE-477: the CPCV OOS distribution is built on the GENUINELY held-out series, not the in-sample
+    // selection window. The sealed vintage carries that exact series in `holdout_series`; the CPCV test
+    // blocks partition only `0..n_obs` (purge/embargo touch only the never-reduced train side), so
+    // rebuilding the partitions over the sealed holdout series must reproduce the sealed per-path Sharpes.
+    // Feeding the train-window `in_sample_returns` would produce entirely different Sharpes — this assertion
+    // would fail. (Reconstruction rounds inputs to the same hash-stable grid, hence a tolerance, not `==`.)
+    let holdout = &loaded.content.holdout_series.returns;
+    let recon_paths =
+        qe_validation::cpcv_paths(holdout.len(), cpcv.blocks as usize, 0, 0, 0).unwrap();
+    let recon_sharpes: Vec<f64> = recon_paths
+        .iter()
+        .map(|p| qe_validation::sharpe_ratio(&p.returns(holdout)))
+        .collect();
+    assert_eq!(
+        recon_sharpes.len(),
+        cpcv.path_sharpes.len(),
+        "reconstructed path count must match the sealed distribution"
+    );
+    for (sealed, recon) in cpcv.path_sharpes.iter().zip(&recon_sharpes) {
+        assert!(
+            (sealed - recon).abs() < 1e-6,
+            "sealed CPCV path Sharpe {sealed} must match the holdout-series reconstruction {recon} — the \
+             OOS distribution is built on the holdout, not the in-sample selection window"
+        );
+    }
+
     // Catalogue-schema alignment: every sealed chromosome is valid against the SAME schema the QE-251
     // backtest job assembles against (`CatalogueConfig::default()`).
     let schema = catalogue_schema();
@@ -202,6 +228,32 @@ fn train_over_fixture_store_seals_verifiable_vintage() {
         "the CPCV OOS-distribution gate must be a recorded G1 criterion"
     );
     assert_eq!(outcome.result.vintage_id, outcome.vintage_id);
+
+    // QE-476 (R2.2): a real train seals the G1 promotion verdict into the content-hashed evidence
+    // (write-but-mark). Assert end-to-end that (a) the sealed vintage carries a verdict, (b) its `promoted`
+    // flag mirrors the run-doc G1 decision, and (c) at least one sealed criterion's FROZEN threshold equals
+    // the gate constant it was judged against — so a later drift of a threshold constant cannot re-classify
+    // this already-sealed artifact.
+    let sealed_verdict = loaded
+        .content
+        .seal_evidence
+        .promotion
+        .as_ref()
+        .expect("QE-476: a real train must seal the G1 promotion verdict");
+    assert_eq!(
+        sealed_verdict.promoted, outcome.result.g1.promoted,
+        "the sealed verdict's promoted flag must mirror the run-doc G1 decision"
+    );
+    let sealed_dsr = sealed_verdict
+        .criteria
+        .iter()
+        .find(|c| c.name == "dsr_exceeds_threshold")
+        .expect("the DSR criterion must be sealed into the verdict");
+    assert_eq!(
+        sealed_dsr.threshold,
+        qe_gate::DEFAULT_DSR_THRESHOLD,
+        "the sealed DSR threshold must be the frozen gate constant it was judged against"
+    );
 
     // QE-414: on the real fixture archive the DSR trial variance is estimated from the FULL cell
     // population (every occupied cell's champion), not the top-`MAX_POOL=10` ensemble pool. Prove the
@@ -825,15 +877,16 @@ fn cpcv_gate_is_wired_into_the_live_promotion_verdict_and_fails_closed() {
         );
     }
 
-    // ---- (2) UNDER-POWERED run: a tiny train window ⇒ absent CPCV distribution ⇒ REJECTED (fail-closed).
-    // A large holdout leaves a train window shorter than `DEFAULT_CPCV_BLOCKS` net-of-cost returns, so
-    // `CpcvDistribution::build` returns `Err` ⇒ the distribution is absent. The verdict must flip to
-    // rejected, never default-accept.
+    // ---- (2) UNDER-POWERED run: a tiny HOLDOUT window ⇒ absent CPCV distribution ⇒ REJECTED (fail-closed).
+    // QE-477: the CPCV distribution is now built on the HOLDOUT series, so under-power means a holdout with
+    // fewer than `DEFAULT_CPCV_BLOCKS` net-of-cost returns — `CpcvDistribution::build` returns `Err` ⇒ the
+    // distribution is absent. The verdict must flip to rejected, never default-accept. (The tiny holdout
+    // also fails G1's min-samples criterion, but the invariant under test is the CPCV fail-closed path.)
     let tmp2 = tempfile::tempdir().unwrap();
     let store2 = copy_store_to(tmp2.path());
     let vroot2 = tmp2.path().join("artifacts/vintages");
     let mut under = params(store2, vroot2.clone(), 42);
-    under.holdout = 115; // leaves only a handful of train bars ⇒ < 6 CPCV blocks
+    under.holdout = 5; // ⇒ ~4 holdout returns < DEFAULT_CPCV_BLOCKS (6) ⇒ CPCV build Err ⇒ absent
     let outcome2 = run_train_job(&under, &mut |_| {}).expect("under-powered train job still runs");
     let g1u = &outcome2.result.g1;
     let cpcv_u = cpcv_criterion(g1u);

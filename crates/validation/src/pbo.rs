@@ -75,6 +75,19 @@ pub fn pbo_cscv(matrix: &[Vec<f64>], blocks: usize) -> Result<PboReport, Validat
     })
 }
 
+/// Transpose a **strategy-major** trial matrix (`cols[k][t]` = trial `k`'s return at time `t` — the natural
+/// `[strategy][time]` shape of a trial pool / [`crate::VintageStats::trial_returns`]) into the
+/// **time-major** `[time][strategy]` matrix [`pbo_cscv`] consumes (`matrix[t][k]`). CSCV must split the
+/// **time** axis; passing a strategy-major matrix would make `S` partition the trial axis and silently
+/// yield a meaningless PBO (QE-490). Truncates to the shortest series (mirrors the GP path's
+/// `uncensored_pbo`); an empty input yields an empty matrix.
+pub(crate) fn columns_to_time_major(cols: &[Vec<f64>]) -> Vec<Vec<f64>> {
+    let t = cols.iter().map(Vec::len).min().unwrap_or(0);
+    (0..t)
+        .map(|row| cols.iter().map(|c| c[row]).collect())
+        .collect()
+}
+
 /// Per-strategy Sharpe over the rows in (or out of) the in-sample blocks.
 fn perf_per_strategy(
     matrix: &[Vec<f64>],
@@ -178,6 +191,47 @@ mod tests {
             .collect();
         let report = pbo_cscv(&matrix, 6).unwrap();
         assert_eq!(report.pbo, 0.0, "logits: {:?}", report.logits);
+    }
+
+    #[test]
+    fn pbo_takes_smooth_values_with_eight_blocks() {
+        // QE-478: with S=8 (C(8,4)=70 balanced partitions) PBO is a smooth fraction over 70 logits, not the
+        // degenerate {0, 0.5, 1} three-value estimator S=2 (combinations(2,1)=2 partitions) can only yield.
+        // A pool with genuine time-rotating leadership makes the IS-best's OOS rank differ across partitions,
+        // so PBO lands strictly inside (0, 1) at a value that is NOT one of the three S=2 points — proving
+        // the estimator now has real resolution.
+        let t = 48;
+        let matrix: Vec<Vec<f64>> = (0..t)
+            .map(|i| {
+                let phase = i as f64 * 0.3;
+                let osc = 0.005 * ((i % 3) as f64 - 1.0); // within-block dispersion ⇒ finite Sharpe
+                vec![
+                    0.02 + 0.01 * phase.sin() + osc,
+                    0.02 + 0.01 * (phase + 1.5).sin() + osc,
+                    0.02 + 0.01 * (phase + 3.0).sin() + osc,
+                    0.015 + osc, // a steady middling strategy
+                ]
+            })
+            .collect();
+        let report = pbo_cscv(&matrix, 8).unwrap();
+        assert_eq!(report.n_combinations, 70, "C(8,4) = 70 balanced partitions");
+        assert!(
+            report.pbo > 0.0 && report.pbo < 1.0,
+            "PBO must be a smooth interior fraction, got {}",
+            report.pbo
+        );
+        assert!(
+            ![0.0, 0.5, 1.0].contains(&report.pbo),
+            "PBO {} must not be one of the three values the degenerate S=2 estimator produces",
+            report.pbo
+        );
+        // It is a genuine k/70 fraction (more than three attainable values).
+        let k = report.pbo * 70.0;
+        assert!(
+            (k - k.round()).abs() < 1e-9,
+            "PBO must be a multiple of 1/70, got {}",
+            report.pbo
+        );
     }
 
     #[test]

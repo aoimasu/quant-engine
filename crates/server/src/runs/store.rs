@@ -40,6 +40,20 @@ impl RunStore {
         self.run_dir(id).join("stdout.log")
     }
 
+    /// QE-481: open a **single persistent append handle** to a run's `stdout.log`, so the supervisor drain
+    /// reuses one handle for the whole run instead of re-opening the file per line. The blocking `std::fs`
+    /// call lives here (the fs-primitive home), reached only through `spawn_blocking` — the supervisor body
+    /// stays free of synchronous `std::fs`.
+    ///
+    /// # Errors
+    /// Any filesystem error opening the log for append.
+    pub fn open_stdout_append(&self, id: &str) -> io::Result<fs::File> {
+        fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.stdout_path(id))
+    }
+
     /// Path to a run's `meta.json`.
     fn meta_path(&self, id: &str) -> PathBuf {
         self.run_dir(id).join("meta.json")

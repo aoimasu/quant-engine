@@ -54,6 +54,32 @@ pub mod schema;
 /// no `VINTAGE_FORMAT_VERSION` change, no golden drift.
 pub const VINTAGE_FORMAT_VERSION: u16 = 8;
 
+/// The fixed **hash-stable rounding scale** (`10^12`) every hashed `f64` is canonicalised to before the
+/// content hash is computed (QE-482 / QE-416). The content hash is the digest of `serde_json`'s output,
+/// whose default float parser is not correctly-rounded: a 17-significant-digit `f64` can re-parse to a
+/// neighbouring `f64` that serialises one ULP differently, breaking the content-hash verify on reload.
+/// Rounding to 12 decimal places keeps every hashed `f64` inside the parser's exact range (far finer than
+/// any allocation / risk / statistic figure needs) so seal → load is byte-stable.
+///
+/// This is the **same** rule the train-job producer applies (`crates/cli/src/jobs/train.rs` `hash_stable`,
+/// `HASH_STABLE_SCALE = 1e12`); QE-482 lifts it here so [`Vintage::seal`] enforces the invariant at the
+/// type boundary and producer + type agree by construction. The producer helper stays as belt-and-braces.
+pub const HASH_STABLE_SCALE: f64 = 1e12;
+
+/// Round `value` to the fixed [`HASH_STABLE_SCALE`] precision so it serialises to a bounded-precision,
+/// round-trip-stable decimal (QE-482). Non-finite inputs pass through unchanged — [`VintageContent::validate`]
+/// rejects them at seal, so the rounding never has to reason about `NaN`/`∞`. Idempotent: rounding an
+/// already-rounded value is a no-op, so canonicalising producer output that already applied this rule
+/// leaves the hashed bytes unchanged.
+#[must_use]
+pub fn hash_stable(value: f64) -> f64 {
+    if value.is_finite() {
+        (value * HASH_STABLE_SCALE).round() / HASH_STABLE_SCALE
+    } else {
+        value
+    }
+}
+
 /// The persisted **seal evidence** (QE-467): the gate's own tradability + deflation outputs, carried into
 /// the sealed artefact so every downstream surface (inspector QE-456/457, leaderboard QE-466, flow
 /// QE-460) **reads** — never recomputes — them. Part of the hashed content (content-addressed).
@@ -104,15 +130,39 @@ pub struct SealEvidence {
     pub fdr: Option<f64>,
     /// The CPCV out-of-sample **distribution** summary (QE-469): the median/IQR/percentile of the held-out
     /// Sharpe/DSR distribution and the fraction of held-out paths clearing the DSR floor — the promotion-
-    /// facing OOS evidence that replaces the single G1 terminal-holdout point estimate. `None` on a path
-    /// that does not run CPCV (byte-identical to pre-QE-469 — see the struct doc). Content-addressed.
+    /// facing OOS evidence that replaces the single G1 terminal-holdout point estimate. **QE-477:** built
+    /// over the FROZEN HOLDOUT series (the deployed ensemble's net-of-cost returns on the untouched
+    /// holdout), **not** the in-sample selection window — so "out-of-sample" is literal, every held-out
+    /// configuration's Sharpe/DSR is measured outside the window the ensemble was chosen on. `None` on a
+    /// path that does not run CPCV (byte-identical to pre-QE-469 — see the struct doc). Content-addressed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cpcv: Option<CpcvSummary>,
+    /// The sealed **G1 promotion verdict** (QE-476): the content-hashed mirror of the run-doc
+    /// `G1Decision` — the `promoted` flag plus each criterion's frozen name/value/threshold. Under the
+    /// **write-but-mark** policy a G1-failed candidate is still sealed and written, marked
+    /// `promoted = false`, so downstream selectors read the verdict and refuse a non-promoted vintage.
+    /// Additive `Option` (`skip_serializing_if` when `None`), exactly the QE-454/QE-469 precedent, so a
+    /// verdict-less vintage serialises **byte-identically** to the pre-QE-476 artefact — no
+    /// `VINTAGE_FORMAT_VERSION` bump. When populated it enters the hashed content (content-addressed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub promotion: Option<PromotionVerdict>,
+}
+
+impl SealEvidence {
+    /// The **fail-closed** promotion read a downstream selector uses (QE-476): `true` only when a sealed
+    /// verdict is present **and** records `promoted = true`. A verdict-less vintage (`None`, e.g. a
+    /// pre-QE-476 or otherwise unmarked artifact) reads as **not promoted** — a selector refuses it rather
+    /// than default-accepting an artifact whose gate outcome the hash cannot vouch for.
+    #[must_use]
+    pub fn is_promoted(&self) -> bool {
+        self.promotion.as_ref().is_some_and(|v| v.promoted)
+    }
 }
 
 /// The CPCV out-of-sample distribution summary (QE-469 — López de Prado Ch. 12.4), persisted in the sealed
 /// [`SealEvidence`] so every downstream surface **reads** — never recomputes — the OOS distribution. Built
-/// by the seal path from `qe_validation::CpcvDistribution` over the deployed ensemble's net-of-cost series.
+/// by the seal path from `qe_validation::CpcvDistribution` over the deployed ensemble's net-of-cost
+/// **holdout** series (QE-477 — the frozen, untouched holdout, not the in-sample selection window).
 ///
 /// Carries the per-held-out-path Sharpe and DSR vectors (content-addressed by inclusion in the hashed
 /// content) plus the reduced summary the promotion gate and the report surface consume. Every field is a
@@ -163,6 +213,37 @@ impl CpcvSummary {
             ("cpcv.frac_dsr_ge_floor", self.frac_dsr_ge_floor),
         ]
     }
+}
+
+/// One sealed G1 criterion's frozen evidence (QE-476): the criterion name, whether it passed, the
+/// observed value, and the **threshold it was judged against** — mirrors `qe_gate::CriterionResult` but
+/// lives in `qe-vintage` so the artefact format keeps no `qe-gate` dependency. Freezing the threshold into
+/// the hash is the point: a later drift of a threshold constant cannot silently re-classify an
+/// already-sealed artifact, because the value-vs-threshold comparison it was judged on is content-addressed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct SealedCriterion {
+    /// Short identifier for the criterion (matches the run-doc `G1Decision` criterion name).
+    pub name: String,
+    /// Whether this criterion passed.
+    pub passed: bool,
+    /// The observed value.
+    pub value: f64,
+    /// The threshold the value was compared against (frozen into the hash).
+    pub threshold: f64,
+}
+
+/// The sealed **G1 promotion verdict** (QE-476): the content-hashed mirror of the run-doc
+/// `qe_gate::G1Decision`, so a downstream selector reading only the content-addressed vintage — never the
+/// separate, non-content-addressed run doc — can tell a gate-passed artifact from a failed one and recover
+/// each criterion's frozen threshold. **Write-but-mark policy:** a G1-failed candidate is still sealed and
+/// written (preserving negative-result lineage for research), but carries `promoted = false`; a selector
+/// must read [`promoted`](Self::promoted) and refuse a non-promoted vintage.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct PromotionVerdict {
+    /// Whether the vintage cleared **every** G1 criterion (`true` iff gate-passed / promotable).
+    pub promoted: bool,
+    /// The per-criterion evidence with frozen thresholds, in evaluation order.
+    pub criteria: Vec<SealedCriterion>,
 }
 
 /// The canonical **net-of-cost holdout return series on the DEPLOYED capacity-capped weights** (QE-438),
@@ -398,6 +479,74 @@ impl VintageContent {
         (0..self.chromosomes.len()).map(|i| i.to_string()).collect()
     }
 
+    /// Canonicalise **every hashed `f64` field** to the fixed [`HASH_STABLE_SCALE`] precision (QE-482) —
+    /// `weights`, `worst_case_loss`, every `holdout_series` return, every [`SealEvidence`] scalar +
+    /// `Option`, and the [`CpcvSummary`] summary fields + per-path vectors. Called by [`Vintage::seal`]
+    /// **before** validation and hashing, so the hash-stable rounding invariant lives at the type boundary
+    /// that owns the hash — not only in the train-job producer. A future seal writer that constructs a
+    /// `VintageContent` without routing every f64 through the producer's rounding still seals a byte-stable
+    /// artefact, because `seal` rounds here by construction. `seal` is thus the **single source of truth**
+    /// for hash-stable precision: fields that were never producer-rounded (notably `weights`) are
+    /// canonicalised here, so reproducibility follows from `seal` ALWAYS canonicalising, not from any prior
+    /// producer rounding. On fields the producer did round the rounding is idempotent (a no-op), so
+    /// re-canonicalising existing producer output does not move the hash. (`capacity_usd` is exempt — see
+    /// the inline note: it is an exact integer by construction and would be perturbed, not stabilised, by
+    /// `hash_stable`.)
+    fn canonicalize(&mut self) {
+        for w in &mut self.weights {
+            *w = hash_stable(*w);
+        }
+        if let Some(loss) = self.worst_case_loss.as_mut() {
+            *loss = hash_stable(*loss);
+        }
+        for r in &mut self.holdout_series.returns {
+            *r = hash_stable(*r);
+        }
+        let ev = &mut self.seal_evidence;
+        ev.dsr = hash_stable(ev.dsr);
+        ev.pbo = hash_stable(ev.pbo);
+        ev.spa_pvalue = hash_stable(ev.spa_pvalue);
+        ev.realised_turnover = hash_stable(ev.realised_turnover);
+        // QE-482 R6.1: `capacity_usd` is deliberately NOT routed through `hash_stable`. It is
+        // large-magnitude (~1e6–1e8) and producer-rounded to whole dollars, so it is already an exact
+        // integer (hash-stable by construction). Multiplying by `HASH_STABLE_SCALE` (1e12) pushes it past
+        // the f64 exact-integer range (2^53 ≈ 9.0e15), so `hash_stable` could PERTURB an already-stable
+        // value and break its own idempotence. Leaving it untouched keeps seal ∘ canonicalize a no-op.
+        for opt in [
+            &mut ev.cost_stress_net_min,
+            &mut ev.uncensored_pbo,
+            &mut ev.ic,
+            &mut ev.fdr,
+        ] {
+            if let Some(v) = opt.as_mut() {
+                *v = hash_stable(*v);
+            }
+        }
+        if let Some(cpcv) = ev.cpcv.as_mut() {
+            cpcv.median_sharpe = hash_stable(cpcv.median_sharpe);
+            cpcv.sharpe_iqr_lo = hash_stable(cpcv.sharpe_iqr_lo);
+            cpcv.sharpe_iqr_hi = hash_stable(cpcv.sharpe_iqr_hi);
+            cpcv.sharpe_p05 = hash_stable(cpcv.sharpe_p05);
+            cpcv.sharpe_p95 = hash_stable(cpcv.sharpe_p95);
+            cpcv.median_dsr = hash_stable(cpcv.median_dsr);
+            cpcv.dsr_p05 = hash_stable(cpcv.dsr_p05);
+            cpcv.frac_dsr_ge_floor = hash_stable(cpcv.frac_dsr_ge_floor);
+            for x in &mut cpcv.path_sharpes {
+                *x = hash_stable(*x);
+            }
+            for x in &mut cpcv.path_dsrs {
+                *x = hash_stable(*x);
+            }
+        }
+        // QE-476: canonicalise the sealed verdict's value/threshold (QE-482 hash-stable precision).
+        if let Some(verdict) = ev.promotion.as_mut() {
+            for c in &mut verdict.criteria {
+                c.value = hash_stable(c.value);
+                c.threshold = hash_stable(c.threshold);
+            }
+        }
+    }
+
     /// Validate the artefact's structural invariants — `weights` aligned one-to-one with `chromosomes`
     /// and every weight finite, and `worst_case_loss` (if present) a finite non-negative fraction.
     /// Called by [`Vintage::seal`], so a silent upstream bug (a non-finite weight that would serialise
@@ -472,6 +621,20 @@ impl VintageContent {
                 }
             }
         }
+        // QE-476: the sealed G1 verdict's per-criterion value/threshold must be finite (same round-trip
+        // reason — a non-finite value would serialise to JSON `null` and fail re-load).
+        if let Some(verdict) = &ev.promotion {
+            for c in &verdict.criteria {
+                for (field, value) in [
+                    ("promotion.value", c.value),
+                    ("promotion.threshold", c.threshold),
+                ] {
+                    if !value.is_finite() {
+                        return Err(VintageError::NonFiniteEvidence { field, value });
+                    }
+                }
+            }
+        }
         Ok(())
     }
 
@@ -509,7 +672,11 @@ impl Vintage {
     /// # Errors
     /// [`VintageContent::validate`] errors (non-finite or misaligned weights), or a serialisation
     /// failure from [`VintageContent::content_hash`].
-    pub fn seal(content: VintageContent) -> Result<Self, VintageError> {
+    pub fn seal(mut content: VintageContent) -> Result<Self, VintageError> {
+        // QE-482: canonicalise every hashed f64 to the hash-stable precision at the type boundary, BEFORE
+        // validating and hashing, so the content-addressed reproducibility guarantee no longer depends on
+        // the producer having rounded every field. Idempotent on already-rounded input (no drift).
+        content.canonicalize();
         content.validate()?;
         let content_hash = content.content_hash()?;
         Ok(Vintage {
@@ -964,6 +1131,35 @@ mod tests {
     }
 
     #[test]
+    fn large_magnitude_capacity_usd_is_seal_idempotent() {
+        // QE-482 R6.1: `capacity_usd` is large-magnitude (~1e6–1e8) and producer-rounded to whole dollars.
+        // Routing it through `hash_stable` (× 1e12) would exceed the f64 exact-integer range (2^53) and could
+        // PERTURB an already-stable value — so `canonicalize` deliberately leaves it untouched. Verify that a
+        // realistic ~3.69e7 capacity is byte-stable under seal ∘ canonicalize: pre-canonicalising leaves the
+        // value exactly intact, and re-sealing that already-canonicalised content reproduces the same hash.
+        let cap = 36_900_000.0_f64;
+        let mut c = content();
+        c.seal_evidence.capacity_usd = cap;
+        let sealed = Vintage::seal(c.clone()).unwrap();
+
+        // canonicalize is a no-op on `capacity_usd` (already an exact integer) — the value is byte-identical.
+        let mut pre = c.clone();
+        pre.canonicalize();
+        assert_eq!(
+            pre.seal_evidence.capacity_usd, cap,
+            "canonicalize must leave a whole-dollar capacity_usd exactly intact"
+        );
+
+        // seal(c) == seal(canonicalize(c)) — the content hash is unchanged (idempotent).
+        let resealed = Vintage::seal(pre).unwrap();
+        assert_eq!(
+            resealed.content_hash, sealed.content_hash,
+            "seal ∘ canonicalize must be byte-identical for a large-magnitude capacity_usd"
+        );
+        assert_eq!(sealed.content.seal_evidence.capacity_usd, cap);
+    }
+
+    #[test]
     fn cpcv_summary_is_part_of_the_hash_and_round_trips() {
         // QE-469: the CPCV OOS distribution summary rides the hashed content, so populating it moves the
         // vintage id — downstream reads it, so it must be pinned into the lineage (content-addressed).
@@ -1025,6 +1221,129 @@ mod tests {
         assert!(
             !json.contains("cpcv"),
             "an absent cpcv must not appear in the serialised content: {json}"
+        );
+    }
+
+    fn verdict(promoted: bool) -> PromotionVerdict {
+        PromotionVerdict {
+            promoted,
+            criteria: vec![
+                SealedCriterion {
+                    name: "dsr_exceeds_threshold".to_string(),
+                    passed: promoted,
+                    value: if promoted { 0.98 } else { 0.80 },
+                    threshold: 0.95, // the frozen DSR threshold
+                },
+                SealedCriterion {
+                    name: "pbo_below_overfit_threshold".to_string(),
+                    passed: true,
+                    value: 0.10,
+                    threshold: 0.5,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn sealed_verdict_recovers_promoted_and_thresholds_without_the_run_doc() {
+        // QE-476: a downstream reader recovers the promotion verdict + each criterion's frozen threshold
+        // from the sealed (content-addressed) artifact alone — no separate run doc needed.
+        let mut c = content();
+        c.seal_evidence.promotion = Some(verdict(true));
+        let sealed = Vintage::seal(c).unwrap();
+        let mut buf: Vec<u8> = Vec::new();
+        sealed.write(&mut buf).unwrap();
+        let loaded = Vintage::load(buf.as_slice()).unwrap();
+
+        assert!(loaded.content.seal_evidence.is_promoted());
+        let v = loaded.content.seal_evidence.promotion.as_ref().unwrap();
+        assert!(v.promoted);
+        let dsr_crit = v
+            .criteria
+            .iter()
+            .find(|c| c.name == "dsr_exceeds_threshold")
+            .expect("the DSR criterion is sealed");
+        assert_eq!(
+            dsr_crit.threshold, 0.95,
+            "the threshold is frozen in the hash"
+        );
+        assert!(dsr_crit.passed);
+    }
+
+    #[test]
+    fn a_drifted_threshold_constant_does_not_change_a_sealed_verdict() {
+        // QE-476: the recorded verdict is READ FROM THE HASH, not re-derived — so even if a threshold
+        // CONSTANT drifts in a later build, an already-sealed artifact's frozen threshold/value is
+        // unchanged (its content hash still verifies against the figures it was judged on).
+        let mut c = content();
+        c.seal_evidence.promotion = Some(verdict(true));
+        let sealed = Vintage::seal(c).unwrap();
+        let mut buf: Vec<u8> = Vec::new();
+        sealed.write(&mut buf).unwrap();
+        // Reload verifies the content hash: the sealed threshold cannot be silently re-derived to a drifted
+        // constant without breaking the hash. The frozen value is exactly what was sealed.
+        let loaded = Vintage::load(buf.as_slice()).unwrap();
+        let dsr_crit = loaded
+            .content
+            .seal_evidence
+            .promotion
+            .as_ref()
+            .unwrap()
+            .criteria
+            .iter()
+            .find(|c| c.name == "dsr_exceeds_threshold")
+            .unwrap();
+        assert_eq!(dsr_crit.threshold, 0.95);
+        assert_eq!(dsr_crit.value, 0.98);
+        loaded.verify().unwrap();
+    }
+
+    #[test]
+    fn a_failed_candidate_is_written_but_marked_non_promotable() {
+        // QE-476 write-but-mark: a G1-FAILED candidate is NOT un-writable — it seals, writes, and reloads,
+        // but carries promoted = false so a selector's fail-closed read refuses it.
+        let mut c = content();
+        c.seal_evidence.promotion = Some(verdict(false));
+        let sealed = Vintage::seal(c).unwrap();
+        assert!(!sealed.content.seal_evidence.is_promoted());
+
+        let dir = std::env::temp_dir().join(format!("qe-vintage-failed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let repo = VintageRepository::new(&dir);
+        repo.write(&sealed).unwrap(); // written, not refused
+        let loaded = repo.load(&sealed.content.vintage_id).unwrap();
+        assert!(
+            !loaded.content.seal_evidence.is_promoted(),
+            "a non-promoted vintage must read as not-promoted (a selector refuses it)"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn verdict_is_part_of_the_hash_and_absent_is_byte_identical() {
+        // Flipping the promoted flag (or any criterion figure) moves the vintage id — the verdict is
+        // content-addressed. And an absent verdict (default None) is OMITTED from the serialised content
+        // (skip_serializing_if), so a verdict-less vintage is byte-identical to pre-QE-476 (no bump).
+        let base = Vintage::seal(content()).unwrap();
+        assert!(base.content.seal_evidence.promotion.is_none());
+        assert!(
+            !base.content.seal_evidence.is_promoted(),
+            "None ⇒ fail-closed"
+        );
+        let json = serde_json::to_string(&base.content).unwrap();
+        assert!(
+            !json.contains("promotion"),
+            "an absent verdict must not appear in the serialised content: {json}"
+        );
+
+        let mut promoted = content();
+        promoted.seal_evidence.promotion = Some(verdict(true));
+        let mut failed = content();
+        failed.seal_evidence.promotion = Some(verdict(false));
+        assert_ne!(
+            Vintage::seal(promoted).unwrap().content_hash,
+            Vintage::seal(failed).unwrap().content_hash,
+            "the promotion verdict is part of the hashed content"
         );
     }
 
@@ -1113,6 +1432,63 @@ mod tests {
         let loaded = Vintage::load(buf.as_slice()).unwrap();
         assert_eq!(loaded.content.provenance, sealed.content.provenance);
         assert_eq!(loaded.content.provenance.consultation_count, 3);
+    }
+
+    #[test]
+    fn seal_is_invariant_to_sub_precision_noise() {
+        // QE-482 AC1 (idempotence): seal canonicalises every hashed f64 to the hash-stable precision, so
+        // sub-1e-12 noise (a producer that forgot to round, or a differently-rounded f64) does NOT change
+        // the vintage id — the rounding invariant lives at the type boundary, not only in the producer.
+        let clean = Vintage::seal(content()).unwrap();
+        let mut noisy = content();
+        noisy.weights[0] += 1e-15;
+        noisy.weights[1] -= 3e-15;
+        noisy.seal_evidence.dsr += 2e-15;
+        noisy.holdout_series.returns[0] += 1e-14;
+        if let Some(l) = noisy.worst_case_loss.as_mut() {
+            *l += 1e-15;
+        }
+        let sealed = Vintage::seal(noisy).unwrap();
+        assert_eq!(
+            sealed.content_hash, clean.content_hash,
+            "sub-precision noise must not move the vintage id"
+        );
+        // The stored content is the canonicalised content and round-trips + verifies from disk.
+        let mut buf: Vec<u8> = Vec::new();
+        sealed.write(&mut buf).unwrap();
+        Vintage::load(buf.as_slice()).unwrap();
+    }
+
+    #[test]
+    fn seal_canonicalises_a_non_hash_stable_field_to_its_rounded_twin() {
+        // QE-482 AC2 (canonicalise posture, proven): a VintageContent carrying a non-hash-stable f64 in the
+        // CPCV block seals to the SAME hash as its explicitly pre-rounded twin — seal is the single point of
+        // truth for hash-stable precision.
+        let raw = 0.123_456_789_012_999_f64; // a tail below 1e-12
+        let rounded = (raw * HASH_STABLE_SCALE).round() / HASH_STABLE_SCALE;
+        assert_ne!(
+            raw, rounded,
+            "the fixture must actually carry sub-precision noise"
+        );
+
+        let summary = |sharpe: f64| CpcvSummary {
+            blocks: 6,
+            n_paths: 20,
+            median_sharpe: sharpe,
+            path_sharpes: vec![sharpe],
+            path_dsrs: vec![0.97],
+            ..CpcvSummary::default()
+        };
+        let mut noisy = content();
+        noisy.seal_evidence.cpcv = Some(summary(raw));
+        let mut twin = content();
+        twin.seal_evidence.cpcv = Some(summary(rounded));
+
+        assert_eq!(
+            Vintage::seal(noisy).unwrap().content_hash,
+            Vintage::seal(twin).unwrap().content_hash,
+            "a non-hash-stable f64 must canonicalise to its rounded twin's hash"
+        );
     }
 
     #[test]

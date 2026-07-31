@@ -4,9 +4,20 @@
 //! The G1 terminal holdout is a **single** train/holdout split producing a single OOS number
 //! (`crates/wfo/src/cv_fitness.rs:34-35`). CPCV replaces that point estimate with a distribution: split
 //! the time axis into `S` contiguous blocks, and over every balanced `C(S, S/2)` partition hold out
-//! `S/2` blocks — reconstructing, per partition, the candidate's **leak-free** concatenated net-of-cost
-//! held-out return series. Reducing the per-partition Sharpe/DSR to median / IQR / percentile + the
+//! `S/2` blocks — reconstructing, per partition, the candidate's concatenated net-of-cost return series
+//! over the held-out blocks. Reducing the per-partition Sharpe/DSR to median / IQR / percentile + the
 //! fraction clearing the DSR floor turns the OOS verdict into a confidence interval.
+//!
+//! ## Honest scope of "purged" for the fixed candidate (QE-479)
+//!
+//! The candidate is a **fixed, already-selected** deployed ensemble — there is **no per-split refit**. The
+//! reducer that produces the Sharpe/DSR vectors ([`CpcvPath::returns`]) reads **only** the held-out
+//! (`self.test`) blocks and never touches the purged+embargoed `self.train` set. So for this fixed-candidate
+//! distribution the purge/embargo geometry has **zero effect on the reduced series** the gate consumes — it
+//! is **not** a leak-free property of the distribution, and this module does not advertise it as one. The
+//! purge+embargo machinery is retained purely for the **window-disjointness invariant** ([`CpcvPath::windows_disjoint`]
+//! and its cross-crate `PurgedKFold` equivalence), which pins the geometry; it would only become
+//! load-bearing on the distribution under a per-split refit (out of scope here — see QE-477/QE-479).
 //!
 //! ## Reuse, not reinvention (QE-469 scope)
 //!
@@ -247,9 +258,11 @@ impl CpcvDistribution {
         }
     }
 
-    /// Build the CPCV distribution end-to-end for a fixed `candidate` return series: generate the leak-free
-    /// held-out paths ([`cpcv_paths`]) then reduce ([`from_path_returns`](Self::from_path_returns)). The
-    /// single entry point the seal path calls.
+    /// Build the CPCV distribution end-to-end for a fixed `candidate` return series: generate the held-out
+    /// paths ([`cpcv_paths`]) then reduce ([`from_path_returns`](Self::from_path_returns)) over each path's
+    /// held-out (`self.test`) blocks. The single entry point the seal path calls. Note (QE-479): for this
+    /// fixed candidate the reduction reads only the held-out blocks, so purge/embargo do not shape the
+    /// returned distribution — see the module-level "Honest scope of purged" note.
     ///
     /// # Errors
     /// Propagates [`cpcv_paths`] errors (odd/`< 2` block count, series shorter than `blocks`).
@@ -379,6 +392,34 @@ mod tests {
                 .any(|p| !p.windows_disjoint(lookback, label_horizon)),
             "un-purged CPCV must leak under a non-zero lookback"
         );
+    }
+
+    #[test]
+    fn returns_reads_only_test_blocks_not_train() {
+        // QE-479: the honest story for the FIXED candidate — the reducer `CpcvPath::returns` reads ONLY the
+        // held-out `test` blocks and never the purged+embargoed `train` set, so purge/embargo have zero
+        // effect on the reduced distribution. Two paths with identical `test` but wildly different `train`
+        // must produce byte-identical reduced returns; this pins the docstring's claim to behaviour.
+        let candidate: Vec<f64> = (0..20).map(|i| 0.01 * i as f64).collect();
+        let with_train = CpcvPath {
+            test: vec![2..5, 11..14],
+            train: vec![0, 1, 6, 7, 8, 9], // a full purged train set
+        };
+        let without_train = CpcvPath {
+            test: vec![2..5, 11..14],
+            train: Vec::new(), // no train at all
+        };
+        assert_eq!(
+            with_train.returns(&candidate),
+            without_train.returns(&candidate),
+            "the reduced held-out series must depend only on `test`, never on `train`"
+        );
+        // And it is exactly the concatenation of the held-out ranges, in time order.
+        let expected: Vec<f64> = [2usize, 3, 4, 11, 12, 13]
+            .iter()
+            .map(|&i| candidate[i])
+            .collect();
+        assert_eq!(with_train.returns(&candidate), expected);
     }
 
     #[test]

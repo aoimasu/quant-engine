@@ -194,3 +194,67 @@ cargo deny check
 # Frontend
 cd web && npm ci && npm run lint && npm run build && npm test
 ```
+
+---
+Here's the full dummy-user guide for real Binance data, entirely through the admin UI. One honest caveat up front: you can't reach zero terminal — starting the server needs a few one-time build/start commands. But you'll never type a qe train/backtest/ingest command — once the server is up, all the quant work happens by clicking in the browser. I've split it into "set up once in the terminal" vs. "daily use, browser only."
+
+What you'll end up with
+A local website at http://127.0.0.1:8080 where you sign in with Google, click to pull real BTC/ETH price history from Binance, click to train a strategy, click to backtest it, and read the results (metrics + equity/drawdown charts) on screen.
+
+Part A — One-time setup (terminal, ~15 min)
+1. Get Google sign-in credentials. The UI refuses to load without login. In the Google Cloud Console → APIs & Services → Credentials → Create OAuth client ID (type: Web application). Add this exact redirect URI:
+
+http://127.0.0.1:8080/auth/callback
+Copy the Client ID and Client Secret it gives you.
+
+2. Build the two binaries — both with --features http. This is the easy-to-miss step. The server pulls real data by launching a helper qe binary sitting next to it, and that helper must also have networking compiled in:
+
+cargo build -p qe-server -p qe-cli --features http
+3. Build the website (SPA):
+
+cd web && npm ci && npm run build && cd ..
+4. Create your config file. Copy the template and fill in your Google values:
+
+cp .env.example .env
+Then edit .env and set these four lines (leave everything else as-is):
+
+QE_ADMIN_ALLOWED_EMAILS=your-google-email@gmail.com
+QE_GOOGLE_CLIENT_ID=<paste from step 1>
+QE_GOOGLE_CLIENT_SECRET=<paste from step 1>
+QE_GOOGLE_REDIRECT_URI=http://127.0.0.1:8080/auth/callback
+Important: do not touch the storage settings — leave them at the defaults noted in the file, or the server won't boot.
+
+5. Start the server:
+
+cargo run -p qe-server --features http
+Leave this running. Expected: startup logs ending with the server listening on 127.0.0.1:8080. Open that address in your browser.
+
+Part B — Daily use (browser only, no CLI)
+1. Sign in. Click "Sign in with Google," use the allowlisted email. You land on the admin dashboard with areas for Data, Training, Backtests, and Evolve.
+
+2. Ingest real market data. Go to Data → Ingest market data. This screen is always the real decoder (there's no synthetic option here — every bar it pulls is tagged real). Fill in:
+
+Instruments: BTCUSDT, ETHUSDT (or flip the fetch-all toggle to grab the whole configured universe)
+Start / End dates (e.g. 2023-01-01 → 2024-01-01)
+Resolution: 1h
+Click to launch. Expected: a supervised run you can watch progress live; it fetches klines and funding from Binance. Needs internet; no API key required.
+
+3. Train a strategy. Go to Training → New training run. Pick the same window and resolution, optionally a seed and the "steer" knobs (indicator subset, search budget). Launch and watch the monitor. Expected: search progress, then a G1 gate PASS or FAIL, then a sealed vintage (a hex ID). On real data the gate is honest — FAIL is a legitimate, common outcome and means "no proven edge," not a bug. Either way you get a vintage you can backtest.
+
+4. Backtest it. Go to Backtests → New backtest. The form pre-loads your sealed vintages and pre-selects the instruments present in the store — pick the vintage, set the window/resolution, adjust costs (taker fee, slippage) if you like, and launch.
+
+5. Read the results. The backtest result view renders the metrics (Sharpe, Sortino, CAGR, max drawdown, win rate, profit factor, plus over-fitting stats PSR/DSR/PBO), the equity curve and drawdown charts, a monthly-returns heatmap, and the trade list — the same result.json I showed you earlier, but drawn as charts instead of raw JSON.
+
+What you can do with it
+Run the whole research loop without the terminal: ingest → train → backtest → review, all as browser clicks, with live run monitoring.
+Compare strategies: each training run seals a vintage; backtest several and compare their metrics/curves side by side.
+Tune the search via the on-screen steer knobs (which indicators, how many generations, WFO windows/folds).
+Judge honesty, not just returns: the PBO/DSR numbers on the result screen tell you whether a good-looking Sharpe is real or curve-fit.
+Evolve area: run the offline formula search to seal indicator "pools" (research-first; production sealing is governance-gated).
+Caveats to keep in mind
+Real data is "klines-only / uncalibrated." It fetches OHLCV bars + funding, but deliberately leaves premium/open-interest/mark-price empty (it won't fabricate them). So you'll see a "NOT tradable-at-size" liquidity flag — the execution-realism calibration layer isn't wired yet. Treat backtest numbers as honest research results, not execution-accurate ones.
+Funding is included, so unlike the synthetic path you shouldn't need any funding-coverage override — training should find coverage on its own for windows Binance has funding for.
+Everything is paper/offline. There is no live order submission anywhere — the UI cannot place real trades.
+If real ingest fails in the UI, the usual cause is the helper qe binary not being built with --features http (step A-2). Rebuild both binaries with that flag.
+Want me to actually run Part A on your machine now — build both binaries + the SPA and start the server — so it's ready for you to click through? I'd just need you to create the Google OAuth credentials (that part I can't do for you).
+
