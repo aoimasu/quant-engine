@@ -31,7 +31,7 @@ use qe_run_protocol::EvolveArchive;
 use serde::Serialize;
 use serde_json::json;
 
-use crate::audit::{AuditAction, AuditLog, SignoffState};
+use crate::audit::{AuditAction, AuditLog, ChainStatus, SignoffState};
 use crate::auth::{require_approver, require_operator, AuthedEmail, RoleConfig};
 use crate::pool_seal::{seal_allowed, SealContext, SealDecision};
 use crate::runs::store::atomic_write;
@@ -479,6 +479,50 @@ async fn production_seal(
         Ok(e) => e,
         Err(e) => return internal(format!("failed to read audit log: {e}")),
     };
+
+    // QE-473: verify the tamper-evident hash-chain BEFORE any seal decision. `derive_signoff`/`seal_allowed`
+    // count `approve` events reading only `action`/`subject_hash`/`actor_email` — they NEVER touch
+    // `entry_hash`/`hmac`/`prev_hash`, so forged `approve` lines (garbage HMAC/linkage) would otherwise
+    // satisfy dual sign-off. Fold the pure, in-memory chain check into a blocking task (no second
+    // `read_all`, off the async worker); a broken chain is fail-closed here — do NOT resolve the launcher,
+    // run `seal_allowed`, or mark-sealed on unverified append-only bytes.
+    let chain = {
+        let audit = Arc::clone(&audit);
+        let entries = entries.clone();
+        match tokio::task::spawn_blocking(move || audit.verify_chain(&entries)).await {
+            Ok(c) => c,
+            Err(_) => return internal("audit chain verification task failed".to_owned()),
+        }
+    };
+    if let ChainStatus::BrokenAt { seq } = chain {
+        // Same rejected-attempt branch as any other hard-block: append a rejected-seal audit entry and
+        // return `409` with the named chain-integrity blocker. `resolve_launcher`/`seal_allowed`/mark-sealed
+        // are never reached.
+        let blocker = format!("audit chain integrity check failed at seq {seq} — refusing to seal");
+        if let Err(e) = audit
+            .append(
+                &_actor,
+                AuditAction::Reject,
+                &pool.content.lineage.pool_hash,
+                "",
+                "",
+                "",
+                ts,
+            )
+            .await
+        {
+            tracing::warn!(pool_id = %id, error = %e, "failed to append rejected-seal audit entry (broken chain)");
+        }
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": "production seal refused — audit chain integrity check failed",
+                "pool_id": id,
+                "blockers": [blocker],
+            })),
+        )
+            .into_response();
+    }
 
     // Carry-forward #1: resolve the launcher server-side — the pool-bound launch entry first, then the
     // live run-bound entry via pool_id → run_id → launch entry. ALWAYS resolved server-side. An unresolved
@@ -975,4 +1019,256 @@ fn internal(msg: String) -> Response {
         Json(json!({ "error": msg })),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::audit::AuditEntry;
+    use crate::runs::CliJobSpawner;
+    use qe_formula_pool::{
+        DeflationSummary, FormulaGateEvidence, PoolFormula, PoolGovernance, PoolLineage,
+        POOL_FORMAT_VERSION,
+    };
+    use rust_decimal::Decimal;
+    use sha2::{Digest, Sha256};
+    use std::path::Path;
+
+    const POOL_ID: &str = "campaign-1";
+    const POOL_HASH: &str = "poolhash-1";
+
+    fn dec(n: i64, scale: u32) -> Decimal {
+        Decimal::new(n, scale)
+    }
+
+    fn h(s: &str) -> String {
+        use std::fmt::Write as _;
+        let mut out = String::new();
+        for b in Sha256::digest(s.as_bytes()) {
+            let _ = write!(out, "{b:02x}");
+        }
+        out
+    }
+
+    /// A production-mode pool that clears every §13.5 hard-block (mirrors the `pool_seal` happy-path pool).
+    fn passing_production_pool() -> FormulaPool {
+        let mut formulas = vec![
+            PoolFormula {
+                sexpr: "rank(close,20)".to_owned(),
+                formula_hash: h("rank(close,20)"),
+            },
+            PoolFormula {
+                sexpr: "zscore(high,50)".to_owned(),
+                formula_hash: h("zscore(high,50)"),
+            },
+        ];
+        formulas.sort_by(|a, b| a.formula_hash.cmp(&b.formula_hash));
+        let gate_evidence = formulas
+            .iter()
+            .map(|f| FormulaGateEvidence {
+                formula_hash: f.formula_hash.clone(),
+                ic_two_fold_same_sign_fdr_pass: true,
+                cost_stress_min_net_log_growth: dec(5, 3),
+                realised_turnover_frac: dec(20, 2),
+                capacity_usd: Decimal::from(300_000),
+                within_caps_and_stratum_deflated: true,
+                random_entry_null_pass: true,
+            })
+            .collect();
+        let content = FormulaPoolContent {
+            format_version: POOL_FORMAT_VERSION,
+            pool_id: POOL_ID.to_owned(),
+            mode: PoolMode::Production,
+            formulas,
+            deflation: DeflationSummary {
+                gp_aware: true,
+                distinct_evaluations: 500_000,
+                n_trials: 500_000,
+                analytic_floor: 7_200,
+                variance_trials: 500_000,
+                trial_variance: dec(2, 2),
+                expected_max_sharpe: dec(9, 0),
+                champion_dsr: dec(98, 2),
+                uncensored_pbo: Some(dec(2, 1)),
+            },
+            gate_evidence: Some(gate_evidence),
+            lineage: PoolLineage {
+                campaign_id: POOL_ID.to_owned(),
+                seed: 7,
+                mode: PoolMode::Production,
+                code_commit: "commit".to_owned(),
+                input_snapshot_id: "snap".to_owned(),
+                config_hash: "cfg".to_owned(),
+                pool_hash: POOL_HASH.to_owned(),
+            },
+        };
+        FormulaPool::seal(content).expect("passing pool seals")
+    }
+
+    fn audit_log(dir: &Path) -> Arc<AuditLog> {
+        Arc::new(AuditLog::new(
+            dir.join("audit").join("log.jsonl"),
+            b"test-key".to_vec(),
+            false,
+        ))
+    }
+
+    /// A dummy manager (the resolve-launcher store path is never hit on these tests — the launch entry is
+    /// pool-bound, so `launcher_for_pool` resolves without touching the run store).
+    fn dummy_manager(dir: &Path) -> Arc<RunManager> {
+        Arc::new(RunManager::new(
+            dir.join("runs"),
+            Arc::new(CliJobSpawner::new(std::path::PathBuf::from("/bin/false"))),
+            1,
+        ))
+    }
+
+    /// Seed the governance cache to `Approved` so the `Approved → Sealed` edge is legal.
+    fn seed_approved(pools: &PoolState) {
+        let mut g = PoolGovernance::draft(POOL_ID);
+        g.apply(PoolTransition::Approve, "a@x.io", 1).unwrap();
+        pools.governance.write(&g).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_valid_chain_with_two_distinct_signoffs_seals() {
+        let dir = tempfile::tempdir().unwrap();
+        let audit = audit_log(dir.path());
+        // A genuine chain: pool-bound launch (launcher ≠ approvers) + two distinct approvals on the hash.
+        audit
+            .append(
+                "launcher@x.io",
+                AuditAction::Launch,
+                POOL_ID,
+                "run-1",
+                "",
+                "",
+                1,
+            )
+            .await
+            .unwrap();
+        audit
+            .append("a@x.io", AuditAction::Approve, POOL_HASH, "", "", "", 1)
+            .await
+            .unwrap();
+        audit
+            .append("b@x.io", AuditAction::Approve, POOL_HASH, "", "", "", 1)
+            .await
+            .unwrap();
+        assert!(audit.verify_chain(&audit.read_all().unwrap()).is_ok());
+
+        let pools = Arc::new(PoolState::from_dirs(
+            &dir.path().join("artifacts"),
+            &dir.path().join("data"),
+        ));
+        seed_approved(&pools);
+        let manager = dummy_manager(dir.path());
+        let pool = passing_production_pool();
+
+        let resp = production_seal(
+            Arc::clone(&pools),
+            Arc::clone(&audit),
+            manager,
+            POOL_ID.to_owned(),
+            "sealer@x.io".to_owned(),
+            pool,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK, "the happy path must seal");
+        // The cache advanced to Sealed and the governance record was written.
+        assert_eq!(
+            pools.governance(POOL_ID).unwrap().state,
+            PoolLifecycleState::Sealed
+        );
+        assert!(pools.governance_record_path(POOL_ID).exists());
+    }
+
+    #[tokio::test]
+    async fn a_forged_chain_with_two_bad_hmac_approvals_refuses_to_seal() {
+        let dir = tempfile::tempdir().unwrap();
+        let audit = audit_log(dir.path());
+        // A genuine launch (seq 0), then TWO FORGED approve lines (distinct emails bound to the pool_hash,
+        // garbage entry_hash/hmac) — these satisfy `derive_signoff`'s hash-blind count but must be caught by
+        // `verify_chain` at seq 1.
+        audit
+            .append(
+                "launcher@x.io",
+                AuditAction::Launch,
+                POOL_ID,
+                "run-1",
+                "",
+                "",
+                1,
+            )
+            .await
+            .unwrap();
+        let mut entries = audit.read_all().unwrap();
+        let prev = entries[0].entry_hash.clone();
+        entries.push(AuditEntry {
+            seq: 1,
+            ts_ms: 1,
+            actor_email: "attacker-a@evil.com".to_owned(),
+            action: AuditAction::Approve,
+            subject_hash: POOL_HASH.to_owned(),
+            run_id: String::new(),
+            vintage_id: String::new(),
+            evidence_hash: String::new(),
+            prev_hash: prev,
+            entry_hash: "0".repeat(64),
+            hmac: "0".repeat(64),
+        });
+        entries.push(AuditEntry {
+            seq: 2,
+            ts_ms: 1,
+            actor_email: "attacker-b@evil.com".to_owned(),
+            action: AuditAction::Approve,
+            subject_hash: POOL_HASH.to_owned(),
+            run_id: String::new(),
+            vintage_id: String::new(),
+            evidence_hash: String::new(),
+            prev_hash: "0".repeat(64),
+            entry_hash: "0".repeat(64),
+            hmac: "0".repeat(64),
+        });
+        // Rewrite the JSONL with the forged tail.
+        let mut buf = String::new();
+        for e in &entries {
+            buf.push_str(&serde_json::to_string(e).unwrap());
+            buf.push('\n');
+        }
+        std::fs::write(audit.path(), buf.as_bytes()).unwrap();
+        assert_eq!(
+            audit.verify_chain(&audit.read_all().unwrap()),
+            ChainStatus::BrokenAt { seq: 1 }
+        );
+
+        let pools = Arc::new(PoolState::from_dirs(
+            &dir.path().join("artifacts"),
+            &dir.path().join("data"),
+        ));
+        seed_approved(&pools);
+        let manager = dummy_manager(dir.path());
+        let pool = passing_production_pool();
+
+        let resp = production_seal(
+            Arc::clone(&pools),
+            Arc::clone(&audit),
+            manager,
+            POOL_ID.to_owned(),
+            "sealer@x.io".to_owned(),
+            pool,
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::CONFLICT,
+            "a broken chain must refuse to seal"
+        );
+        // mark-sealed was NEVER reached: the cache stays Approved and no governance record was written.
+        assert_eq!(
+            pools.governance(POOL_ID).unwrap().state,
+            PoolLifecycleState::Approved
+        );
+        assert!(!pools.governance_record_path(POOL_ID).exists());
+    }
 }
