@@ -49,6 +49,13 @@ pub const MAX_NODES: usize = 16;
 /// Maximum total FIR lookback in bars (inclusive).
 pub const MAX_TOTAL_LOOKBACK: usize = 200;
 
+/// The maximum nesting depth [`parse_sexpr`] will descend before failing with [`ParseError::TooDeep`]
+/// (QE-499 Phase B, B6 hardening). The intake path parses **untrusted** sealed-pool text *before* the
+/// round-trip hash check, so an adversarial deeply-nested S-expression must not blow the stack. This cap
+/// is far above any legitimate canonical formula ([`MAX_DEPTH`] = 4) yet bounds recursion to a handful of
+/// frames, turning a malicious nest into a clean `ParseError` instead of a panic.
+pub const MAX_PARSE_DEPTH: usize = 64;
+
 /// The fixed rational constant grid (§4.2). A finite grid keeps the reachable canonical set countable
 /// (`E[maxSR]` well-posed for Phase 1b's deflation). Ascending order (nearest-snap, ties → lower).
 pub const CONST_GRID: [Decimal; 15] = [
@@ -810,6 +817,9 @@ pub enum ParseError {
     BadConst(String),
     /// Tokens remained after a complete expression was parsed (carries the first stray token).
     TrailingTokens(String),
+    /// The S-expression nested deeper than [`MAX_PARSE_DEPTH`] (an adversarial/malformed deep nest on the
+    /// untrusted intake path). Bounded so parsing fails cleanly instead of overflowing the stack.
+    TooDeep,
 }
 
 impl std::fmt::Display for ParseError {
@@ -822,6 +832,12 @@ impl std::fmt::Display for ParseError {
             ParseError::BadPeriod(t) => write!(f, "malformed window period `{t}`"),
             ParseError::BadConst(t) => write!(f, "malformed constant `{t}`"),
             ParseError::TrailingTokens(t) => write!(f, "trailing tokens after expression: `{t}`"),
+            ParseError::TooDeep => {
+                write!(
+                    f,
+                    "S-expression nested deeper than the parse depth cap ({MAX_PARSE_DEPTH})"
+                )
+            }
         }
     }
 }
@@ -914,7 +930,12 @@ fn parse_atom(atom: &str) -> Result<Expr, ParseError> {
     Err(ParseError::UnknownAtom(atom.to_owned()))
 }
 
-fn parse_node(tokens: &[String], pos: &mut usize) -> Result<Expr, ParseError> {
+fn parse_node(tokens: &[String], pos: &mut usize, depth: usize) -> Result<Expr, ParseError> {
+    // Bound recursion on the untrusted intake path: a deeply-nested S-expression must fail cleanly, not
+    // overflow the stack (the parse runs BEFORE the round-trip hash check that would reject it).
+    if depth > MAX_PARSE_DEPTH {
+        return Err(ParseError::TooDeep);
+    }
     let tok = tokens.get(*pos).ok_or(ParseError::UnexpectedEnd)?.clone();
     *pos += 1;
     if tok == ")" {
@@ -928,11 +949,11 @@ fn parse_node(tokens: &[String], pos: &mut usize) -> Result<Expr, ParseError> {
     let head = tokens.get(*pos).ok_or(ParseError::UnexpectedEnd)?.clone();
     *pos += 1;
     let node = if let Some(op) = unop_from_tag(&head) {
-        let child = parse_node(tokens, pos)?;
+        let child = parse_node(tokens, pos, depth + 1)?;
         Expr::Unary(op, Box::new(child))
     } else if let Some(op) = binop_from_tag(&head) {
-        let a = parse_node(tokens, pos)?;
-        let b = parse_node(tokens, pos)?;
+        let a = parse_node(tokens, pos, depth + 1)?;
+        let b = parse_node(tokens, pos, depth + 1)?;
         Expr::Binary(op, Box::new(a), Box::new(b))
     } else if let Some(op) = winop_from_tag(&head) {
         let period_tok = tokens.get(*pos).ok_or(ParseError::UnexpectedEnd)?.clone();
@@ -940,7 +961,7 @@ fn parse_node(tokens: &[String], pos: &mut usize) -> Result<Expr, ParseError> {
         let period: Period = period_tok
             .parse()
             .map_err(|_| ParseError::BadPeriod(period_tok.clone()))?;
-        let child = parse_node(tokens, pos)?;
+        let child = parse_node(tokens, pos, depth + 1)?;
         Expr::Window(op, Box::new(child), period)
     } else {
         return Err(ParseError::UnknownOp(head));
@@ -972,7 +993,7 @@ fn parse_node(tokens: &[String], pos: &mut usize) -> Result<Expr, ParseError> {
 pub fn parse_sexpr(s: &str) -> Result<Expr, ParseError> {
     let tokens = tokenize(s);
     let mut pos = 0usize;
-    let expr = parse_node(&tokens, &mut pos)?;
+    let expr = parse_node(&tokens, &mut pos, 0)?;
     if pos != tokens.len() {
         return Err(ParseError::TrailingTokens(tokens[pos].clone()));
     }
@@ -1846,5 +1867,23 @@ mod tests {
             parse_sexpr("close high"), // two complete exprs
             Err(ParseError::TrailingTokens(_))
         ));
+    }
+
+    #[test]
+    fn parse_sexpr_bounds_recursion_depth_instead_of_overflowing() {
+        // QE-499 B6 hardening: a deeply-nested S-expression on the untrusted intake path must fail with a
+        // clean `TooDeep` error, never a stack overflow. `neg` is a unary op, so `(neg (neg ... close))`
+        // nests one level per wrapper — build well past the cap and assert a typed error, not a panic.
+        let deep = format!(
+            "{}close{}",
+            "(neg ".repeat(MAX_PARSE_DEPTH + 50),
+            ")".repeat(MAX_PARSE_DEPTH + 50)
+        );
+        assert!(
+            matches!(parse_sexpr(&deep), Err(ParseError::TooDeep)),
+            "a nest past the depth cap must be a clean TooDeep error"
+        );
+        // A legitimately shallow expression (depth ≤ MAX_DEPTH) still parses fine — the cap is far above it.
+        assert!(parse_sexpr("(neg (mean 5 close))").is_ok());
     }
 }

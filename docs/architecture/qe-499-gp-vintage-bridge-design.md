@@ -72,6 +72,23 @@ qe train --pool <id>  (Phase B):
 > - **Acceptance test** runs on the **un-steered default pool path** and asserts the quantitative lower bound
 >   `composed_n_trials ≥ genome_basis + pool_basis` (monotonicity is insufficient).
 
+**Phase-B review hardening (under-deflation defects on the GP→G1 path):**
+
+- **MF-1 — CPCV per-path DSR floor.** Each held-out CPCV path's DSR now deflates against the **same floored**
+  best-of-N noise bar the point-DSR path uses: `sr0 = max(expected_max_sharpe(trial_variance, n_trials),
+  pool.expected_max_sharpe)`. Threaded as `pool_e_max: Option<f64>` through `CpcvDistribution::{build,
+  from_path_returns}`; `None` (no-pool) is byte-identical to the prior `deflated_sharpe_ratio` reduction.
+- **MF-2 — pool trial basis is the WITHIN-stage max, never verbatim.** `pool_n_trials =
+  max(n_trials, distinct_evaluations, analytic_floor)`; a zero/degenerate basis (all three `0`) is a hard reject at
+  intake (`PoolDegenerateTrialBasis`) — a pool cannot widen the catalogue yet add nothing to the composed count.
+- **MF-3 — deflation floor fails CLOSED.** An unreadable sealed floor bar is a hard intake error
+  (`PoolUnreadableDeflationFloor`), never a silent default to `0.0` ("no penalty" under the composing `max`).
+- **MF-4 — PBO composes the pool stage; SPA is genome-stage-only (documented).** The vintage's genome-stage PBO is
+  floored by the pool's sealed `uncensored_pbo` (`pbo = max(pbo, pool.uncensored_pbo)`), and an **absent**
+  `uncensored_pbo` is a hard intake error (`PoolUncensoredPboAbsent`). **SPA has no pool-stage counterpart** to
+  compose, so it remains genome-stage-only for pool vintages; `gate_evidence` (per-formula random-entry null +
+  IC/FDR) and the pool's own sealed diagnostics are the compensating controls.
+
 ## 5. Design changes to fold in (from review §5)
 
 - **Data model:** `CatalogueConfig` is `#[derive(Copy)]` with one `u16` (`mod.rs:142–146`); a `Vec<CompiledFormula>`
@@ -96,9 +113,13 @@ qe train --pool <id>  (Phase B):
   (not gated on `is_steered`); the §4 test runs on the un-steered path.
 - **B2 — composition:** pin **additive** across stages (§4); test the quantitative lower bound, not monotonicity.
 - **B3 — dispersion, not just count:** compose `trial_variance` and floor `E[maxSR]` with the pool's sealed values (§4).
-- **B4 — load boundary:** persist `pool_id` in the vintage/run-params; provide `current_with_pool(pool)` (or rebuild the
-  widened identity from the resolved sealed pool in `assert_schema`) so a correctly-sealed vintage passes exact-match and
-  a drifted/absent/tampered pool **fails closed** (a missing pool artefact ⇒ hard error).
+- **B4 — load boundary:** persist `pool_id` in the vintage/run-params; the widened identity binds the exact sanctioned
+  pool through `current_with_pool(pool)`. **Resolution (Phase B): pool vintages are WRITE-ONLY** — sealed for
+  evidence/audit (QE-476 write-but-mark, force-marked non-production), **not loadable/backtestable**. The generic
+  `assert_schema` (the sole load boundary, shared by the CLI backtest and the live runtime) rejects every pool-carrying
+  vintage with `SchemaMismatch`, the correct fail-closed posture. A pool-aware load boundary (`assert_schema_with_pool`)
+  was drafted but had **no wired caller**, so it was removed rather than shipped asserting a non-existent caller; the
+  end-to-end loadable path (pool resolution from the repo + widened-schema feature assembly) is deferred to **Phase C**.
 - **B5 — production back-door:** `seal_allowed`'s per-formula hard-blocks (IC/FDR, cost-stress, turnover, capacity,
   random-entry null, `pool_seal.rs:61–165`) never run on pool→vintage→G1. Resolution (chosen): **(a)** reject any
   non-Sandbox pool at train intake **and** require `gate_evidence` present-and-passing before formulas enter a vintage,

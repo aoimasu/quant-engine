@@ -53,34 +53,18 @@ pub fn assert_schema(content: &VintageContent) -> Result<(), VintageError> {
     assert_schema_against(content, &CatalogueIdentity::current())
 }
 
-/// QE-499 §B4 — the pool-aware load boundary. Assert a loaded **pool-carrying** vintage's schema identity
-/// matches the identity rebuilt from a **resolved, hash-verified** sealed pool's sanctioned `formula_hash`es
-/// ([`CatalogueIdentity::current_with_pool`]).
-///
-/// **Fail-closed design.** The generic [`assert_schema`] compares against the empty-pool
-/// [`CatalogueIdentity::current`], so it — and therefore the live-runtime load path via
-/// [`crate::VintageRepository::load`] — rejects *any* pool-carrying vintage with `SchemaMismatch`. This
-/// variant is called **only** by the qe-cli backtest/train load path, which first resolves the sealed pool
-/// from the pool repository (a tampered or corrupted pool fails its content-hash verify at
-/// `FormulaPool::load`, and a **missing** pool artefact is a hard error, *before* this is reached), then
-/// passes the pool's sanctioned hashes here. A vintage whose sealed `formula_pool` drifts from the resolved
-/// pool cannot reproduce `current_with_pool(sanctioned)` and fails closed with `SchemaMismatch`. QE-006
-/// determinism is preserved: the rebuilt identity is a pure function of the sorted sanctioned hashes.
-///
-/// # Errors
-/// [`VintageError::SchemaMismatch`] if the vintage's catalogue identity is not the sanctioned widened
-/// identity, or [`VintageError::GenomeRepMismatch`] on a chromosome representation mismatch.
-pub fn assert_schema_with_pool(
-    content: &VintageContent,
-    sanctioned_pool_hashes: &[String],
-) -> Result<(), VintageError> {
-    let expected = CatalogueIdentity::current_with_pool(sanctioned_pool_hashes.to_vec());
-    assert_schema_against(content, &expected)
-}
+// QE-499 §B4 — a **pool-aware** load boundary (`assert_schema_with_pool`) was drafted here to let a
+// correctly-sealed pool-carrying vintage load against its resolved sealed pool. It is **not wired**: pool
+// vintages are currently **write-only** — sealed for evidence/audit (QE-476 write-but-mark, force-marked
+// non-production), never loaded/backtested. The generic [`assert_schema`] below (the only load boundary,
+// used by both the CLI backtest and the live runtime via [`crate::VintageRepository::load`]) therefore
+// rejects **every** pool-carrying vintage with `SchemaMismatch` — the correct fail-closed posture until the
+// end-to-end load path (pool resolution + widened-schema feature assembly) lands in **Phase C**. The dead
+// draft fn was removed rather than shipped asserting a caller that does not exist.
 
 /// Assert a loaded vintage's catalogue identity equals `expected` exactly, plus every chromosome's
 /// representation version equals [`GENOME_REP_VERSION`]. The shared core of [`assert_schema`] (against the
-/// empty-pool `current()`) and [`assert_schema_with_pool`] (against a sanctioned widened identity).
+/// empty-pool `current()`).
 fn assert_schema_against(
     content: &VintageContent,
     expected: &CatalogueIdentity,
@@ -316,40 +300,25 @@ mod tests {
     }
 
     #[test]
-    fn pool_vintage_loads_with_sanctioned_pool_and_fails_closed_otherwise() {
-        // QE-499 §B4: a correctly-sealed pool vintage passes the pool-aware boundary when handed the
-        // SANCTIONED pool hashes (as the qe-cli load path resolves them from the verified sealed pool), the
-        // GENERIC boundary rejects it (live/runtime fail-closed), and a drifted/wrong pool fails closed.
+    fn pool_carrying_vintage_is_write_only_and_rejected_at_the_load_boundary() {
+        // QE-499 §B4 (resolved as write-only for Phase B): a pool-carrying vintage is sealed for
+        // evidence/audit but is NOT loadable — the generic `assert_schema` (the only load boundary, used by
+        // both the CLI backtest and the live runtime) rejects it fail-closed. End-to-end loadability is
+        // deferred to Phase C (pool resolution + widened-schema feature assembly).
         use qe_signal::indicator::expr::{Expr, ExprTree, Field, WinOp};
         let win = |op, f, n| ExprTree::repaired(Expr::Window(op, Box::new(Expr::Input(f)), n));
         let f1 = win(WinOp::Rank, Field::Close, 20).canonical_hash();
         let f2 = win(WinOp::Zscore, Field::High, 50).canonical_hash();
         let sanctioned = {
-            let mut v = vec![f1.clone(), f2.clone()];
+            let mut v = vec![f1, f2];
             v.sort();
             v
         };
         // The vintage seals the widened identity (as a --pool train does via from_config/current_with_pool).
-        let pool_identity = CatalogueIdentity::current_with_pool(sanctioned.clone());
-        let content = content_with(pool_identity);
-
-        // Pool-aware boundary WITH the sanctioned hashes ⇒ loads clean.
-        assert!(assert_schema_with_pool(&content, &sanctioned).is_ok());
-        // GENERIC boundary (runtime/live) ⇒ rejected (empty-pool current() != widened identity).
+        let content = content_with(CatalogueIdentity::current_with_pool(sanctioned));
+        // The generic boundary (runtime/live AND CLI backtest) rejects it: empty-pool current() != widened.
         assert!(matches!(
             assert_schema(&content),
-            Err(VintageError::SchemaMismatch { .. })
-        ));
-        // A DRIFTED sanctioned set (one hash tampered) ⇒ fails closed at the pool-aware boundary.
-        let mut drifted = sanctioned.clone();
-        drifted[0] = win(WinOp::Rank, Field::Close, 50).canonical_hash();
-        assert!(matches!(
-            assert_schema_with_pool(&content, &drifted),
-            Err(VintageError::SchemaMismatch { .. })
-        ));
-        // An EMPTY sanctioned set (as if the pool resolved to nothing) also fails closed.
-        assert!(matches!(
-            assert_schema_with_pool(&content, &[]),
             Err(VintageError::SchemaMismatch { .. })
         ));
     }

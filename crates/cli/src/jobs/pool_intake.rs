@@ -37,8 +37,15 @@ pub struct PoolIntake {
     pub formula_hashes: Vec<String>,
     /// The §4 deflation floor: `max(genome variance, pool.trial_variance)` and the sealed `E[max SR]` bar.
     pub deflation_floor: DeflationFloor,
-    /// The §4 **additive** pool trial basis (`pool.deflation.n_trials`) summed onto the genome basis.
+    /// The §4 **additive** pool trial basis summed onto the genome basis — the WITHIN-stage conservative
+    /// `max(n_trials, distinct_evaluations, analytic_floor)` (never the sealed `n_trials` verbatim), so a
+    /// pool sealed with a degenerate `n_trials` cannot widen the catalogue yet add nothing to the count.
     pub pool_n_trials: usize,
+    /// The pool's sealed **uncensored PBO** (the primary GP gate) — the vintage's genome-stage PBO is floored
+    /// by this at intake (`pbo = pbo.max(pool_uncensored_pbo)`) so a sealed PBO penalty is never silently
+    /// dropped (MF-4). Present-and-readable is a hard requirement at intake (`RunError::PoolUncensoredPboAbsent`
+    /// / `PoolUnreadableDeflationFloor`).
+    pub pool_uncensored_pbo: f64,
     /// The pool's campaign id (for the data-window provenance audit trail).
     pub campaign_id: String,
     /// The pool's pinned input-snapshot id (design §6 **data-window provenance** major). **Empty** until the
@@ -138,12 +145,53 @@ pub fn admit_pool(pool: &FormulaPool, states: u16) -> Result<PoolIntake, RunErro
     formula_hashes.sort();
     formula_hashes.dedup();
 
-    let trial_variance = content.deflation.trial_variance.to_f64().unwrap_or(0.0);
+    // ---- MF-3: the deflation floor must FAIL CLOSED. A `to_f64()` read failure on either bar previously
+    // defaulted to `0.0` — which is "no penalty" under the composing `max`, silently SOFTENING the DSR bar.
+    // A floor that cannot be read must BLOCK admission, never default to no-penalty. ----
+    let trial_variance = content.deflation.trial_variance.to_f64().ok_or_else(|| {
+        RunError::PoolUnreadableDeflationFloor {
+            pool_id: pool_id.clone(),
+            field: "trial_variance",
+        }
+    })?;
     let expected_max_sharpe = content
         .deflation
         .expected_max_sharpe
         .to_f64()
-        .unwrap_or(0.0);
+        .ok_or_else(|| RunError::PoolUnreadableDeflationFloor {
+            pool_id: pool_id.clone(),
+            field: "expected_max_sharpe",
+        })?;
+
+    // ---- MF-2: the pool trial basis is NOT trusted verbatim. §4 requires the WITHIN-stage conservative
+    // `max(n_trials, distinct_evaluations, analytic_floor)` — a pool sealed with a degenerate `n_trials`
+    // (e.g. 0) would otherwise widen the catalogue yet add nothing to the composed count. A zero/degenerate
+    // basis (all three fields 0) is a hard reject: it cannot honestly count the pool's multiple testing. ----
+    let pool_n_trials = content
+        .deflation
+        .n_trials
+        .max(content.deflation.distinct_evaluations)
+        .max(content.deflation.analytic_floor) as usize;
+    if pool_n_trials == 0 {
+        return Err(RunError::PoolDegenerateTrialBasis {
+            pool_id: pool_id.clone(),
+        });
+    }
+
+    // ---- MF-4: the pool's sealed uncensored PBO (the primary GP gate) is carried through so the vintage's
+    // genome-stage PBO can be floored by it (never silently dropped). Present-and-readable is a hard
+    // requirement at intake — an absent PBO is a QE-454 hard-block, and an unreadable one must fail closed. ----
+    let pool_uncensored_pbo = content
+        .deflation
+        .uncensored_pbo
+        .ok_or_else(|| RunError::PoolUncensoredPboAbsent {
+            pool_id: pool_id.clone(),
+        })?
+        .to_f64()
+        .ok_or_else(|| RunError::PoolUnreadableDeflationFloor {
+            pool_id: pool_id.clone(),
+            field: "uncensored_pbo",
+        })?;
 
     Ok(PoolIntake {
         pool_id,
@@ -153,7 +201,8 @@ pub fn admit_pool(pool: &FormulaPool, states: u16) -> Result<PoolIntake, RunErro
             trial_variance,
             expected_max_sharpe,
         },
-        pool_n_trials: content.deflation.n_trials as usize,
+        pool_n_trials,
+        pool_uncensored_pbo,
         campaign_id: content.lineage.campaign_id.clone(),
         input_snapshot_id: content.lineage.input_snapshot_id.clone(),
     })
@@ -249,10 +298,13 @@ mod tests {
             assert_eq!(cf.id.len(), 64);
             assert_eq!(ExprTree::new(cf.expr.clone()).canonical_hash(), cf.id);
         }
-        // §4 basis carried through from the sealed deflation block.
+        // §4 basis carried through from the sealed deflation block. MF-2: pool_n_trials is the WITHIN-stage
+        // max(n_trials=200, distinct=192, analytic=90) = 200 (not the verbatim field).
         assert_eq!(intake.pool_n_trials, 200);
         assert!((intake.deflation_floor.trial_variance - 0.1234).abs() < 1e-9);
         assert!((intake.deflation_floor.expected_max_sharpe - 2.1).abs() < 1e-9);
+        // MF-4: the pool's sealed uncensored PBO is carried through for the vintage PBO floor.
+        assert!((intake.pool_uncensored_pbo - 0.42).abs() < 1e-9);
         // Sanctioned hashes are sorted + match the formulas.
         assert_eq!(intake.formula_hashes.len(), 2);
         assert!(intake.formula_hashes.windows(2).all(|w| w[0] < w[1]));
@@ -296,6 +348,48 @@ mod tests {
         assert!(matches!(
             admit_pool(&pool, 5),
             Err(RunError::PoolGateEvidenceFailed { .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_a_zero_or_degenerate_trial_basis() {
+        // MF-2: a pool whose entire trial basis is zero — `max(n_trials, distinct_evaluations,
+        // analytic_floor) == 0` — must be rejected. Admitting it would widen the catalogue yet add nothing
+        // to the composed multiple-testing count (the forbidden uncounted case). All other governance passes.
+        let mut c = content(PoolMode::Sandbox, true, true);
+        c.deflation.n_trials = 0;
+        c.deflation.distinct_evaluations = 0;
+        c.deflation.analytic_floor = 0;
+        let pool = seal(c);
+        assert!(matches!(
+            admit_pool(&pool, 5),
+            Err(RunError::PoolDegenerateTrialBasis { .. })
+        ));
+    }
+
+    #[test]
+    fn max_composes_the_within_stage_pool_basis() {
+        // MF-2: the pool basis is the WITHIN-stage max, so a small sealed `n_trials` cannot understate the
+        // count when a larger distinct/analytic floor exists.
+        let mut c = content(PoolMode::Sandbox, true, true);
+        c.deflation.n_trials = 5; // understated
+        c.deflation.distinct_evaluations = 512;
+        c.deflation.analytic_floor = 90;
+        let intake = admit_pool(&seal(c), 5).unwrap();
+        assert_eq!(intake.pool_n_trials, 512, "max(5, 512, 90)");
+    }
+
+    #[test]
+    fn rejects_an_absent_uncensored_pbo() {
+        // MF-4: the pool's sealed uncensored PBO (the primary GP gate) is a present-and-readable hard
+        // requirement — an absent PBO cannot be dropped silently; the vintage PBO cannot be floored by a
+        // missing penalty. Fail closed.
+        let mut c = content(PoolMode::Sandbox, true, true);
+        c.deflation.uncensored_pbo = None;
+        let pool = seal(c);
+        assert!(matches!(
+            admit_pool(&pool, 5),
+            Err(RunError::PoolUncensoredPboAbsent { .. })
         ));
     }
 

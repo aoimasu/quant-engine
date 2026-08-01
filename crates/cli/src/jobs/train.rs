@@ -910,7 +910,7 @@ pub fn run_train_job(
     // dispersion floors at `max(genome variance, pool.trial_variance)` and `E[max SR]` floors at the pool's
     // sealed `expected_max_sharpe`. `None` on a no-pool run ⇒ byte-identical deflation.
     let deflation_floor: Option<DeflationFloor> = params.pool.as_ref().map(|p| p.deflation_floor);
-    let robustness = assess_robustness(
+    let mut robustness = assess_robustness(
         &pool,
         &variance_returns,
         &in_sample_returns,
@@ -919,6 +919,14 @@ pub fn run_train_job(
         deflation_floor,
         params.seed,
     );
+    // QE-499 §4 (MF-4): the vintage PBO is computed over the genome elite population only; the pool's sealed
+    // `uncensored_pbo` (the primary GP gate) would otherwise be silently dropped. Floor the genome-stage PBO
+    // by it so the composed PBO can only get HARDER (higher PBO ⇒ worse), analogous to the DSR floor. SPA has
+    // no pool-stage counterpart to compose, so it stays genome-stage-only (documented in §4). No-pool runs are
+    // untouched (byte-identical).
+    if let Some(pool) = params.pool.as_ref() {
+        robustness.pbo = robustness.pbo.max(pool.pool_uncensored_pbo);
+    }
 
     let in_sample_sharpe = sharpe_ratio(&in_sample_returns);
     let holdout_sharpe = sharpe_ratio(&holdout_returns);
@@ -945,6 +953,13 @@ pub fn run_train_job(
     // under-powered / degenerate config — `build → Err` (series too short for `S` purged blocks) or
     // `n_paths < min_paths` — makes `cpcv_gate_pass == false` and **flips the verdict to rejected**
     // (fail-closed), never default-accept. PBO stays primary and untouched; CPCV is additive.
+    // QE-499 §4 (MF-1): each held-out path's DSR must deflate against the SAME floored best-of-N noise bar
+    // the point-DSR path uses — floor `E[maxSR]` by the pool's sealed `expected_max_sharpe`. `None` on a
+    // no-pool run ⇒ the unfloored bar ⇒ the CPCV distribution is byte-identical to the pre-pool path.
+    let cpcv_pool_e_max = params
+        .pool
+        .as_ref()
+        .map(|p| p.deflation_floor.expected_max_sharpe);
     let cpcv_dist = qe_validation::CpcvDistribution::build(
         &holdout_returns,
         DEFAULT_CPCV_BLOCKS,
@@ -954,6 +969,7 @@ pub fn run_train_job(
         robustness.trial_variance,
         n_trials,
         qe_validation::DEFAULT_DSR_FLOOR,
+        cpcv_pool_e_max,
     )
     .ok();
     let cpcv_gate = qe_validation::CpcvGate::default();
@@ -986,6 +1002,24 @@ pub fn run_train_job(
             threshold: 1.0,
         });
         g1.promoted = false;
+    }
+
+    // ---- QE-499 §6 data-window provenance: RECORD the unverifiable evolve/train overlap as a sealed caveat.
+    // The bare warning at feature-assembly time (above) is not on the artefact. When the sealed pool records
+    // no evolve window (`input_snapshot_id` empty), the train cannot assert the G1 train/holdout window is
+    // disjoint from the formulas' evolve window — a real in-sample-contamination risk. Record it as a FAILING
+    // criterion into the sealed promotion evidence (mirroring `pool_vintage_non_production`) so the honesty
+    // gap rides the artefact, not just a log line. Deferred: a true disjoint-window/embargo assertion once the
+    // pool artefact records its evolve window (Phase C).
+    if let Some(pool) = params.pool.as_ref() {
+        if pool.input_snapshot_id.is_empty() {
+            g1.criteria.push(CriterionResult {
+                name: "evolve_window_provenance_unverified".to_string(),
+                passed: false,
+                value: 0.0,
+                threshold: 1.0,
+            });
+        }
     }
 
     emit(ProgressLine::Gate {

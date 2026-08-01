@@ -1026,9 +1026,8 @@ fn qe499_pool_train_widens_identity_composes_deflation_and_is_non_production() {
         CatalogueIdentity::current(),
         "a pool vintage's identity is not the empty-pool current()"
     );
-    // (B4) The pool-aware boundary ACCEPTS it with the sanctioned hashes …
-    assert!(schema::assert_schema_with_pool(content, &sanctioned).is_ok());
-    // … while the GENERIC boundary (runtime/live load) REJECTS it — fail-closed.
+    // (B4) Pool vintages are WRITE-ONLY (sealed for evidence/audit; loadability deferred to Phase C): the
+    // GENERIC boundary (the only load boundary — runtime/live AND CLI backtest) REJECTS it, fail-closed.
     assert!(schema::assert_schema(content).is_err());
     // And the real repository load path (used by runtime/backtest) refuses it too.
     assert!(
@@ -1053,6 +1052,19 @@ fn qe499_pool_train_widens_identity_composes_deflation_and_is_non_production() {
             .iter()
             .any(|c| c.name == "pool_vintage_non_production" && !c.passed),
         "the non-production reason criterion must be sealed"
+    );
+    // (§6 data-window honesty record) The unverifiable evolve/train overlap is sealed as a FAILING criterion
+    // on the artefact (not just a log line), since the fixture pool records no evolve window.
+    assert!(
+        content
+            .seal_evidence
+            .promotion
+            .as_ref()
+            .unwrap()
+            .criteria
+            .iter()
+            .any(|c| c.name == "evolve_window_provenance_unverified" && !c.passed),
+        "the unverifiable evolve/train data-window overlap must be recorded as a sealed caveat"
     );
 
     // (§4) The composed trial basis includes the additive pool stage: n_trials >= pool_n.

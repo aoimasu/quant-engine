@@ -251,4 +251,29 @@ pub enum RunError {
         /// The hash recomputed from the stored sexpr.
         recomputed: String,
     },
+    /// §4 (MF-2): the pool's trial basis is zero/degenerate — `max(n_trials, distinct_evaluations,
+    /// analytic_floor) == 0`. Admitting it would widen the catalogue yet add nothing to the composed
+    /// multiple-testing count (the forbidden uncounted case). Fail closed.
+    #[error("formula pool `{pool_id}` has a zero/degenerate trial basis (n_trials, distinct_evaluations and analytic_floor all 0) — cannot honestly count its multiple testing (§4)")]
+    PoolDegenerateTrialBasis {
+        /// The requested `--pool` id.
+        pool_id: String,
+    },
+    /// §4 (MF-3): a sealed deflation-floor bar could not be read as an `f64`. A floor that cannot be read
+    /// must BLOCK admission — defaulting to `0.0` ("no penalty" under the composing `max`) would silently
+    /// soften the DSR bar. Fail closed.
+    #[error("formula pool `{pool_id}` deflation field `{field}` could not be read as f64 — a floor that cannot be read must block admission, never default to no-penalty (§4)")]
+    PoolUnreadableDeflationFloor {
+        /// The requested `--pool` id.
+        pool_id: String,
+        /// The offending deflation field.
+        field: &'static str,
+    },
+    /// §4 (MF-4): the pool carries no sealed `uncensored_pbo` (the primary GP gate). An absent PBO is a
+    /// QE-454 hard-block; the vintage's PBO cannot be floored by a penalty that is missing. Fail closed.
+    #[error("formula pool `{pool_id}` has no sealed uncensored_pbo — the primary GP gate is a hard requirement for the --pool bridge (§4)")]
+    PoolUncensoredPboAbsent {
+        /// The requested `--pool` id.
+        pool_id: String,
+    },
 }
