@@ -63,13 +63,25 @@ pub fn check_schema(chromosomes: &[Genome], schema: &FeatureSchema) -> Result<()
     Ok(())
 }
 
+/// Round a sample timestamp to the nearest whole hour (QE-495). Real Binance `fundingTime` stamps
+/// carry millisecond jitter — e.g. `…08:00:00.001`, measured on 151 of the 1098 BTCUSDT stamps in
+/// 2024 — so an exact-ms equality join silently drops ~15% of genuine funding and fails the 90%
+/// coverage gate on every real-data train. Bars open exactly on the hour and the funding grid is 8h,
+/// so nearest-hour rounding (±30min tolerance) heals the jitter with no risk of cross-stamp
+/// collision. Pure integer arithmetic — deterministic (QE-006).
+fn round_to_hour_ms(ms: i64) -> i64 {
+    const HOUR_MS: i64 = 3_600_000;
+    (ms + HOUR_MS / 2).div_euclid(HOUR_MS) * HOUR_MS
+}
+
 /// Build the decision-bar series for one instrument: assemble feature vectors over the OHLCV bars
-/// (with funding / premium scalar context aligned by exact bar time) and zip each with its bar `close`
+/// (with funding / premium scalar context aligned by bar time) and zip each with its bar `close`
 /// price and funding rate.
 ///
-/// Funding and premium samples are matched to a bar by an **exact** open-time equality (funding stamps
-/// land on a sparse grid; a bar with no stamp carries `funding_rate = None`). The returned vector is
-/// aligned one-to-one with `bars`.
+/// Funding and premium samples are matched to a bar by open-time equality **after nearest-hour
+/// rounding of the sample stamp** (QE-495: real venue stamps jitter by milliseconds; bars are exact,
+/// so rounding the sparse-grid sample side is sufficient). A bar with no stamp carries
+/// `funding_rate = None`. The returned vector is aligned one-to-one with `bars`.
 #[must_use]
 pub fn to_decision_bars(
     bars: &[OhlcvBar],
@@ -78,11 +90,11 @@ pub fn to_decision_bars(
 ) -> Vec<DecisionBar> {
     let funding_by_ms: BTreeMap<i64, Decimal> = funding
         .iter()
-        .map(|f| (f.time.millis(), f.rate.get()))
+        .map(|f| (round_to_hour_ms(f.time.millis()), f.rate.get()))
         .collect();
     let premium_by_ms: BTreeMap<i64, Decimal> = premium
         .iter()
-        .map(|p| (p.time.millis(), p.premium))
+        .map(|p| (round_to_hour_ms(p.time.millis()), p.premium))
         .collect();
 
     let samples: Vec<Sample> = bars
@@ -119,6 +131,23 @@ pub fn to_decision_bars(
 mod tests {
     use super::*;
     use qe_signal::genome::{Clause, ExitParams, RiskParams, RuleSet, CLAUSES_PER_SET};
+
+    #[test]
+    fn jittered_funding_stamps_round_onto_the_bar_grid() {
+        // QE-495: real Binance fundingTime stamps carry ±ms jitter (…08:00:00.001). Nearest-hour
+        // rounding must heal small jitter in both directions, be identity on exact stamps, and never
+        // move a stamp across the 8h grid.
+        const H: i64 = 3_600_000;
+        assert_eq!(round_to_hour_ms(8 * H), 8 * H); // exact ⇒ identity
+        assert_eq!(round_to_hour_ms(8 * H + 1), 8 * H); // +1ms jitter ⇒ snapped back
+        assert_eq!(round_to_hour_ms(8 * H - 3), 8 * H); // −3ms jitter ⇒ snapped forward
+        assert_eq!(round_to_hour_ms(8 * H + 17), 8 * H); // +17ms observed-class jitter
+        assert_eq!(round_to_hour_ms(16 * H - 1), 16 * H); // adjacent grid point unaffected
+                                                          // A stamp a full half-hour off (not jitter) rounds to its NEAREST hour, never a different
+                                                          // 8h stamp: 8h+29:59.999 → 8h; 8h+30:00 → 9h (a no-bar hour ⇒ simply unmatched, not wrong).
+        assert_eq!(round_to_hour_ms(8 * H + 30 * 60_000 - 1), 8 * H);
+        assert_eq!(round_to_hour_ms(8 * H + 30 * 60_000), 9 * H);
+    }
 
     fn clause(feature: u16, lo: u16, hi: u16) -> Clause {
         Clause {
