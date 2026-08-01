@@ -6,11 +6,18 @@
 # IMPORTANT — training is SINGLE-INSTRUMENT. `qe train` trains over `instruments.first()`
 # (crates/cli/src/lib.rs), so this universe enables N independent per-symbol hunts — NOT a
 # cross-sectional signal. A cross-sectional / multi-instrument training mode is a separate, larger
-# ticket. To hunt a specific market, point training at it (e.g. via `--instrument SOLUSDT`).
+# ticket. There is NO `--instrument` flag: to hunt a specific market, make it the FIRST entry in the
+# `instruments` list below (or keep per-symbol config copies). `qe ingest --fetch-all` populates the
+# whole universe regardless of order.
 #
 # Listing dates below are the REAL Binance USDT-M perpetual listing dates, verified against the live
 # API (the earliest available `/fapi/v1/klines` open-time per symbol). They are enforced point-in-time
 # (QE-012): a bar before `listed` is never scanned, so there is no survivorship / pre-listing leakage.
+#
+# Factor note (QE-497): `qe ingest --features http` now populates PREMIUM over full history (reviving the
+# `premium_state` indicator) and OPEN-INTEREST only within Binance's ~31-day `openInterestHist` retention
+# — so a historical training window legitimately reports `0 open-interest` (a retention limit, not a bug),
+# and the `oi_roc_10` indicator stays dead there. Premium is the usable new factor for a historical hunt.
 
 profile = "train"
 
