@@ -1653,6 +1653,7 @@ dependencies = [
  "rust_decimal",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror",
  "tracing",
@@ -1788,6 +1789,7 @@ dependencies = [
  "arrow-array",
  "arrow-ipc",
  "arrow-schema",
+ "native-tls",
  "qe-config",
  "qe-domain",
  "qe-signal",
@@ -1942,6 +1944,7 @@ dependencies = [
 name = "qe-venue"
 version = "0.1.0"
 dependencies = [
+ "native-tls",
  "qe-domain",
  "qe-error",
  "rust_decimal",

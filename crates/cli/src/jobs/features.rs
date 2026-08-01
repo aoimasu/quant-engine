@@ -63,13 +63,28 @@ pub fn check_schema(chromosomes: &[Genome], schema: &FeatureSchema) -> Result<()
     Ok(())
 }
 
+/// Round a **funding** sample timestamp to the nearest whole hour (QE-495). Real Binance `fundingTime`
+/// stamps carry millisecond jitter — e.g. `…08:00:00.001`, measured on 151 of the 1098 BTCUSDT stamps
+/// in 2024 — so an exact-ms equality join silently drops ~15% of genuine funding and fails the 90%
+/// coverage gate on every real-data train. Bars open exactly on the hour and the funding grid is 8h,
+/// so nearest-hour rounding heals the jitter with no risk of cross-stamp collision (the ±30min
+/// tolerance is far below half the 8h period). Applied to **funding only** — premium klines are
+/// dense, exactly on the bar grid, and carry no jitter, so rounding them would over-snap sub-hour
+/// samples onto the wrong bar (QE-496 review R3.1). Pure integer arithmetic — deterministic (QE-006).
+fn round_to_hour_ms(ms: i64) -> i64 {
+    const HOUR_MS: i64 = 3_600_000;
+    (ms + HOUR_MS / 2).div_euclid(HOUR_MS) * HOUR_MS
+}
+
 /// Build the decision-bar series for one instrument: assemble feature vectors over the OHLCV bars
-/// (with funding / premium scalar context aligned by exact bar time) and zip each with its bar `close`
+/// (with funding / premium scalar context aligned by bar time) and zip each with its bar `close`
 /// price and funding rate.
 ///
-/// Funding and premium samples are matched to a bar by an **exact** open-time equality (funding stamps
-/// land on a sparse grid; a bar with no stamp carries `funding_rate = None`). The returned vector is
-/// aligned one-to-one with `bars`.
+/// **Funding** samples are matched to a bar after nearest-hour rounding of the sparse, jittery venue
+/// stamp (QE-495). **Premium** samples are joined by **exact** open-time equality — they are dense,
+/// on-grid kline data with no jitter, so the exact join is already correct and rounding them would
+/// mis-attach on sub-hour bars (review R3.1). A bar with no matching stamp carries `funding_rate =
+/// None`. The returned vector is aligned one-to-one with `bars`.
 #[must_use]
 pub fn to_decision_bars(
     bars: &[OhlcvBar],
@@ -78,7 +93,7 @@ pub fn to_decision_bars(
 ) -> Vec<DecisionBar> {
     let funding_by_ms: BTreeMap<i64, Decimal> = funding
         .iter()
-        .map(|f| (f.time.millis(), f.rate.get()))
+        .map(|f| (round_to_hour_ms(f.time.millis()), f.rate.get()))
         .collect();
     let premium_by_ms: BTreeMap<i64, Decimal> = premium
         .iter()
@@ -119,6 +134,69 @@ pub fn to_decision_bars(
 mod tests {
     use super::*;
     use qe_signal::genome::{Clause, ExitParams, RiskParams, RuleSet, CLAUSES_PER_SET};
+
+    #[test]
+    fn to_decision_bars_recovers_jittered_funding_and_leaves_a_genuine_gap_unfunded() {
+        // QE-495 review R6.2/R5.1: prove the fix end-to-end at the join, not just round_to_hour_ms in
+        // isolation. A funding stamp 1ms past the hour must land on its on-hour bar (recovered), and a
+        // bar with NO stamp anywhere near it must stay `funding_rate = None` — so a genuine funding gap
+        // still fails the coverage gate; nearest-hour rounding only heals ms jitter, it cannot bridge a
+        // real gap.
+        use qe_domain::{Bar, FundingRate, InstrumentId, Price, Qty, Resolution, Timestamp};
+        const H: i64 = 3_600_000;
+        let inst = InstrumentId::new("BTCUSDT").unwrap();
+        let px = |v: i64| Price::new(Decimal::from(v)).unwrap();
+        let bars: Vec<Bar> = (0..24)
+            .map(|i| {
+                Bar::new(
+                    Timestamp::from_millis(i * H),
+                    Resolution::H1,
+                    px(100),
+                    px(101),
+                    px(99),
+                    px(100),
+                    Qty::new(Decimal::from(10)).unwrap(),
+                    1,
+                )
+                .unwrap()
+            })
+            .collect();
+        // One jittered stamp on the hour-8 bar (…08:00:00.001); NO stamp near hour 16.
+        let funding = vec![FundingRateSample {
+            instrument: inst,
+            time: Timestamp::from_millis(8 * H + 1),
+            rate: FundingRate::new(Decimal::new(1, 4)),
+        }];
+        let db = to_decision_bars(&bars, &funding, &[]);
+        assert_eq!(db.len(), 24);
+        assert!(
+            db[8].funding_rate.is_some(),
+            "a stamp 1ms past the hour must be recovered onto its on-hour bar"
+        );
+        assert!(
+            db[16].funding_rate.is_none(),
+            "a bar with no nearby stamp must stay unfunded — rounding heals jitter, never bridges a gap"
+        );
+        // exactly one bar funded ⇒ rounding cannot inflate coverage beyond the real stamp count
+        assert_eq!(db.iter().filter(|b| b.funding_rate.is_some()).count(), 1);
+    }
+
+    #[test]
+    fn jittered_funding_stamps_round_onto_the_bar_grid() {
+        // QE-495: real Binance fundingTime stamps carry ±ms jitter (…08:00:00.001). Nearest-hour
+        // rounding must heal small jitter in both directions, be identity on exact stamps, and never
+        // move a stamp across the 8h grid.
+        const H: i64 = 3_600_000;
+        assert_eq!(round_to_hour_ms(8 * H), 8 * H); // exact ⇒ identity
+        assert_eq!(round_to_hour_ms(8 * H + 1), 8 * H); // +1ms jitter ⇒ snapped back
+        assert_eq!(round_to_hour_ms(8 * H - 3), 8 * H); // −3ms jitter ⇒ snapped forward
+        assert_eq!(round_to_hour_ms(8 * H + 17), 8 * H); // +17ms observed-class jitter
+        assert_eq!(round_to_hour_ms(16 * H - 1), 16 * H); // adjacent grid point unaffected
+                                                          // A stamp a full half-hour off (not jitter) rounds to its NEAREST hour, never a different
+                                                          // 8h stamp: 8h+29:59.999 → 8h; 8h+30:00 → 9h (a no-bar hour ⇒ simply unmatched, not wrong).
+        assert_eq!(round_to_hour_ms(8 * H + 30 * 60_000 - 1), 8 * H);
+        assert_eq!(round_to_hour_ms(8 * H + 30 * 60_000), 9 * H);
+    }
 
     fn clause(feature: u16, lo: u16, hi: u16) -> Clause {
         Clause {

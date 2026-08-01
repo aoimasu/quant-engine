@@ -14,7 +14,7 @@ workspace = true
 default = []
 # The concrete HTTP transport (ureq + native-tls). Default-off so the core crate — and CI's default
 # build/test — stays offline and dependency-light; the runtime binary enables it for live REST.
-http = ["dep:ureq"]
+http = ["dep:ureq", "dep:native-tls"]
 
 [dependencies]
 # Timestamp / TimeInterval / InstrumentId for the request model and closed-window logic.
@@ -27,6 +27,9 @@ thiserror.workspace = true
 # Optional blocking HTTP client for the real transport. native-tls (system TLS) avoids ring's
 # non-allowlisted OpenSSL licence; only compiled under the `http` feature (mirrors qe-ingest).
 ureq = { version = "2", default-features = false, features = ["native-tls"], optional = true }
+# QE-494: explicit connector for the `native-tls` backend ureq consumes (transitive via ureq ⇒ no new
+# crate enters Cargo.lock; only compiled under `http`).
+native-tls = { version = "0.2", optional = true }
 
 [dev-dependencies]
 # Construct Price/Qty fixtures (Decimal-based) in the user-data stream tests (QE-204).

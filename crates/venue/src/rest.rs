@@ -263,8 +263,15 @@ impl HttpRestTransport {
     #[must_use]
     pub fn new(base: impl Into<String>) -> Self {
         Self {
+            // QE-494: `default-features = false` ureq ships no TLS backend, so the connector must be
+            // wired explicitly or every https:// request fails at runtime ("Unknown Scheme: … no TLS
+            // backend is configured"). Mirrors qe-ingest's HttpRestSource. (This transport has no live
+            // caller yet — the fix pre-empts the trap for whoever wires venue's `http` feature.)
             agent: ureq::AgentBuilder::new()
                 .timeout(std::time::Duration::from_secs(30))
+                .tls_connector(std::sync::Arc::new(
+                    native_tls::TlsConnector::new().expect("initialize the system TLS backend"),
+                ))
                 .build(),
             base: base.into(),
         }

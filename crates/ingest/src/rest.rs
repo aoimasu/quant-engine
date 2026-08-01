@@ -173,8 +173,15 @@ impl HttpRestSource {
     #[must_use]
     pub fn new(base: impl Into<String>) -> Self {
         Self {
+            // QE-494: with `default-features = false` ureq has NO TLS backend, so the connector must
+            // be wired explicitly — without it every https:// request fails at runtime ("Unknown
+            // Scheme: … no TLS backend is configured"). System TLS init failing is unrecoverable for
+            // an https-only client, so `expect` (policy: QE-268) at construction is the honest stop.
             agent: ureq::AgentBuilder::new()
                 .timeout(std::time::Duration::from_secs(30))
+                .tls_connector(std::sync::Arc::new(
+                    native_tls::TlsConnector::new().expect("initialize the system TLS backend"),
+                ))
                 .build(),
             base: base.into(),
         }

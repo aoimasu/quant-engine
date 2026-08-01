@@ -44,9 +44,14 @@ impl HttpFetcher {
     /// A fetcher with sensible default timeouts.
     #[must_use]
     pub fn new() -> Self {
+        // QE-494: wire the system TLS backend explicitly — `default-features = false` ureq has none,
+        // and without it every https:// request fails at runtime (see `HttpRestSource::new`).
         let agent = ureq::AgentBuilder::new()
             .timeout_connect(std::time::Duration::from_secs(10))
             .timeout_read(std::time::Duration::from_secs(60))
+            .tls_connector(std::sync::Arc::new(
+                native_tls::TlsConnector::new().expect("initialize the system TLS backend"),
+            ))
             .build();
         Self { agent }
     }
