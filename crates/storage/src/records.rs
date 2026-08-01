@@ -20,6 +20,19 @@ pub struct PremiumSample {
     pub premium: Decimal,
 }
 
+/// Open-interest sample: the venue's aggregate open interest for an instrument at a point in time
+/// (QE-497). Sourced from Binance `/futures/data/openInterestHist` (`sumOpenInterest`, in base units).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenInterestSample {
+    /// The instrument the sample applies to.
+    pub instrument: InstrumentId,
+    /// When the sample was taken (UTC).
+    pub time: Timestamp,
+    /// Aggregate open interest in base units (`sumOpenInterest`).
+    #[serde(with = "rust_decimal::serde::str")]
+    pub open_interest: Decimal,
+}
+
 /// Futures positioning/liquidity metrics for an instrument at a point in time.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FuturesMetrics {

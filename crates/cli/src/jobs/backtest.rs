@@ -119,10 +119,11 @@ pub fn run_backtest(
     }
     let funding = store.scan_funding(&primary, from, to)?;
     let premium = store.scan_premium(&primary, from, to)?;
+    let open_interest = store.scan_open_interest(&primary, from, to)?;
 
     // ---- features --------------------------------------------------------------------------------
     progress(50, "features", "assembling decision bars");
-    let decision_bars = to_decision_bars(&bars, &funding, &premium);
+    let decision_bars = to_decision_bars(&bars, &funding, &premium, &open_interest);
 
     // ---- simulate --------------------------------------------------------------------------------
     progress(80, "simulate", "running chromosomes");
