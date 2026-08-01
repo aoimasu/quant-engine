@@ -1944,6 +1944,7 @@ dependencies = [
 name = "qe-venue"
 version = "0.1.0"
 dependencies = [
+ "native-tls",
  "qe-domain",
  "qe-error",
  "rust_decimal",

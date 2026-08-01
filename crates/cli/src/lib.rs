@@ -94,16 +94,24 @@ pub struct TrainOptions {
 /// `key=value` lines — byte-stable for identical inputs (QE-006), distinct whenever any effective
 /// parameter differs — prefixed `params-sha256:` so it can never be mistaken for a future real
 /// input-data snapshot id.
+///
+/// The encoding is **length-prefixed** (each key and value is preceded by its byte length + `:`), not
+/// delimiter-separated, so it is injective for *any* byte content — a value containing a newline or `=`
+/// cannot forge a different parameter set's digest (QE-496 review R2.1). CLI values are parse-validated
+/// today, but a hash used as a primary key must be collision-free by construction, not by the caller's
+/// hygiene.
 fn run_fingerprint(kind: &str, parts: &[(&str, String)]) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
-    hasher.update(kind.as_bytes());
-    hasher.update(b"\n");
+    let mut field = |bytes: &[u8]| {
+        hasher.update(bytes.len().to_string().as_bytes());
+        hasher.update(b":");
+        hasher.update(bytes);
+    };
+    field(kind.as_bytes());
     for (k, v) in parts {
-        hasher.update(k.as_bytes());
-        hasher.update(b"=");
-        hasher.update(v.as_bytes());
-        hasher.update(b"\n");
+        field(k.as_bytes());
+        field(v.as_bytes());
     }
     let digest = hasher.finalize();
     let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
@@ -286,7 +294,7 @@ pub fn run_evolve(
             ("start", opts.start.clone()),
             ("end", opts.end.clone()),
             ("resolution", opts.resolution.clone()),
-            ("mode", format!("{:?}", opts.mode)),
+            ("mode", opts.mode.as_str().to_owned()),
             ("generations", opts.generations.to_string()),
             ("offspring", opts.offspring.to_string()),
             ("states", opts.states.to_string()),
@@ -815,10 +823,20 @@ mod tests {
             run_fingerprint("evolve", &base),
             "train and evolve must never collide"
         );
-        // key=value boundary is unambiguous (["ab","c"] vs ["a","bc"])
+        // key/value boundary is unambiguous (["ab","c"] vs ["a","bc"])
         let x = run_fingerprint("t", &[("ab", "c".to_owned())]);
         let y = run_fingerprint("t", &[("a", "bc".to_owned())]);
-        assert_ne!(x, y, "key/value concatenation must not be ambiguous");
+        assert_ne!(x, y, "key/value split must not be ambiguous");
+        // R2.1: a value carrying the old delimiter class ('=' / newline) must not forge another param
+        // set — the length-prefix makes the encoding injective. Under the old `key=value\n` join, the
+        // pair ("a","x\nb=y") and the two-field set [("a","x"),("b","y")] both serialized to
+        // "a=x\nb=y\n"; length-prefixing distinguishes them.
+        let forged = run_fingerprint("t", &[("a", "x\nb=y".to_owned())]);
+        let real = run_fingerprint("t", &[("a", "x".to_owned()), ("b", "y".to_owned())]);
+        assert_ne!(
+            forged, real,
+            "a delimiter-bearing value must not collide with a real two-field set"
+        );
     }
 
     #[test]
