@@ -8,6 +8,7 @@ pub mod evolve;
 pub mod features;
 pub mod ingest;
 pub mod metrics;
+pub mod pool_intake;
 pub mod result;
 pub mod train;
 
@@ -189,5 +190,65 @@ pub enum RunError {
         path: String,
         /// The underlying error.
         source: io::Error,
+    },
+
+    // ---- QE-499 Phase B — `--pool` train-intake governance (B5) + §4 majors ------------------------
+    /// The `--pool` id could not be loaded/verified from the sandbox pool repository (a missing pool
+    /// artefact ⇒ hard error; a tampered pool fails its content-hash verify) — the B4 fail-closed boundary.
+    #[error("formula pool `{pool_id}` could not be loaded/verified: {reason}")]
+    PoolLoad {
+        /// The requested `--pool` id.
+        pool_id: String,
+        /// The underlying formula-pool error (missing file, hash mismatch, deserialise).
+        reason: String,
+    },
+    /// B5: only a **Sandbox** pool may enter the catalogue-injection bridge; a Production (or other) pool
+    /// must go through the QE-454 production seal path, not this research mechanism.
+    #[error("formula pool `{pool_id}` is not Sandbox mode ({mode}); the --pool bridge admits Sandbox pools only")]
+    PoolNotSandbox {
+        /// The requested `--pool` id.
+        pool_id: String,
+        /// The pool's sealed mode.
+        mode: String,
+    },
+    /// §4 major: a pool whose deflation summary is **not GP-aware** (`gp_aware == false`) is a HARD ERROR at
+    /// intake — its trial basis was the blind analytic floor, not the real GP-aware trial counter, so its
+    /// composed deflation would be dishonest.
+    #[error("formula pool `{pool_id}` has gp_aware=false — the GP-aware trial basis is a hard requirement for the --pool bridge (§4)")]
+    PoolNotGpAware {
+        /// The requested `--pool` id.
+        pool_id: String,
+    },
+    /// B5: the pool carries no per-formula `gate_evidence`, or a formula lacks a passing evidence row —
+    /// formulas may enter a vintage only with present-and-passing tradability/parsimony evidence (§13.5).
+    #[error("formula pool `{pool_id}` gate_evidence is absent or incomplete (formula `{formula_hash}` unevidenced) — required present-and-passing for the --pool bridge (B5)")]
+    PoolGateEvidenceMissing {
+        /// The requested `--pool` id.
+        pool_id: String,
+        /// The formula lacking passing evidence.
+        formula_hash: String,
+    },
+    /// B5: a per-formula `gate_evidence` row is present but does **not** pass all of hard-blocks 5–8.
+    #[error("formula pool gate_evidence for `{formula_hash}` does not pass hard-blocks 5–8 (B5)")]
+    PoolGateEvidenceFailed {
+        /// The failing formula.
+        formula_hash: String,
+    },
+    /// A sealed `PoolFormula` sexpr did not parse back to an `Expr` (B6 reconstruction failed).
+    #[error("formula pool sexpr for `{formula_hash}` failed to parse: {reason}")]
+    PoolFormulaParse {
+        /// The offending formula.
+        formula_hash: String,
+        /// The parse error.
+        reason: String,
+    },
+    /// A sealed `PoolFormula`'s recomputed canonical hash does not match its stored `formula_hash` — the
+    /// sexpr and hash disagree (a tampered or malformed pool entry). Fail closed.
+    #[error("formula pool sexpr/hash mismatch: stored `{stored}`, recomputed `{recomputed}`")]
+    PoolFormulaHashMismatch {
+        /// The stored (claimed) formula hash.
+        stored: String,
+        /// The hash recomputed from the stored sexpr.
+        recomputed: String,
     },
 }
