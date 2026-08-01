@@ -990,14 +990,26 @@ fn qe499_pool_train_widens_identity_composes_deflation_and_is_non_production() {
 
     // A --pool train over the fixture (un-steered).
     let root = tmp.path().join("artifacts/pool");
+    let mut lines: Vec<ProgressLine> = Vec::new();
     let outcome = run_train_job(
         &TrainParams {
             pool: Some(intake),
             ..params(store_path.clone(), root.clone(), 42)
         },
-        &mut |_| {},
+        &mut |l| lines.push(l),
     )
     .expect("a --pool train seals");
+
+    // (§6 data-window provenance) The unverifiable evolve/train overlap is surfaced as a warning, never a
+    // silent pass (the fixture pool has an empty input_snapshot_id, so disjointness cannot be asserted).
+    assert!(
+        lines.iter().any(|l| matches!(
+            l,
+            ProgressLine::Progress { stage, msg, .. }
+                if stage == "warn" && msg.contains("data-window provenance")
+        )),
+        "a --pool train must warn when the evolve/train window disjointness is unverifiable"
+    );
 
     // The written vintage: read WITHOUT the generic schema assert (which rejects pool vintages by design).
     let file = std::fs::File::open(&outcome.vintage_path).unwrap();

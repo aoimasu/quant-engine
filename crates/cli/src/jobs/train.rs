@@ -581,6 +581,31 @@ pub fn run_train_job(
     };
     let schema = FeatureSchema::from_catalogue(&cfg);
 
+    // ---- QE-499 data-window provenance major (design §6): warn on an unverifiable evolve/train overlap ----
+    // An evolve-fit formula scored by G1 over bars that OVERLAP its evolve window is in-sample-contaminated
+    // regardless of the deflation count. Full enforcement is a disjoint-window/embargo assertion between the
+    // pool's evolve window and this train/holdout window — but the sealed pool artefact does not (yet) record
+    // its evolve window (`PoolLineage.input_snapshot_id` is empty until the ingest-snapshot seam lands). So we
+    // surface the risk as a hard, auditable WARNING here (never a silent pass) and DEFER the assertion to when
+    // the pool records its window. The vintage still binds the exact pool via `catalogue.formula_pool`, so the
+    // overlap is auditable post-hoc from the campaign lineage.
+    if let Some(pool) = params.pool.as_ref() {
+        if pool.input_snapshot_id.is_empty() {
+            progress(
+                emit,
+                20,
+                "warn",
+                &format!(
+                    "data-window provenance UNVERIFIED: pool `{}` records no evolve window \
+                     (input_snapshot_id empty) — cannot assert the G1 train/holdout window is disjoint \
+                     from the formulas' evolve window; an overlap would be in-sample contamination (§6). \
+                     Ensure the train window does not overlap the evolve campaign's window.",
+                    pool.campaign_id
+                ),
+            );
+        }
+    }
+
     // ---- QE-458 steer setup (steered-runs-only; un-steered ⇒ byte-identical seal) -----------------
     // A run is STEERED iff any steer knob is set. Un-steered runs take every default below and produce a
     // byte-identical vintage to the pre-QE-458 path (no golden move, no basis/version bump).

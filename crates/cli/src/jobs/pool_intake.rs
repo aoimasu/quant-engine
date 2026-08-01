@@ -39,6 +39,14 @@ pub struct PoolIntake {
     pub deflation_floor: DeflationFloor,
     /// The §4 **additive** pool trial basis (`pool.deflation.n_trials`) summed onto the genome basis.
     pub pool_n_trials: usize,
+    /// The pool's campaign id (for the data-window provenance audit trail).
+    pub campaign_id: String,
+    /// The pool's pinned input-snapshot id (design §6 **data-window provenance** major). **Empty** until the
+    /// evolve ingest-snapshot seam lands — an empty value means the train **cannot verify** that the G1
+    /// train/holdout window is disjoint from the formulas' evolve window (an overlap is in-sample
+    /// contamination regardless of trial counting). The train surfaces a warning in that case; a real
+    /// disjoint-window/embargo assertion is deferred to when the pool artefact records its evolve window.
+    pub input_snapshot_id: String,
 }
 
 /// Admit a sealed [`FormulaPool`] into a train, compiling its formulas and extracting the §4 deflation
@@ -146,6 +154,8 @@ pub fn admit_pool(pool: &FormulaPool, states: u16) -> Result<PoolIntake, RunErro
             expected_max_sharpe,
         },
         pool_n_trials: content.deflation.n_trials as usize,
+        campaign_id: content.lineage.campaign_id.clone(),
+        input_snapshot_id: content.lineage.input_snapshot_id.clone(),
     })
 }
 
