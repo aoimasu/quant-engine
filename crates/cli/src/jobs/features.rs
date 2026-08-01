@@ -26,7 +26,7 @@ use std::collections::BTreeMap;
 
 use qe_domain::{Bar as OhlcvBar, FundingRateSample};
 use qe_signal::{assemble_batch, CatalogueConfig, FeatureSchema, Genome, Sample};
-use qe_storage::PremiumSample;
+use qe_storage::{OpenInterestSample, PremiumSample};
 use qe_wfo::backtest::Bar as DecisionBar;
 use rust_decimal::Decimal;
 
@@ -81,15 +81,18 @@ fn round_to_hour_ms(ms: i64) -> i64 {
 /// price and funding rate.
 ///
 /// **Funding** samples are matched to a bar after nearest-hour rounding of the sparse, jittery venue
-/// stamp (QE-495). **Premium** samples are joined by **exact** open-time equality — they are dense,
-/// on-grid kline data with no jitter, so the exact join is already correct and rounding them would
-/// mis-attach on sub-hour bars (review R3.1). A bar with no matching stamp carries `funding_rate =
-/// None`. The returned vector is aligned one-to-one with `bars`.
+/// stamp (QE-495). **Premium** and **open-interest** samples are joined by **exact** open-time equality
+/// (QE-497) — they are dense, on-grid kline/period data with no jitter, so the exact join is already
+/// correct and rounding them would mis-attach on sub-hour bars (review R3.1). A bar with no matching
+/// stamp for a given series carries `None` for it (funding_rate/open_interest/premium), so the flow
+/// indicators (`oi_roc_10`, `premium_state`, `funding_*`) simply skip that step. The returned vector is
+/// aligned one-to-one with `bars`.
 #[must_use]
 pub fn to_decision_bars(
     bars: &[OhlcvBar],
     funding: &[FundingRateSample],
     premium: &[PremiumSample],
+    open_interest: &[OpenInterestSample],
 ) -> Vec<DecisionBar> {
     let funding_by_ms: BTreeMap<i64, Decimal> = funding
         .iter()
@@ -99,6 +102,11 @@ pub fn to_decision_bars(
         .iter()
         .map(|p| (p.time.millis(), p.premium))
         .collect();
+    // Exact-on-grid join (no jitter class like funding) — QE-497.
+    let oi_by_ms: BTreeMap<i64, Decimal> = open_interest
+        .iter()
+        .map(|o| (o.time.millis(), o.open_interest))
+        .collect();
 
     let samples: Vec<Sample> = bars
         .iter()
@@ -107,7 +115,7 @@ pub fn to_decision_bars(
             Sample {
                 bar: b.clone(),
                 funding: funding_by_ms.get(&ms).copied(),
-                open_interest: None,
+                open_interest: oi_by_ms.get(&ms).copied(),
                 premium: premium_by_ms.get(&ms).copied(),
             }
         })
@@ -167,7 +175,7 @@ mod tests {
             time: Timestamp::from_millis(8 * H + 1),
             rate: FundingRate::new(Decimal::new(1, 4)),
         }];
-        let db = to_decision_bars(&bars, &funding, &[]);
+        let db = to_decision_bars(&bars, &funding, &[], &[]);
         assert_eq!(db.len(), 24);
         assert!(
             db[8].funding_rate.is_some(),
@@ -196,6 +204,98 @@ mod tests {
                                                           // 8h stamp: 8h+29:59.999 → 8h; 8h+30:00 → 9h (a no-bar hour ⇒ simply unmatched, not wrong).
         assert_eq!(round_to_hour_ms(8 * H + 30 * 60_000 - 1), 8 * H);
         assert_eq!(round_to_hour_ms(8 * H + 30 * 60_000), 9 * H);
+    }
+
+    /// QE-497: with open-interest + premium populated, the two previously-dead flow indicators
+    /// (`oi_roc_10`, `premium_state`) now produce **non-constant** features; with the series empty (the
+    /// pre-QE-497 behaviour) their slots stay all-`None` (dead). Proven end-to-end through
+    /// `to_decision_bars`, so the join → `Sample` → catalogue path is what revives them.
+    #[test]
+    fn open_interest_and_premium_revive_the_dead_flow_indicators() {
+        use qe_domain::{Bar, InstrumentId, Price, Qty, Resolution, Timestamp};
+        use qe_storage::{OpenInterestSample, PremiumSample};
+        const H: i64 = 3_600_000;
+        let inst = InstrumentId::new("BTCUSDT").unwrap();
+        let px = |v: i64| Price::new(Decimal::from(v)).unwrap();
+
+        // 48 hourly bars — well past oi_roc_10's 11-scalar warmup.
+        let n = 48i64;
+        let bars: Vec<Bar> = (0..n)
+            .map(|i| {
+                Bar::new(
+                    Timestamp::from_millis(i * H),
+                    Resolution::H1,
+                    px(100),
+                    px(101),
+                    px(99),
+                    px(100),
+                    Qty::new(Decimal::from(10)).unwrap(),
+                    1,
+                )
+                .unwrap()
+            })
+            .collect();
+        // Open interest as a triangle wave (ramp up then down) → its 11-window rate-of-change sweeps
+        // from clearly positive to clearly negative, crossing multiple quantiser buckets. (A short-period
+        // sawtooth would alias against the 11-wide window and read as a constant zero ROC.)
+        let open_interest: Vec<OpenInterestSample> = (0..n)
+            .map(|i| {
+                let ramp = if i < n / 2 { i } else { n - 1 - i };
+                OpenInterestSample {
+                    instrument: inst.clone(),
+                    time: Timestamp::from_millis(i * H),
+                    open_interest: Decimal::from(100_000 + 1_500 * ramp),
+                }
+            })
+            .collect();
+        // Premium ramps across the ±1% band → its quantised state sweeps multiple buckets.
+        let premium: Vec<PremiumSample> = (0..n)
+            .map(|i| PremiumSample {
+                instrument: inst.clone(),
+                time: Timestamp::from_millis(i * H),
+                premium: Decimal::new(-80 + 3 * i, 4),
+            })
+            .collect();
+
+        let schema = catalogue_schema();
+        let idx = |id: &str| {
+            schema
+                .ids()
+                .iter()
+                .position(|s| s == id)
+                .unwrap_or_else(|| panic!("indicator {id} missing from catalogue"))
+        };
+        let oi_idx = idx("oi_roc_10");
+        let prem_idx = idx("premium_state");
+
+        // Distinct Some-states a slot takes across all decision bars.
+        let distinct = |db: &[DecisionBar], slot: usize| {
+            db.iter()
+                .filter_map(|b| b.features.states[slot].map(|q| q.index()))
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+
+        // Populated: both indicators warm AND vary (non-constant).
+        let live = to_decision_bars(&bars, &[], &premium, &open_interest);
+        assert!(
+            distinct(&live, oi_idx).len() >= 2,
+            "oi_roc_10 must be non-constant once open interest is present"
+        );
+        assert!(
+            distinct(&live, prem_idx).len() >= 2,
+            "premium_state must be non-constant once premium is present"
+        );
+
+        // Empty (pre-QE-497): both slots stay dead (all None), proving the data is what revives them.
+        let dead = to_decision_bars(&bars, &[], &[], &[]);
+        assert!(
+            dead.iter().all(|b| b.features.states[oi_idx].is_none()),
+            "without open interest, oi_roc_10 stays dead"
+        );
+        assert!(
+            dead.iter().all(|b| b.features.states[prem_idx].is_none()),
+            "without premium, premium_state stays dead"
+        );
     }
 
     fn clause(feature: u16, lo: u16, hi: u16) -> Clause {

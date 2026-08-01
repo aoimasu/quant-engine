@@ -1,9 +1,10 @@
-//! Binance USDT-M historical decoder — klines + historical funding (QE-463).
+//! Binance USDT-M historical decoder — klines + historical funding + open-interest + premium (QE-463,
+//! QE-497).
 //!
 //! The **long pole** of the research flow: a real one-exchange historical ingest, plugged into the
 //! existing REST port ([`crate::rest`]) + paginator ([`crate::backfill::Backfiller`]) and the
 //! `HistoricalSource` seam (the CLI adapter maps [`IngestedWindow`] → the runtime `HistoricalWindow`).
-//! Deliberately thin: **one** exchange, USDT-M perps, klines + funding, historical only.
+//! Deliberately thin: **one** exchange, USDT-M perps, historical only.
 //!
 //! Every piece here is a **pure function of its inputs** (decoding from bytes, closed-window filtering
 //! against an injected `now_ms`, missing-window planning against an injected coverage set) driven over
@@ -11,12 +12,20 @@
 //! no live network in any test. The real network client ([`crate::rest::HttpRestSource`]) is the only
 //! `http`-gated piece; the logic below is always compiled and tested.
 //!
+//! ## Optional factors degrade gracefully (QE-497)
+//! Klines and funding are **required** — a fetch/decode failure fails the whole window (fail-closed).
+//! Open-interest and premium are **optional positioning/basis factors**: a symbol/venue lacking one, or
+//! a window beyond the venue's retention for that series, must not abort the ingest. So the OI and
+//! premium sub-fetches are **fail-open** — a REST or decode error there yields an empty series and the
+//! bars + funding still land. (Binance `/futures/data/openInterestHist` only retains ~30 days and
+//! rejects an older `startTime` outright with code `-1130`, so an old-window OI fetch legitimately
+//! degrades to empty rather than failing the ingest.)
+//!
 //! ## Calibration honesty (QE-455 §8.5)
-//! This is a **klines-only** slice: it fetches OHLCV + funding and **does not** fetch aggTrade /
-//! premium-index, so it never fabricates slippage/impact/ADV inputs. The result carries
-//! [`CalibrationSource::Uncalibrated`] so a vintage derived from it is tagged *default, not measured*
-//! (surfacing that tag into coverage/lineage is QE-464/QE-467). Open-interest / mark-price are dropped
-//! by `run_ingest` today, so they are not fetched here either.
+//! Even with premium/OI wired, this stays a **calibration-uncalibrated** slice: it does **not** fetch
+//! aggTrade, so it never fabricates slippage/impact/ADV inputs. The result still carries
+//! [`CalibrationSource::Uncalibrated`] — richer factor breadth (positioning/basis) is not execution
+//! calibration, and the liquidity flag is not flipped by this ticket.
 
 use std::collections::BTreeSet;
 use std::str::FromStr;
@@ -56,7 +65,15 @@ pub struct IngestedWindow {
     pub bars: Vec<Bar>,
     /// Settled funding observations `(fundingTime_ms, rate)`, ascending, deduped.
     pub funding: Vec<(i64, Decimal)>,
-    /// Calibration provenance — always [`CalibrationSource::Uncalibrated`] for this klines-only slice.
+    /// Open-interest observations `(timestamp_ms, sumOpenInterest)`, ascending, deduped (QE-497).
+    /// **Optional** — empty when the venue lacks the series over the window (fail-open, see the module
+    /// docs); the bars + funding are still populated.
+    pub open_interest: Vec<(i64, Decimal)>,
+    /// Premium-index observations `(openTime_ms, premium)`, ascending, deduped (QE-497). **Optional** —
+    /// empty when unavailable over the window (fail-open); on the closed bar grid with no jitter.
+    pub premium: Vec<(i64, Decimal)>,
+    /// Calibration provenance — always [`CalibrationSource::Uncalibrated`]: klines-only calibration
+    /// (no aggTrade/ADV), even though positioning/basis factors are now populated (QE-497).
     pub calibration_source: CalibrationSource,
 }
 
@@ -150,6 +167,69 @@ pub fn decode_funding(rows: &[TimedRow]) -> Result<Vec<(i64, Decimal)>, IngestEr
     rows.iter().map(|r| decode_funding_row(&r.raw)).collect()
 }
 
+/// Decode one `/futures/data/openInterestHist` object
+/// `{"sumOpenInterest":"…","sumOpenInterestValue":"…","timestamp": ms, …}` into
+/// `(timestamp_ms, sumOpenInterest)` — the aggregate open interest in base units (QE-497).
+///
+/// # Errors
+/// [`IngestError::Rest`] if the row is not the expected object shape or `sumOpenInterest` fails to parse.
+pub fn decode_open_interest_row(raw: &str) -> Result<(i64, Decimal), IngestError> {
+    let v: serde_json::Value = serde_json::from_str(raw)
+        .map_err(|e| IngestError::Rest(format!("open-interest json: {e}")))?;
+    let obj = v
+        .as_object()
+        .ok_or_else(|| IngestError::Rest("open-interest row is not a JSON object".to_owned()))?;
+    let ts = obj
+        .get("timestamp")
+        .and_then(serde_json::Value::as_i64)
+        .ok_or_else(|| IngestError::Rest("open-interest row missing timestamp".to_owned()))?;
+    let oi_s = obj
+        .get("sumOpenInterest")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| IngestError::Rest("open-interest row missing sumOpenInterest".to_owned()))?;
+    let oi = Decimal::from_str(oi_s)
+        .map_err(|e| IngestError::Rest(format!("open-interest bad decimal {oi_s}: {e}")))?;
+    Ok((ts, oi))
+}
+
+/// Decode a page of open-interest rows into `(timestamp_ms, sumOpenInterest)` observations, row order.
+///
+/// # Errors
+/// [`IngestError::Rest`] if any row fails to decode (see [`decode_open_interest_row`]).
+pub fn decode_open_interest(rows: &[TimedRow]) -> Result<Vec<(i64, Decimal)>, IngestError> {
+    rows.iter()
+        .map(|r| decode_open_interest_row(&r.raw))
+        .collect()
+}
+
+/// Decode one `/fapi/v1/premiumIndexKlines` array row
+/// `[openTime, "open","high","low","close", …]` into `(openTime_ms, close)` — the premium index at the
+/// bar close, as a signed fraction (QE-497).
+///
+/// # Errors
+/// [`IngestError::Rest`] if the row is not the expected array shape or `close` fails to parse.
+pub fn decode_premium_row(raw: &str) -> Result<(i64, Decimal), IngestError> {
+    let v: serde_json::Value =
+        serde_json::from_str(raw).map_err(|e| IngestError::Rest(format!("premium json: {e}")))?;
+    let cols = v
+        .as_array()
+        .ok_or_else(|| IngestError::Rest("premium row is not a JSON array".to_owned()))?;
+    let open_time = col_i64(cols, 0, "openTime")?;
+    let close = col_dec(cols, 4, "close")?;
+    Ok((open_time, close))
+}
+
+/// Decode a page of premium-index kline rows into `(openTime_ms, premium)` observations, row order.
+///
+/// # Errors
+/// [`IngestError::Rest`] if any row fails to decode (see [`decode_premium_row`]).
+pub fn decode_premium(rows: &[TimedRow]) -> Result<Vec<(i64, Decimal)>, IngestError> {
+    rows.iter().map(|r| decode_premium_row(&r.raw)).collect()
+}
+
+/// A page decoder for an optional `(timestamp_ms, value)` context series (open-interest / premium).
+type ContextDecoder = fn(&[TimedRow]) -> Result<Vec<(i64, Decimal)>, IngestError>;
+
 // --- closed-window filtering ----------------------------------------------------------------------
 
 /// Keep only **closed** bars: a bar with open-time `T` at `interval` is closed iff `T + interval <=
@@ -171,6 +251,18 @@ pub fn closed_funding(mut funding: Vec<(i64, Decimal)>, now_ms: i64) -> Vec<(i64
     funding.sort_by_key(|(t, _)| *t);
     funding.dedup_by_key(|(t, _)| *t);
     funding
+}
+
+/// Keep only **closed** `(ts, value)` context observations on a `step` grid (open-interest / premium):
+/// a sample at open-time `T` is closed iff `T + step <= now_ms`, which **excludes the forming
+/// right-edge sample** — the same rule as [`closed_klines`]. Returns them ascending and deduped so a
+/// re-fetch is byte-identical (QE-497).
+#[must_use]
+pub fn closed_series(mut obs: Vec<(i64, Decimal)>, now_ms: i64, step: i64) -> Vec<(i64, Decimal)> {
+    obs.retain(|(t, _)| t.saturating_add(step) <= now_ms);
+    obs.sort_by_key(|(t, _)| *t);
+    obs.dedup_by_key(|(t, _)| *t);
+    obs
 }
 
 // --- incremental / resume / internal-gap planning -------------------------------------------------
@@ -276,6 +368,27 @@ impl<S: RestSource, Sl: Sleeper> BinanceHistorical<S, Sl> {
         Ok(rows)
     }
 
+    /// Page + decode a whole **optional** context series (open-interest / premium) over `[from, to]` at
+    /// grid `step`, closed-window filtered. There is no incremental present-set for these yet, so the
+    /// whole window is planned as one run. Returns an `Err` on any REST/decode failure — the caller is
+    /// expected to treat that as an empty series (fail-open), so a missing/lagging optional factor never
+    /// aborts the ingest (QE-497).
+    fn fetch_context_series(
+        &self,
+        req: &WindowRequest,
+        endpoint: RestEndpoint,
+        step: i64,
+        to: i64,
+        decode: ContextDecoder,
+    ) -> Result<Vec<(i64, Decimal)>, IngestError> {
+        let mut out = Vec::new();
+        for (a, b) in plan_missing(req.from_ms, to, step, &BTreeSet::new()) {
+            let rows = self.page(endpoint, &req.symbol, step, a, b, req.limit)?;
+            out.extend(decode(&rows)?);
+        }
+        Ok(closed_series(out, req.now_ms, step))
+    }
+
     /// Fetch the closed, incremental window: for both klines and funding, plan the missing sub-windows
     /// against `present_bars` / `present_funding`, page + decode each, then closed-window filter.
     ///
@@ -321,10 +434,35 @@ impl<S: RestSource, Sl: Sleeper> BinanceHistorical<S, Sl> {
         }
         let funding = closed_funding(funding, req.now_ms);
 
+        // Optional positioning/basis factors (QE-497). Fail-open: a REST/decode error — e.g. the ~30-day
+        // `openInterestHist` retention rejecting an older `startTime` with HTTP 400 / code -1130 —
+        // degrades to an empty series so bars + funding still land. Only klines/funding are fail-closed.
+        let ctx_to = req.to_ms.min(req.now_ms);
+        let open_interest = self
+            .fetch_context_series(
+                req,
+                RestEndpoint::OpenInterestHist(req.resolution),
+                interval,
+                ctx_to,
+                decode_open_interest,
+            )
+            .unwrap_or_default();
+        let premium = self
+            .fetch_context_series(
+                req,
+                RestEndpoint::PremiumIndexKlines(req.resolution),
+                interval,
+                ctx_to,
+                decode_premium,
+            )
+            .unwrap_or_default();
+
         Ok(IngestedWindow {
             base: req.resolution,
             bars,
             funding,
+            open_interest,
+            premium,
             calibration_source: CalibrationSource::Uncalibrated,
         })
     }
@@ -612,5 +750,165 @@ mod tests {
             slots(0, 9, M5),
             "forming right-edge bar excluded end-to-end"
         );
+    }
+
+    // --- QE-497: optional open-interest + premium factors -------------------------------------
+
+    #[test]
+    fn decodes_open_interest_and_premium_rows() {
+        let (ts, oi) = decode_open_interest_row(
+            r#"{"symbol":"BTCUSDT","sumOpenInterest":"109049.57600000","sumOpenInterestValue":"6.8e9","timestamp":1704067200000}"#,
+        )
+        .unwrap();
+        assert_eq!(ts, 1_704_067_200_000);
+        assert_eq!(oi, Decimal::from_str("109049.576").unwrap());
+
+        // premiumIndexKlines is a kline array; the premium is the close (element 4).
+        let (pts, prem) = decode_premium_row(
+            r#"[1704067200000,"0.00075030","0.00137721","0.00051408","0.00068158","0",1704070799999,"0",720]"#,
+        )
+        .unwrap();
+        assert_eq!(pts, 1_704_067_200_000);
+        assert_eq!(prem, Decimal::from_str("0.00068158").unwrap());
+
+        // Malformed rows are decode errors, never silent zeros.
+        assert!(decode_open_interest_row("not json").is_err());
+        assert!(decode_open_interest_row(r#"{"timestamp":1}"#).is_err()); // missing sumOpenInterest
+        assert!(decode_premium_row(r#"{"not":"array"}"#).is_err());
+    }
+
+    /// A fake serving klines + OI + premium. `oi_errors` makes the OI endpoint return a fatal REST error
+    /// (mimicking the ~30-day `openInterestHist` retention / HTTP 400 -1130), to exercise the fail-open
+    /// path where bars + funding + premium still land.
+    struct FakeFull {
+        klines: Vec<TimedRow>,
+        oi: Vec<TimedRow>,
+        premium: Vec<TimedRow>,
+        oi_errors: bool,
+    }
+    impl RestSource for FakeFull {
+        fn fetch_page(&self, req: &PageRequest) -> Result<Vec<TimedRow>, RestError> {
+            let rows = match req.endpoint {
+                RestEndpoint::Klines(_) => &self.klines,
+                RestEndpoint::OpenInterestHist(_) => {
+                    if self.oi_errors {
+                        return Err(RestError::Fatal("http 400".to_owned()));
+                    }
+                    &self.oi
+                }
+                RestEndpoint::PremiumIndexKlines(_) => &self.premium,
+                _ => return Ok(Vec::new()),
+            };
+            Ok(rows
+                .iter()
+                .filter(|r| r.open_time_ms >= req.start_ms)
+                .take(req.limit as usize)
+                .cloned()
+                .collect())
+        }
+    }
+
+    fn oi_rows(open_times: &[i64]) -> Vec<TimedRow> {
+        open_times
+            .iter()
+            .enumerate()
+            .map(|(i, &t)| TimedRow {
+                open_time_ms: t,
+                raw: format!(
+                    r#"{{"symbol":"BTCUSDT","sumOpenInterest":"{}.5","sumOpenInterestValue":"1.0","timestamp":{t}}}"#,
+                    1000 + i
+                ),
+            })
+            .collect()
+    }
+
+    fn premium_rows(open_times: &[i64]) -> Vec<TimedRow> {
+        open_times
+            .iter()
+            .map(|&t| TimedRow {
+                open_time_ms: t,
+                raw: format!(
+                    r#"[{t},"0.0001","0.0002","0.0000","0.00015","0",{},"0",1]"#,
+                    t + M5 - 1
+                ),
+            })
+            .collect()
+    }
+
+    fn full_source(
+        klines: &[i64],
+        oi: &[i64],
+        premium: &[i64],
+        oi_errors: bool,
+    ) -> BinanceHistorical<FakeFull> {
+        BinanceHistorical::new(Backfiller::new(
+            FakeFull {
+                klines: FakeRest::klines(klines).rows,
+                oi: oi_rows(oi),
+                premium: premium_rows(premium),
+                oi_errors,
+            },
+            RetryPolicy::default(),
+        ))
+    }
+
+    #[test]
+    fn fetch_populates_open_interest_and_premium_on_the_grid() {
+        let all = slots(0, 6, M5);
+        let src = full_source(&all, &all, &all, false);
+        let w = src
+            .fetch_window(
+                &req(0, 5 * M5, 100 * M5),
+                &BTreeSet::new(),
+                &BTreeSet::new(),
+            )
+            .unwrap();
+        assert_eq!(open_times(&w), all, "all closed bars present");
+        // Optional factors populated on the bar grid, ascending, closed-window filtered.
+        assert_eq!(
+            w.open_interest.iter().map(|(t, _)| *t).collect::<Vec<_>>(),
+            all
+        );
+        assert_eq!(w.open_interest[0].1, Decimal::from_str("1000.5").unwrap());
+        assert_eq!(w.premium.iter().map(|(t, _)| *t).collect::<Vec<_>>(), all);
+        assert_eq!(w.premium[0].1, Decimal::from_str("0.00015").unwrap());
+    }
+
+    #[test]
+    fn fetch_degrades_gracefully_when_open_interest_endpoint_fails() {
+        // QE-497 graceful degradation: OI endpoint errors (retention/-1130) but the ingest still yields
+        // bars + premium — the optional factor is simply empty, the whole window is NOT failed.
+        let all = slots(0, 6, M5);
+        let src = full_source(&all, &all, &all, /* oi_errors */ true);
+        let w = src
+            .fetch_window(
+                &req(0, 5 * M5, 100 * M5),
+                &BTreeSet::new(),
+                &BTreeSet::new(),
+            )
+            .expect("a failing optional OI series must not fail the whole fetch");
+        assert_eq!(open_times(&w), all, "bars still fetched despite OI failure");
+        assert!(
+            w.open_interest.is_empty(),
+            "OI degrades to empty (fail-open)"
+        );
+        assert!(
+            !w.premium.is_empty(),
+            "premium is independent and still populated"
+        );
+    }
+
+    #[test]
+    fn fetch_excludes_forming_right_edge_context_samples() {
+        // A premium/OI sample whose period is still forming (open + step > now) is dropped, mirroring the
+        // closed-kline rule, so a re-fetch is byte-identical.
+        let all = slots(0, 10, M5);
+        let src = full_source(&all, &all, &all, false);
+        let now = 9 * M5 + 1; // slot 9 still forming
+        let w = src
+            .fetch_window(&req(0, 9 * M5, now), &BTreeSet::new(), &BTreeSet::new())
+            .unwrap();
+        assert_eq!(w.open_interest.last().map(|(t, _)| *t), Some(8 * M5));
+        assert_eq!(w.premium.last().map(|(t, _)| *t), Some(8 * M5));
     }
 }

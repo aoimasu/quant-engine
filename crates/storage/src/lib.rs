@@ -16,7 +16,7 @@ pub mod synthetic;
 
 pub use coverage::{coverage, coverage_all, CoverageRow};
 pub use provenance::{Calibration, Provenance, ProvenanceSegment, ProvenanceSummary};
-pub use records::{FuturesMetrics, PremiumSample};
+pub use records::{FuturesMetrics, OpenInterestSample, PremiumSample};
 pub use store::{MarketStore, DEFAULT_MAP_SIZE};
 pub use synthetic::{IndicatorKey, SyntheticStore, SYNTHETIC_SCHEMA_VERSION};
 

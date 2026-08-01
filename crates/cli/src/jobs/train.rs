@@ -547,6 +547,7 @@ pub fn run_train_job(
     }
     let funding = store.scan_funding(&instrument, from, to)?;
     let premium = store.scan_premium(&instrument, from, to)?;
+    let open_interest = store.scan_open_interest(&instrument, from, to)?;
 
     // ---- features + split ------------------------------------------------------------------------
     progress(
@@ -586,7 +587,7 @@ pub fn run_train_job(
     let steer_windows = params.windows.unwrap_or(2);
     let steer_folds = params.folds.unwrap_or(params.cv_folds);
 
-    let decision_bars = to_decision_bars(&bars, &funding, &premium);
+    let decision_bars = to_decision_bars(&bars, &funding, &premium, &open_interest);
 
     // ---- funding-coverage gate (QE-403) ----------------------------------------------------------
     // Funding accrues only on bars carrying a stamp; a sparse/empty series would have every genome

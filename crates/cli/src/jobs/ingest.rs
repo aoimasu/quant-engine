@@ -13,7 +13,7 @@ use qe_domain::{
     Bar, FundingRate, FundingRateSample, InstrumentId, Price, Qty, Resolution, Timestamp,
 };
 use qe_runtime::{BootstrapError, HistoricalSource, HistoricalWindow};
-use qe_storage::{Calibration, MarketStore, PremiumSample, Provenance};
+use qe_storage::{Calibration, MarketStore, OpenInterestSample, PremiumSample, Provenance};
 use rand_core::RngCore;
 use rust_decimal::Decimal;
 
@@ -41,8 +41,9 @@ pub struct IngestParams {
 /// `progress(pct, stage, msg)`.
 ///
 /// The window carries no instrument id (it is implicitly one instrument's window), so bars are written
-/// under `params.instrument` at their own resolution. Open-interest / mark-price are not persisted (the
-/// store has no matching single-value slot and the backtest job does not scan them).
+/// under `params.instrument` at their own resolution. Funding, premium and open-interest (QE-497) are
+/// persisted alongside the bars; each optional series may be empty (fail-open) without failing the run.
+/// Mark-price is still not persisted (no store slot; the backtest job does not scan it).
 ///
 /// QE-464: the caller declares the batch's `provenance` (`real` for the QE-463 decoder, `synthetic` for
 /// the offline generator) and `calibration` (the QE-463 klines-only slice is `Uncalibrated` — its
@@ -98,14 +99,29 @@ pub fn run_ingest(
         .collect();
     store.put_premium(&premium)?;
 
+    // QE-497: persist the aggregate open-interest series. Optional/fail-open — an empty series (e.g. a
+    // window beyond Binance's ~30-day openInterestHist retention) simply writes nothing; the bars +
+    // funding above are unaffected, so a missing OI factor never fails the ingest.
+    let open_interest: Vec<OpenInterestSample> = window
+        .open_interest
+        .iter()
+        .map(|&(ts, oi)| OpenInterestSample {
+            instrument: instrument.clone(),
+            time: Timestamp::from_millis(ts),
+            open_interest: oi,
+        })
+        .collect();
+    store.put_open_interest(&open_interest)?;
+
     progress(
         95,
         "report",
         &format!(
-            "ingested {} bars, {} funding, {} premium",
+            "ingested {} bars, {} funding, {} premium, {} open-interest",
             window.bars.len(),
             funding.len(),
-            premium.len()
+            premium.len(),
+            open_interest.len()
         ),
     );
     Ok(())
@@ -265,11 +281,12 @@ impl HistoricalSource for SyntheticSource {
 // Real Binance USDT-M `HistoricalSource` (QE-463) — behind the default-off `http` feature.
 //
 // The composition-root adapter between the `qe-ingest` decoder (`BinanceHistorical`: plan-missing →
-// paginate → decode klines+funding → closed-window filter) and the runtime `HistoricalSource` seam
-// `run_ingest` writes through. It maps the decoder's `IngestedWindow` onto `HistoricalWindow`, filling
-// bars + funding and leaving premium/open-interest/mark-price EMPTY: this is the **klines-only**
-// calibration-honest slice (`CalibrationSource::Uncalibrated`) — no premium/impact/ADV inputs are
-// fabricated. (`run_ingest` discards open-interest/mark-price anyway.)
+// paginate → decode klines+funding+open-interest+premium → closed-window filter) and the runtime
+// `HistoricalSource` seam `run_ingest` writes through. It maps the decoder's `IngestedWindow` onto
+// `HistoricalWindow`, filling bars + funding + open-interest + premium (QE-497); the optional
+// positioning/basis series may be empty (fail-open). It stays the calibration-`Uncalibrated` slice
+// (`CalibrationSource::Uncalibrated`) — no aggTrade/impact/ADV inputs are fabricated; mark-price is
+// still unused (`run_ingest` does not persist it).
 //
 // All real-network code stays here behind `#[cfg(feature = "http")]`; the default build, the
 // `--synthetic` path, and the in-memory test sources above are untouched. Wiring the CLI command /
@@ -350,7 +367,10 @@ where
             .inner
             .fetch_window(&self.request, &self.present_bars, &self.present_funding)
             .map_err(|e| BootstrapError::Decode(e.to_string()))?;
-        // Klines-only calibration slice: premium / open-interest / mark-price stay empty (never faked).
+        // QE-497: open-interest + premium are now wired through (positioning/basis factors), and pass
+        // through here — they may be empty when the venue lacks the series over the window (fail-open in
+        // the decoder). This stays calibration-`Uncalibrated`: richer factor breadth is NOT execution
+        // calibration (no aggTrade/ADV), so the marker is unchanged. mark-price is still unused.
         debug_assert_eq!(
             window.calibration_source,
             qe_ingest::CalibrationSource::Uncalibrated
@@ -359,8 +379,8 @@ where
             base: window.base,
             bars: window.bars,
             funding: window.funding,
-            open_interest: Vec::new(),
-            premium: Vec::new(),
+            open_interest: window.open_interest,
+            premium: window.premium,
             mark_price: Vec::new(),
         })
     }

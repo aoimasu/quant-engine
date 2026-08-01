@@ -1,0 +1,87 @@
+# QE-498 — Expanded point-in-time universe of liquid USDT-M perps.
+#
+# A config VARIANT of config.example.toml: the default config keeps its BTC/ETH universe; this one
+# adds a curated set of deep, liquid perps so the edge hunt has more INDEPENDENT markets to search.
+#
+# IMPORTANT — training is SINGLE-INSTRUMENT. `qe train` trains over `instruments.first()`
+# (crates/cli/src/lib.rs), so this universe enables N independent per-symbol hunts — NOT a
+# cross-sectional signal. A cross-sectional / multi-instrument training mode is a separate, larger
+# ticket. There is NO `--instrument` flag: to hunt a specific market, make it the FIRST entry in the
+# `instruments` list below (or keep per-symbol config copies). `qe ingest --fetch-all` populates the
+# whole universe regardless of order.
+#
+# Listing dates below are the REAL Binance USDT-M perpetual listing dates, verified against the live
+# API (the earliest available `/fapi/v1/klines` open-time per symbol). They are enforced point-in-time
+# (QE-012): a bar before `listed` is never scanned, so there is no survivorship / pre-listing leakage.
+#
+# Factor note (QE-497): `qe ingest --features http` now populates PREMIUM over full history (reviving the
+# `premium_state` indicator) and OPEN-INTEREST only within Binance's ~31-day `openInterestHist` retention
+# — so a historical training window legitimately reports `0 open-interest` (a retention limit, not a bug),
+# and the `oi_roc_10` indicator stays dead there. Premium is the usable new factor for a historical hunt.
+
+profile = "train"
+
+# Flat universe (count-agnostic). For point-in-time membership use the [[universe]] table below;
+# when it is present it takes precedence over this list. Used verbatim by a plain `qe ingest`;
+# `--fetch-all` resolves the point-in-time [[universe]] instead.
+instruments = [
+    "BTCUSDT",
+    "ETHUSDT",
+    "SOLUSDT",
+    "BNBUSDT",
+    "XRPUSDT",
+    "ADAUSDT",
+    "DOGEUSDT",
+    "AVAXUSDT",
+]
+
+# Point-in-time universe: listing dates are respected so a backtest/ingest as-of some date only sees
+# instruments tradable then (no survivorship bias). `delisted` omitted = still trading. All dates are
+# the real Binance USDT-M perpetual listing dates (verified live 2026-08-01).
+[[universe]]
+instrument = "BTCUSDT"
+listed = "2019-09-08"
+
+[[universe]]
+instrument = "ETHUSDT"
+listed = "2019-11-27"
+
+[[universe]]
+instrument = "SOLUSDT"
+listed = "2020-09-14"
+
+[[universe]]
+instrument = "BNBUSDT"
+listed = "2020-02-10"
+
+[[universe]]
+instrument = "XRPUSDT"
+listed = "2020-01-06"
+
+[[universe]]
+instrument = "ADAUSDT"
+listed = "2020-01-31"
+
+[[universe]]
+instrument = "DOGEUSDT"
+listed = "2020-07-10"
+
+[[universe]]
+instrument = "AVAXUSDT"
+listed = "2020-09-23"
+
+[bars]
+base = "5m"
+reconstructed = ["30m", "4h"]
+
+[history]
+max_available = true
+
+# All persistent state lives under these configurable, volume-friendly directories.
+[storage]
+market_dir = "data/lmdb/market"
+synthetic_dir = "data/lmdb/synthetic"
+artifacts_dir = "data/artifacts"
+
+[determinism]
+seed = 42

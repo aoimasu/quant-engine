@@ -11,7 +11,7 @@ use qe_domain::{Bar, FundingRateSample, InstrumentId, Resolution, Timestamp};
 use crate::engine::{check_or_init_schema, open_env, read_schema_version, DB_META};
 use crate::key::{bar_key, bar_prefix, series_key, series_prefix, time_from_key};
 use crate::provenance::{Calibration, Provenance, ProvenanceSegment, ProvenanceSummary};
-use crate::records::{FuturesMetrics, PremiumSample};
+use crate::records::{FuturesMetrics, OpenInterestSample, PremiumSample};
 use crate::{StorageError, SCHEMA_VERSION};
 
 /// Default LMDB map size (max on-disk size): 1 GiB. Real deployments may size up.
@@ -20,6 +20,8 @@ pub const DEFAULT_MAP_SIZE: usize = 1 << 30;
 const DB_BARS: &str = "bars";
 const DB_FUNDING: &str = "funding";
 const DB_PREMIUM: &str = "premium";
+/// QE-497: aggregate open-interest series (`/futures/data/openInterestHist`), keyed instrument + time.
+const DB_OPEN_INTEREST: &str = "open_interest";
 const DB_FUTURES: &str = "futures_metrics";
 /// QE-464: per-run provenance segments, keyed identically to a bar key by the range start.
 const DB_PROVENANCE: &str = "provenance";
@@ -34,6 +36,7 @@ pub struct MarketStore {
     bars: Database<Bytes, SerdeJson<Bar>>,
     funding: Database<Bytes, SerdeJson<FundingRateSample>>,
     premium: Database<Bytes, SerdeJson<PremiumSample>>,
+    open_interest: Database<Bytes, SerdeJson<OpenInterestSample>>,
     futures: Database<Bytes, SerdeJson<FuturesMetrics>>,
     provenance: Database<Bytes, SerdeJson<ProvenanceSegment>>,
     meta: Database<Str, Str>,
@@ -64,6 +67,11 @@ impl MarketStore {
             env.create_database(&mut wtxn, Some(DB_FUNDING))?;
         let premium: Database<Bytes, SerdeJson<PremiumSample>> =
             env.create_database(&mut wtxn, Some(DB_PREMIUM))?;
+        // QE-497: open-interest series. Additive like the QE-464 provenance db — a store written before
+        // this ticket simply has an empty `open_interest` db (no SCHEMA_VERSION bump, no key/value change
+        // to existing records, so already-ingested bars keep their identity).
+        let open_interest: Database<Bytes, SerdeJson<OpenInterestSample>> =
+            env.create_database(&mut wtxn, Some(DB_OPEN_INTEREST))?;
         let futures: Database<Bytes, SerdeJson<FuturesMetrics>> =
             env.create_database(&mut wtxn, Some(DB_FUTURES))?;
         // QE-464: the provenance index is created on open; a store written before this ticket simply has
@@ -81,6 +89,7 @@ impl MarketStore {
             bars,
             funding,
             premium,
+            open_interest,
             futures,
             provenance,
             meta,
@@ -453,6 +462,60 @@ impl MarketStore {
         scan_series(&self.premium, &rtxn, &series_prefix(instrument), from, to)
     }
 
+    // ---- open interest (keyed by instrument + time) -----------------------------------------
+
+    /// Insert open-interest samples (one write transaction) — QE-497.
+    ///
+    /// Mirrors [`Self::put_premium`]: keyed by `(instrument, time)` under the `open_interest` db, one
+    /// write transaction (QE-485 single-wtxn discipline), so a batch lands atomically.
+    ///
+    /// # Errors
+    /// [`StorageError`] on an LMDB failure.
+    pub fn put_open_interest(&self, samples: &[OpenInterestSample]) -> Result<(), StorageError> {
+        let mut wtxn = self.env.write_txn()?;
+        for s in samples {
+            self.open_interest
+                .put(&mut wtxn, &series_key(&s.instrument, s.time), s)?;
+        }
+        wtxn.commit()?;
+        Ok(())
+    }
+
+    /// Fetch an open-interest sample by exact key.
+    ///
+    /// # Errors
+    /// [`StorageError`] on an LMDB failure.
+    pub fn get_open_interest(
+        &self,
+        instrument: &InstrumentId,
+        time: Timestamp,
+    ) -> Result<Option<OpenInterestSample>, StorageError> {
+        let rtxn = self.env.read_txn()?;
+        Ok(self
+            .open_interest
+            .get(&rtxn, &series_key(instrument, time))?)
+    }
+
+    /// Scan open-interest samples for `instrument` over `[from, to)`.
+    ///
+    /// # Errors
+    /// [`StorageError`] on an LMDB failure.
+    pub fn scan_open_interest(
+        &self,
+        instrument: &InstrumentId,
+        from: Timestamp,
+        to: Timestamp,
+    ) -> Result<Vec<OpenInterestSample>, StorageError> {
+        let rtxn = self.env.read_txn()?;
+        scan_series(
+            &self.open_interest,
+            &rtxn,
+            &series_prefix(instrument),
+            from,
+            to,
+        )
+    }
+
     // ---- futures metrics (keyed by instrument + time) ---------------------------------------
 
     /// Insert futures-metrics samples (one write transaction).
@@ -722,6 +785,67 @@ mod tests {
                 )
                 .is_err(),
             "scan_bars decodes Bar values and must fail on the planted garbage value",
+        );
+    }
+
+    /// QE-497: open-interest and premium round-trip through the store — `put_*` then `scan_*` returns
+    /// exactly the persisted samples in chronological order, and the two series are keyed independently
+    /// (an OI write does not appear in a premium scan or vice-versa).
+    #[test]
+    fn open_interest_and_premium_round_trip_independently() {
+        use crate::records::{OpenInterestSample, PremiumSample};
+        let dir = tempfile::tempdir().unwrap();
+        let store = open(dir.path());
+        let id = inst("BTCUSDT");
+        let other = inst("ETHUSDT");
+
+        let oi: Vec<OpenInterestSample> = [(100i64, 70_000i64), (200, 71_000), (300, 69_500)]
+            .into_iter()
+            .map(|(secs, v)| OpenInterestSample {
+                instrument: id.clone(),
+                time: Timestamp::from_secs(secs),
+                open_interest: Decimal::from(v),
+            })
+            .collect();
+        let premium: Vec<PremiumSample> = [(100i64, 5i64), (200, -3), (300, 8)]
+            .into_iter()
+            .map(|(secs, v)| PremiumSample {
+                instrument: id.clone(),
+                time: Timestamp::from_secs(secs),
+                premium: Decimal::new(v, 4),
+            })
+            .collect();
+
+        store.put_open_interest(&oi).unwrap();
+        store.put_premium(&premium).unwrap();
+
+        // Exact-key get.
+        assert_eq!(
+            store
+                .get_open_interest(&id, Timestamp::from_secs(200))
+                .unwrap(),
+            Some(oi[1].clone())
+        );
+        // Full range scan returns all three in order (half-open `[from, to)`).
+        let scanned = store
+            .scan_open_interest(&id, Timestamp::from_secs(0), Timestamp::from_secs(1000))
+            .unwrap();
+        assert_eq!(scanned, oi);
+        let scanned_p = store
+            .scan_premium(&id, Timestamp::from_secs(0), Timestamp::from_secs(1000))
+            .unwrap();
+        assert_eq!(scanned_p, premium);
+
+        // Independent keying: a different instrument sees nothing; the two dbs do not bleed.
+        assert!(store
+            .scan_open_interest(&other, Timestamp::from_secs(0), Timestamp::from_secs(1000))
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            store
+                .get_open_interest(&id, Timestamp::from_secs(999))
+                .unwrap(),
+            None
         );
     }
 
