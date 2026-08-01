@@ -14,7 +14,10 @@ workspace = true
 default = []
 # The concrete HTTP fetcher (ureq + native-tls). Default-off so the core crate — and CI's default
 # build/test — stays offline and dependency-light; the binary enables it for live downloads.
-http = ["dep:ureq"]
+# `dep:native-tls` is required alongside ureq: with `default-features = false` ureq ships NO TLS
+# backend, so the agent must be built with an explicit `.tls_connector(...)` or every https://
+# request fails at runtime with "Unknown Scheme: … no TLS backend is configured" (QE-494).
+http = ["dep:ureq", "dep:native-tls"]
 # Arrow record-batch + IPC serialisation of the fused corpus (QE-104). Default-off so the pure
 # fusion core — and CI's default build/test/deny — stays dependency-light; the binary enables it
 # to emit the Arrow artefact. The fusion logic itself is always built and tested.
@@ -41,6 +44,9 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 # Optional blocking HTTP client for the real fetcher. native-tls (system TLS) avoids ring's
 # non-allowlisted OpenSSL licence; only compiled under the `http` feature.
 ureq = { version = "2", default-features = false, features = ["native-tls"], optional = true }
+# Direct dep so the agent can construct the TlsConnector ureq's `native-tls` feature consumes (it is
+# already in the tree transitively via ureq, so no new crate enters Cargo.lock; QE-494).
+native-tls = { version = "0.2", optional = true }
 # Optional Arrow serialisation (QE-104). Minimal sub-crates only (array + schema + IPC), no
 # default features, so the dependency tree stays small and licence-clean (all Apache-2.0). Only
 # compiled under the `arrow` feature.

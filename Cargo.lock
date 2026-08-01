@@ -1788,6 +1788,7 @@ dependencies = [
  "arrow-array",
  "arrow-ipc",
  "arrow-schema",
+ "native-tls",
  "qe-config",
  "qe-domain",
  "qe-signal",
