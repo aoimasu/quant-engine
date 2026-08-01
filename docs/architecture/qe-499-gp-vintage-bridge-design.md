@@ -1,127 +1,131 @@
-# QE-499 — GP evolve → G1 vintage bridge: design
+# QE-499 — GP evolve → G1 vintage bridge: design (v2, post design-review)
 
-> Design doc for [QE-499](../mds/tickets/QE-499.md) — **design-first, review-before-implementation.** Grounded in
-> the current code; distinguishes what already exists from what must be built. Evidence context: the 2026-08-01
-> edge experiment (112 runs, 0 G1 passes; richer *factors* did not help) established **strategy representation** as
-> the binding constraint, justifying this — the lever that lets evolved `Expr` formulas (not just the fixed k-of-4
-> threshold grammar) reach the unmodified G1 gate.
+> Design doc for [QE-499](../mds/tickets/QE-499.md). **v2** folds in the 2026-08-02 design-review (4 reviewers + CTO):
+> verdict **PROCEED-WITH-DESIGN-CHANGES — build Phase A only; Phase B is held** until the deflation-composition rule
+> (§4) and B1–B6 are signed off by the deflation author. This version corrects 7 factual claims v1 got wrong about the
+> code and pins the mandatory honesty rule. Evidence context: the 2026-08-01 edge experiment (112 runs, 0 G1 passes;
+> richer *factors* did not help) established **strategy representation** as the binding constraint, justifying this lever.
 
 ## 1. Problem
 
 `qe train` evolves a fixed **genome grammar** (k-of-4 threshold clauses over a frozen ~26-indicator catalogue) via
-MAP-Elites and seals a G1-gated **vintage**. `qe evolve` evolves richer **`Expr` formula trees** and seals a
-**formula pool** — but a pool **never mints a vintage**: there is no path from an evolved formula into a G1-evaluated
-candidate strategy. The representation the search can express is therefore capped by the fixed catalogue, and the edge
-experiment shows that cap is binding. QE-499 connects the two so evolved formulas widen what the search can express,
-**without** weakening the false-discovery control that makes the engine trustworthy.
+MAP-Elites and seals a G1-gated **vintage**. `qe evolve` evolves richer **`Expr` formula trees** and seals a **formula
+pool** — but a pool **never mints a vintage**. QE-499 lets evolved formulas widen what the search can express, **without**
+weakening the false-discovery control (DSR/PBO/CPCV) that makes the engine trustworthy.
 
-## 2. Current state — what already exists vs what is missing
+## 2. Current state — verified against the code (v1 corrections in **bold**)
 
-**Already built (the hooks):**
-- **`Expr` → indicator compilation:** `compile(id, &Expr, Quantiser) -> Box<dyn Indicator>` (`crates/signal/src/indicator/expr.rs:403`) turns a formula tree into a catalogue-equivalent indicator; `ExprIndicator`/`eval_stream` evaluate it causally with the catalogue's own quantiser and a `lookback` for purge/embargo.
-- **Formula-pool artefact:** `FormulaPoolContent` (`crates/formula-pool/src/lib.rs`) carries `K ≤ 16` canonical S-expression `PoolFormula`s (`sexpr` + SHA-256 `formula_hash`), a **deflation-summary** block, and an **optional, absent-by-default `gate_evidence`** slot (the QE-454 fail-closed governance hook).
-- **Vintage identity slot:** `CatalogueIdentity.formula_pool: Vec<String>` (`crates/signal/src/feature.rs:132`, QE-451 Phase-1b) — the sorted `formula_hash`es of the evolved trees **sealed into a vintage**. Empty ⇒ omitted (no golden moves); **non-empty changes the vintage identity**, and the load boundary (`assert_schema`) asserts an **exact** match — so a vintage is bound to the exact evolved formulas it used.
-- **Honest deflation basis:** `gp_trial_basis(distinct_evaluations, cells, generations, windows)` and `assess_gp_champion` (`crates/wfo/src/gp/deflation.rs`) — the conservative max of the distinct-canonical-formula count and the analytic floor; train already computes a features-aware basis via `effective_trials_with_features` (QE-434).
+**Hooks that exist:**
+- **`Expr` → indicator:** `compile(id, &Expr, Quantiser) -> Box<dyn Indicator>` (`crates/signal/src/indicator/expr.rs:403`).
+- **Formula-pool artefact:** `FormulaPoolContent` (`crates/formula-pool/src/lib.rs:178`): `K ≤ 16` `PoolFormula`s
+  (`sexpr:String` + `formula_hash`), a `DeflationSummary` **`.deflation`** block whose fields are **`n_trials`,
+  `distinct_evaluations`, `analytic_floor`, `gp_aware`** (`lib.rs:72–97`) — **there is no `deflation_summary.effective_trials`
+  field (v1 was wrong)** — and an optional, absent-by-default `gate_evidence` slot.
+- **Vintage identity slot:** `CatalogueIdentity.formula_pool: Vec<String>` (`feature.rs:132`); the population method is
+  **`with_formula_pool` (not `with_pool`)** (`feature.rs:152`). Empty ⇒ omitted from JSON (no golden move).
+- **Honest deflation:** `gp_trial_basis` (`crates/wfo/src/gp/deflation.rs:30`) and `assess_gp_champion` (`:125`); a
+  direct-champion `GpDeflationGate` (uncensored PBO + DSR floor) also exists (`deflation.rs:96–203`).
 
-**Missing (the bridge to build):**
-1. **Catalogue injection** — `catalogue(cfg)` (`crates/signal/src/indicator/mod.rs:166`) appends only `price::` + `flow::` kernels; nothing appends a pool's compiled `Expr` formulas. `CatalogueConfig` has no pool field, and `seed_catalogue_subset` is intentionally never called by `catalogue`.
-2. **Train intake** — `qe train` has no way to accept a sealed pool and thread it into the run.
-3. **Deflation accounting** — the vintage's `n_trials` does not fold in the evolved-formula search's trial basis, so an unaccounted pool would **under-deflate** (inflate DSR) — the one unacceptable failure mode.
-4. **Identity population** — `CatalogueIdentity.formula_pool` is defined but never populated by a train run.
+**What the design review REFUTED about v1 (now corrected here):**
+1. **"train already computes a features-aware basis."** Only under `is_steered`; the default path uses plain
+   `effective_trials(occupied_niches, gens, windows)` with `evolved_count` hardcoded `0` (`train.rs:829–838`), and a
+   `--pool`-only run is **not** steered (`train.rs:564–565`). → **B1** below.
+2. Crux field name (`deflation_summary.effective_trials` → **`pool.deflation.n_trials`**).
+3. `with_pool` → **`with_formula_pool`**.
+4. The exact-match load boundary gives tamper-*rejection*, **not acceptance**: `assert_schema` compares against
+   `CatalogueIdentity::current()` built from the **empty-pool default** (`schema.rs:52–59`, `feature.rs:168–170`), so
+   every pool-injected vintage is rejected as `SchemaMismatch`. → **B4**.
+5. `num_states` uniformity does **not** hold — `from_specs` is last-writer-wins (`feature.rs:33–35`). → major, §5.
+6. A sealed `sexpr` **cannot** be reconstructed — only `write_sexpr`/`canonical_sexpr` (Expr→text) exist; **no parser**. → **B6**.
+7. This path is **not** automatically fail-closed for production (`seal_allowed` is bypassed). → **B5**.
 
-## 3. Proposed design
+## 3. Design — formulas are *features*, not strategies
 
-**Formulas are features, not strategies.** An evolved `Expr` is an *indicator*; it becomes a candidate strategy only
-when the MAP-Elites genome search addresses it in a clause. So the bridge injects a sealed pool's formulas **into the
-catalogue** for a train run; the existing search then builds — and the existing G1 gate then judges — genome strategies
-over the *widened* feature set. No new strategy representation, no gate change.
-
-Flow (extends the QE train pipeline; new/changed parts in **bold**):
+An evolved `Expr` is an *indicator*; it becomes a candidate strategy only when the MAP-Elites genome search addresses it
+in a clause. The bridge injects a sealed pool's compiled formulas into the catalogue for a train run; the **unchanged**
+search builds and the **unmodified** G1 gate judges strategies over the widened feature set. Flow:
 ```
-qe evolve  → sealed FormulaPool (K≤16 Expr, deflation-summary, [gate_evidence])
-qe train --pool <pool-id>:
-   load pool ──▶ **compile each PoolFormula.sexpr → Expr → compile(id, expr, q) → Box<dyn Indicator>**
-             ──▶ **CatalogueConfig { …, formula_pool: [compiled indicators] }**  (catalogue() appends them)
-   features (decision bars over the WIDENED catalogue)
-   MAP-Elites search  (unchanged — can now select clauses on the evolved features)
-   ensemble (unchanged)
-   validation:  **n_trials = fold(effective_trials_with_features(base catalogue),
-                                   pool.deflation_summary.effective_trials)**  ← the honesty crux
-   G1 gate (UNCHANGED thresholds/criteria)
-   seal:  **CatalogueIdentity.formula_pool = sorted(pool.formula_hashes)** ⇒ vintage id binds the exact pool
+qe evolve → sealed FormulaPool (K≤16 Expr sexpr + .deflation{n_trials,…,gp_aware} + [gate_evidence])
+qe train --pool <id>  (Phase B):
+  parse each sexpr → Expr (round-trip-hash-checked, B6) → compile(formula_hash, expr, quantiser_for_root(root, states))
+  CatalogueConfig.formula_pool = Vec<(id=formula_hash, Expr, Quantiser)>  (compiled INSIDE catalogue(), fixed position after price/flow)
+  CatalogueIdentity.with_formula_pool(sorted formula_hashes)  ⇒ vintage id binds the exact pool
+  features → MAP-Elites (unchanged) → ensemble (unchanged)
+  n_trials + trial_variance = COMPOSED per §4 (the honesty crux)  ← MUST hold on the un-steered path
+  G1 gate (UNCHANGED) → seal (write-but-mark non-production per B5)
 ```
 
-### 3.1 The deflation crux (non-negotiable)
-The evolved formulas were themselves selected from many GP trials; ignoring that inflates DSR. The vintage's deflation
-`n_trials` **must** be the honest composition of *both* searches' trial bases — the genome/MAP-Elites basis
-(`effective_trials_with_features`) **and** the pool's own basis carried in its `deflation_summary`. Compose
-conservatively (the design's existing rule: never under-deflate; prefer over-deflation). A test **must** assert that
-adding a pool with a larger evolved-trial count **raises** the vintage's `n_trials` (and thus can only make DSR
-*harder*), never lowers it. This is the single load-bearing invariant of the whole ticket.
+## 4. The deflation-honesty rule (MANDATORY — CTO ruling, no exceptions)
 
-### 3.2 Identity, determinism, provenance
-- The compiled formula indicators enter `CatalogueIdentity.formula_pool` as their sorted `formula_hash`es → the vintage
-  content hash changes iff a pool is used → determinism (QE-006) preserved; the load boundary rejects a vintage whose
-  build catalogue does not carry the exact pool (fail-closed on drift).
-- Compilation is deterministic (`rust_decimal`, causal, no wall-clock); the pool id is folded into the run-params
-  fingerprint (QE-496) so a train-with-pool and train-without-pool never share a vintage id.
+> Whenever `formula_pool` is non-empty, the vintage trial basis is computed **unconditionally** (independent of
+> `is_steered`) as the **additive sum across the two independent selection stages**:
+>
+> `n_trials = effective_trials_with_features(cells, gens, windows, feature_space = catalogue_width_incl_K) + pool.deflation.n_trials`
+>
+> - Keep the conservative `max(distinct_evaluations, analytic_floor)` **within** each stage; **SUM across** the two.
+>   `max()` across stages is **forbidden** (it discards a whole stage's multiple-testing penalty when one dominates).
+> - **Single count definition:** formulas are catalogue indicators → they ride `catalogue_width`; `evolved_count` stays
+>   `0` (do **not** also set `evolved_count = K` — that double-counts / mis-counts).
+> - **Require `pool.deflation.gp_aware == true`**; a `gp_aware=false` pool is a hard error at intake.
+> - **The DSR bar is `(trial_variance, n_trials)` jointly:** `trial_variance = max(genome-population variance,
+>   pool.deflation.trial_variance)` and floor `E[maxSR]` with the pool's sealed `expected_max_sharpe`.
+> - **Acceptance test** runs on the **un-steered default pool path** and asserts the quantitative lower bound
+>   `composed_n_trials ≥ genome_basis + pool_basis` (monotonicity is insufficient).
 
-### 3.3 Firewall & governance (unchanged, must stay green)
-- The evolve → pool → train path is **offline** (research); no live edge is introduced. The QE-132 firewall test must
-  stay green — `qe-cli` may depend on `qe-formula-pool` (already does), but no `search→live`/`portfolio→live` edge.
-- **Production sealing stays fail-closed (QE-454):** a *production*-mode pool still requires per-formula `gate_evidence`
-  and the server-authoritative `seal_allowed` + audit chain. QE-499 does **not** relax this; it only lets a pool feed a
-  *train*/*research* vintage. Sealing that vintage to production remains governed exactly as today.
+## 5. Design changes to fold in (from review §5)
 
-## 4. Phased implementation (proposed; each phase independently green + reviewable)
+- **Data model:** `CatalogueConfig` is `#[derive(Copy)]` with one `u16` (`mod.rs:142–146`); a `Vec<CompiledFormula>`
+  breaks `Copy` and `Box<dyn Indicator>` is not `Clone`. Carry `Vec<(id, Expr, Quantiser)>` and compile **inside**
+  `catalogue()`. Removing `Copy` requires auditing by-value call sites — do it deliberately.
+- **`CompiledFormula` stays qe-signal-native** (id + `Expr` + `Quantiser`); the `FormulaPool → CompiledFormula` mapping
+  lives in **qe-cli** (already deps both) — keeps qe-signal free of a qe-formula-pool edge.
+- **Firewall (new rule):** QE-132 only forbids the reverse direction, so a `qe-runtime → qe-signal → qe-formula-pool`
+  edge would pass green. **Add a rule forbidding `qe-runtime`/`qe-edge`/`qe-hedger`/`qe-venue` → `qe-formula-pool`**
+  (`architecture/src/lib.rs:501–510`) so "the live path never loads a pool" is enforced.
+- **Deterministic ids:** each injected indicator's id = its 64-hex `formula_hash`, appended at a fixed position after
+  price/flow, so `id_hash` (`feature.rs:120–122`) is a pure function of the sorted pool.
+- **Determinism (QE-496):** "pool id folded into the run-params fingerprint" is a build item with its own test (two
+  configs differing only in `--pool` ⇒ distinct vintage ids).
+- **`num_states` uniformity:** compile each formula with `quantiser_for_root(root_op, cfg.states)` (not last-writer-wins).
+- **Version guard:** state whether the pool-composed basis bumps `DEFLATION_BASIS_VERSION` (only the new pool path is
+  affected — likely no bump; call it out explicitly).
 
-- **Phase A — catalogue injection (pure, offline, testable without a train):** add `CatalogueConfig.formula_pool:
-  Vec<CompiledFormula>`; `catalogue()` appends them; `CatalogueIdentity::with_pool` populates the hashes. Default empty
-  ⇒ byte-identical to today (no golden moves). Tests: injected formulas produce non-constant, causal features; identity
-  changes iff pool non-empty; exact-match load boundary.
-- **Phase B — train intake + deflation accounting:** `qe train --pool <id>` loads the pool, compiles + injects, and
-  **composes n_trials** from both bases. The deflation test (§3.1) is the acceptance gate. G1 unchanged.
-- **Phase C — end-to-end + honesty proof:** a train over a sealed pool produces a vintage the unmodified G1 evaluates;
-  a test proves a pool with N evolved trials raises `n_trials` by ≥ its basis; determinism (two same-seed runs → same
-  vintage id); firewall + `cargo deny` green.
+## 6. The six blockers (must be written into the design + signed off before Phase B)
 
-## 5. Validation / acceptance
+- **B1 — un-steered under-deflation:** non-empty `formula_pool` ⇒ features-aware + pool-folded basis **unconditionally**
+  (not gated on `is_steered`); the §4 test runs on the un-steered path.
+- **B2 — composition:** pin **additive** across stages (§4); test the quantitative lower bound, not monotonicity.
+- **B3 — dispersion, not just count:** compose `trial_variance` and floor `E[maxSR]` with the pool's sealed values (§4).
+- **B4 — load boundary:** persist `pool_id` in the vintage/run-params; provide `current_with_pool(pool)` (or rebuild the
+  widened identity from the resolved sealed pool in `assert_schema`) so a correctly-sealed vintage passes exact-match and
+  a drifted/absent/tampered pool **fails closed** (a missing pool artefact ⇒ hard error).
+- **B5 — production back-door:** `seal_allowed`'s per-formula hard-blocks (IC/FDR, cost-stress, turnover, capacity,
+  random-entry null, `pool_seal.rs:61–165`) never run on pool→vintage→G1. Resolution (chosen): **(a)** reject any
+  non-Sandbox pool at train intake **and** require `gate_evidence` present-and-passing before formulas enter a vintage,
+  **and (b)** mark the pool-carrying vintage **non-production via QE-476 write-but-mark** so the live load path refuses it.
+  A pool-carrying vintage is never production-sealable without re-deriving per-formula `gate_evidence` under QE-454.
+- **B6 — S-expression parser:** the `sexpr → Expr` parser must round-trip exactly
+  (`SHA-256(canonical_sexpr(parse(s))) == sealed formula_hash`), tested as a hash-stability property — a **Phase B**
+  first-class component (or seal the `Expr` structurally with a called-out `POOL_FORMAT_VERSION` bump).
+- **Majors:** require `gp_aware == true`; data-window provenance — an evolve-fit formula scored by G1 over overlapping
+  bars is in-sample-contaminated regardless of counting, and `PoolLineage.input_snapshot_id` is empty (`lib.rs:167–168`);
+  add a disjoint-window / embargo invariant between the evolve window and the train/holdout window.
 
-- **Deflation honesty (the gate on merge):** adding a pool never lowers the vintage `n_trials`; a larger evolved-trial
-  count strictly raises it. No path lets an evolved candidate reach the gate uncounted.
-- **Gate unmodified:** no threshold / criterion / `funding_coverage` / `cv_folds` diff; the G1 code is untouched.
-- **Determinism:** same (config, window, seed, budget, **pool**) ⇒ byte-identical vintage id; different pool ⇒ different
-  id (QE-496 fingerprint folds the pool id).
-- **Firewall + governance:** `qe-architecture` firewall green; production-seal path still fail-closed (QE-454) — a
-  research/sandbox pool cannot be flipped to a production vintage without the existing governance.
-- **No golden movement** on the default (no-pool) path; a sealed-schema change (if any) ⇒ single `VINTAGE_FORMAT_VERSION`
-  bump with goldens regenerated intentionally.
-- **Efficacy is a SEPARATE question:** this ticket delivers the *mechanism*. Whether evolved formulas actually clear G1
-  is then measured by an honest re-hunt (an evolve campaign → pool → train) — and may still be "no edge." QE-499 does not
-  promise a pass; it removes the representation cap so the question can be asked honestly.
+## 7. Phase plan
 
-## 6. Risks
+- **Phase A — catalogue-injection seam (APPROVED to build now; golden-safe, inert):**
+  1. Default no-pool path **byte-identical** — goldens unchanged; empty `formula_pool` omitted from JSON (`feature.rs:131`).
+  2. **No train intake** — no `--pool` flag, no caller populates the field, no code path constructs a non-empty pool; a
+     populated pool is **structurally unreachable** until Phase B lands the §4 accounting (closes the A→B under-deflation window).
+  3. Data model per §5 (no `Copy` break shipped as churn, no `Box<dyn Indicator>` in a `Clone` struct); `CompiledFormula`
+     qe-signal-native; the pool→formula mapping deferred to qe-cli (Phase B).
+  4. Firewall rule forbidding live-graph → `qe-formula-pool` added and tested green.
+  5. Deterministic injected-id scheme (`formula_hash`, fixed position) landed and asserted; identity changes iff pool
+     non-empty (tested via a synthetic non-empty pool in a unit test only — never a real train intake).
+- **Phase B — train intake + §4 deflation + B4/B6 (HELD)** — authorize only after §4 and B1–B6 are signed off by the
+  deflation author.
+- **Phase C — end-to-end honesty proof + re-hunt** — an evolve campaign → pool → train, with the §4 test on the
+  un-steered path, determinism, firewall, governance all green. Efficacy (does an evolved vintage clear G1?) is a
+  **separate** measured question; QE-499 delivers the honest mechanism, not a promised pass.
 
-- **Under-deflation (critical):** the one way to make the engine dishonest. Mitigated by §3.1 + its mandatory test;
-  when in doubt, over-deflate.
-- **Catalogue-width blow-up:** injecting K≤16 formulas widens the feature space the genome addresses; MAP-Elites cost
-  and the `effective_trials_with_features` basis both rise — acceptable and self-correcting (a wider search deflates
-  harder, per the engine's design).
-- **Identity/schema drift:** the exact-match load boundary already guards this; Phase A must keep the default path
-  byte-identical.
-- **Scope creep toward production sealing:** explicitly out of scope — QE-499 stops at a research/train vintage;
-  production sealing stays under QE-454.
-
-## 7. Open questions (for the human / review)
-
-1. **Compose vs replace the trial basis:** fold the pool basis into `effective_trials_with_features` additively, or take
-   a max? (Design leans: the conservative composition that never under-deflates — likely additive on the multiple-testing
-   count, but the exact formula needs the deflation author's sign-off.)
-2. **Which pool modes may feed a train vintage** — research/sandbox only, or also production (with its `gate_evidence`)?
-   Recommendation: research/sandbox for QE-499; production stays behind QE-454.
-3. **Quantiser choice for injected formulas** — reuse the catalogue's uniform quantiser (as `compile` already takes one),
-   or per-formula? Reuse for determinism/simplicity unless evidence says otherwise.
-4. **Phase A alone** (catalogue injection, no train intake) is independently useful and fully golden-safe — ship it first
-   for review, then B/C?
-
-`Spec ref: QE-499 ticket; grounds — expr.rs:403 (compile), formula-pool/src/lib.rs (FormulaPoolContent/gate_evidence), feature.rs:132 (CatalogueIdentity.formula_pool), wfo/src/gp/deflation.rs (gp_trial_basis/assess_gp_champion), indicator/mod.rs:166 (catalogue). Preserves QE-006/QE-132/QE-454/QE-476; gate unchanged.`
+`Spec ref: QE-499 ticket + the 2026-08-02 design review (verdict PROCEED-WITH-DESIGN-CHANGES, Phase A only). Grounds: expr.rs:403, formula-pool/src/lib.rs:72–97/178, feature.rs:132/152/168, deflation.rs:30/96–203, architecture/src/lib.rs:501–510, train.rs:829–838/564. Preserves QE-006/QE-132/QE-454/QE-476; G1 gate unchanged.`
