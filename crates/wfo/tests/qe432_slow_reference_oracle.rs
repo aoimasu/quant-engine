@@ -473,7 +473,10 @@ fn windowed_log_growth_mean(returns: &[f64], k: usize) -> f64 {
 }
 
 fn schema() -> FeatureSchema {
-    FeatureSchema::from_catalogue(&CatalogueConfig { states: 5 })
+    FeatureSchema::from_catalogue(&CatalogueConfig {
+        states: 5,
+        formula_pool: Vec::new(),
+    })
 }
 
 /// A random valid genome (repaired onto the validity manifold).

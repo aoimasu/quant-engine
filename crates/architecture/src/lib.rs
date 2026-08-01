@@ -508,6 +508,29 @@ pub fn firewall_rules() -> Vec<FirewallRule> {
                 "qe-edge",
             ],
         },
+        // QE-499 Phase A: the **reverse** guard. The QE-452 rule above forbids the pool artefact from
+        // reaching the live side; this forbids the **live graph** — `qe-runtime`/`qe-edge`/`qe-hedger`/
+        // `qe-venue` — from depending on `qe-formula-pool`, so "the live path never loads a pool" is
+        // enforced in *both* directions. Because reachability is transitive, an indirect
+        // `qe-runtime → qe-signal → qe-formula-pool` edge (were `qe-signal` ever to gain a pool dep) is
+        // caught here too — the catalogue-injection seam keeps `CompiledFormula` qe-signal-native
+        // precisely so `qe-signal` never grows that edge.
+        FirewallRule {
+            upstream: "qe-runtime",
+            forbidden: &["qe-formula-pool"],
+        },
+        FirewallRule {
+            upstream: "qe-edge",
+            forbidden: &["qe-formula-pool"],
+        },
+        FirewallRule {
+            upstream: "qe-hedger",
+            forbidden: &["qe-formula-pool"],
+        },
+        FirewallRule {
+            upstream: "qe-venue",
+            forbidden: &["qe-formula-pool"],
+        },
     ]
 }
 
@@ -684,6 +707,46 @@ name = \"some-debian-package\"
             ("qe-runtime", &["qe-venue"]),
         ]);
         assert!(check_firewall(&g, &firewall_rules()).is_empty());
+    }
+
+    /// QE-499 Phase A: the live graph must not depend on the frozen formula-pool artefact, so "the live
+    /// path never loads a pool" is a compile-enforced firewall, not a convention. Each live crate
+    /// (`qe-runtime`/`qe-edge`/`qe-hedger`/`qe-venue`) has a rule forbidding it from reaching
+    /// `qe-formula-pool`, including transitively (e.g. via `qe-signal`).
+    #[test]
+    fn live_graph_must_not_reach_the_formula_pool() {
+        let rules = firewall_rules();
+        for live in ["qe-runtime", "qe-edge", "qe-hedger", "qe-venue"] {
+            assert!(
+                rules
+                    .iter()
+                    .any(|r| r.upstream == live && r.forbidden.contains(&"qe-formula-pool")),
+                "missing live→formula-pool firewall rule for `{live}`"
+            );
+        }
+
+        // Direct breach: a live crate that depends on the pool artefact is caught.
+        let direct = graph_of(&[
+            ("qe-runtime", &["qe-formula-pool"]),
+            ("qe-formula-pool", &[]),
+        ]);
+        assert!(check_firewall(&direct, &rules).contains(&Violation {
+            upstream: "qe-runtime".into(),
+            forbidden: "qe-formula-pool".into(),
+        }));
+
+        // Transitive breach: `qe-edge → qe-signal → qe-formula-pool` is caught just the same, so the
+        // seam's "keep `CompiledFormula` qe-signal-native" invariant is guarded even if `qe-signal`
+        // ever grew a pool edge.
+        let transitive = graph_of(&[
+            ("qe-edge", &["qe-signal"]),
+            ("qe-signal", &["qe-formula-pool"]),
+            ("qe-formula-pool", &[]),
+        ]);
+        assert!(check_firewall(&transitive, &rules).contains(&Violation {
+            upstream: "qe-edge".into(),
+            forbidden: "qe-formula-pool".into(),
+        }));
     }
 
     /// QE-489: an internal crate pulled under a **non-`qe-` key** is resolved by its `package =` target,

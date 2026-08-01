@@ -106,7 +106,10 @@ mod tests {
     use rust_decimal::Decimal;
 
     fn schema() -> FeatureSchema {
-        FeatureSchema::from_catalogue(&CatalogueConfig { states: 5 })
+        FeatureSchema::from_catalogue(&CatalogueConfig {
+            states: 5,
+            formula_pool: Vec::new(),
+        })
     }
 
     /// A long-only genome that enters when `feature`'s state is high `[3,4]` and exits after `hold` bars.

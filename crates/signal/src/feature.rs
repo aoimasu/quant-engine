@@ -157,9 +157,16 @@ impl CatalogueIdentity {
     }
 
     /// The identity of the catalogue built from `cfg`.
+    ///
+    /// QE-499 Phase A: when `cfg` carries a non-empty injected `formula_pool`, its per-formula ids (the
+    /// 64-hex `formula_hash`es) are folded into the identity via [`with_formula_pool`](Self::with_formula_pool)
+    /// — so the identity binds the exact pool through **both** `id_hash` (the injected ids ride the ordered
+    /// catalogue) and the dedicated `formula_pool` slot. The default (empty) pool folds in nothing, so
+    /// `with_formula_pool(vec![])` leaves the field empty and the identity is byte-identical to today.
     #[must_use]
     pub fn from_config(cfg: &CatalogueConfig) -> Self {
-        Self::from_schema(&FeatureSchema::from_catalogue(cfg))
+        let pool_ids: Vec<String> = cfg.formula_pool.iter().map(|f| f.id.clone()).collect();
+        Self::from_schema(&FeatureSchema::from_catalogue(cfg)).with_formula_pool(pool_ids)
     }
 
     /// The identity of the **current build's** default catalogue — the schema the whole pipeline
@@ -537,7 +544,10 @@ mod tests {
         let v = assemble_batch(&cfg, &series(80)).pop().unwrap();
         let bytes = v.to_bytes(&schema);
 
-        let other = FeatureSchema::from_catalogue(&CatalogueConfig { states: 9 });
+        let other = FeatureSchema::from_catalogue(&CatalogueConfig {
+            states: 9,
+            formula_pool: Vec::new(),
+        });
         assert_eq!(other.len(), schema.len());
         assert_ne!(other.num_states(), schema.num_states());
         assert!(FeatureVector::from_bytes(&bytes, &other).is_none());

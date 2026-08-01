@@ -264,7 +264,10 @@ mod tests {
     use rust_decimal::Decimal;
 
     fn schema() -> FeatureSchema {
-        FeatureSchema::from_catalogue(&CatalogueConfig { states: 5 })
+        FeatureSchema::from_catalogue(&CatalogueConfig {
+            states: 5,
+            formula_pool: Vec::new(),
+        })
     }
 
     /// A long-only genome reading feature 0 with the inclusive band `[lo, hi]`, holding `hold` bars.
