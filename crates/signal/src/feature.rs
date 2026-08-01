@@ -176,6 +176,34 @@ impl CatalogueIdentity {
         Self::from_config(&CatalogueConfig::default())
     }
 
+    /// The identity of the current build's default catalogue **widened by a sanctioned formula pool**
+    /// (QE-499 Phase B, B4). Given the `K ≤ 16` sanctioned `formula_hash`es (from a resolved, hash-verified
+    /// [`crate`]-external `FormulaPool`), this reconstructs the exact identity a `--pool` train sealed:
+    /// the injected ids ride the ordered catalogue at a fixed position after price/flow (sorted by id), so
+    /// `id_hash` folds them in, **and** the dedicated `formula_pool` slot records them. It is the pure
+    /// function of the *sanctioned* hashes the load boundary rebuilds and asserts an **exact** match against
+    /// — a drifted/tampered/absent pool cannot reproduce it, so the vintage fails closed.
+    ///
+    /// Determinism note: the id-hash appends the sorted+deduplicated hashes to the default catalogue's
+    /// ordered ids, exactly as [`from_config`](Self::from_config) does when the injected formulas are
+    /// compiled at the default `num_states` (the train intake always compiles at the catalogue's own
+    /// `states`, keeping `num_states` uniform — design §5).
+    #[must_use]
+    pub fn current_with_pool(formula_hashes: Vec<String>) -> Self {
+        let base = FeatureSchema::from_catalogue(&CatalogueConfig::default());
+        let mut sorted = formula_hashes;
+        sorted.sort();
+        sorted.dedup();
+        let mut ids = base.ids().to_vec();
+        ids.extend(sorted.iter().cloned());
+        CatalogueIdentity {
+            catalogue_version: base.version(),
+            num_states: base.num_states(),
+            id_hash: Self::hash_ids(&ids),
+            formula_pool: sorted,
+        }
+    }
+
     /// Lowercase-hex SHA-256 over the ordered indicator ids, joined by `\n`. Exposed so a reorder can be
     /// shown to change the hash.
     #[must_use]
@@ -322,6 +350,53 @@ mod tests {
     use rust_decimal::Decimal;
 
     const MIN: i64 = 60_000;
+
+    #[test]
+    fn current_with_pool_matches_from_config_of_the_injected_catalogue() {
+        // QE-499 Phase B (B4): the load-boundary reconstruction `current_with_pool(sanctioned_hashes)` must
+        // equal the identity a `--pool` train seals via `from_config(&cfg_with_pool)` — same id_hash (the
+        // injected ids ride the ordered catalogue) and same `formula_pool` slot. Build a real injected
+        // catalogue at the DEFAULT states (as the train intake does), take its hashes, and compare.
+        use crate::indicator::expr::{Expr, ExprTree, Field, WinOp};
+        use crate::indicator::CompiledFormula;
+        use crate::Quantiser;
+
+        let default = CatalogueConfig::default();
+        let mk = |op, f, n| {
+            let tree = ExprTree::repaired(Expr::Window(op, Box::new(Expr::Input(f)), n));
+            let id = tree.canonical_hash();
+            CompiledFormula {
+                id,
+                expr: tree.canonical(),
+                quantiser: Quantiser::Linear {
+                    min: Decimal::ZERO,
+                    max: Decimal::ONE,
+                    states: default.states,
+                },
+            }
+        };
+        let pool = vec![
+            mk(WinOp::Rank, Field::Close, 20),
+            mk(WinOp::Zscore, Field::High, 50),
+        ];
+        let cfg = CatalogueConfig {
+            states: default.states,
+            formula_pool: pool.clone(),
+        };
+        let sealed = CatalogueIdentity::from_config(&cfg);
+        let hashes: Vec<String> = pool.iter().map(|f| f.id.clone()).collect();
+        let rebuilt = CatalogueIdentity::current_with_pool(hashes);
+        assert_eq!(
+            rebuilt, sealed,
+            "current_with_pool must reconstruct the from_config identity exactly"
+        );
+        assert_ne!(
+            rebuilt,
+            CatalogueIdentity::current(),
+            "a non-empty pool moves identity"
+        );
+        assert_eq!(rebuilt.num_states, CatalogueIdentity::current().num_states);
+    }
 
     #[test]
     fn default_identity_omits_the_formula_pool_and_is_byte_identical() {
