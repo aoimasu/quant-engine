@@ -86,6 +86,30 @@ pub struct TrainOptions {
     pub flow: bool,
 }
 
+/// Deterministic fingerprint of a run's **effective parameters**, carried in the lineage's
+/// `input_snapshot_id` slot (QE-496). CLI knobs (window, resolution, budget, split geometry, steer)
+/// never touch the config, so the config hash alone cannot separate two runs that differ only in
+/// them — before QE-496 such runs shared one lineage id and the repository write silently
+/// overwrote the earlier sealed artefact. The fingerprint is a SHA-256 over `kind` plus ordered
+/// `key=value` lines — byte-stable for identical inputs (QE-006), distinct whenever any effective
+/// parameter differs — prefixed `params-sha256:` so it can never be mistaken for a future real
+/// input-data snapshot id.
+fn run_fingerprint(kind: &str, parts: &[(&str, String)]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(kind.as_bytes());
+    hasher.update(b"\n");
+    for (k, v) in parts {
+        hasher.update(k.as_bytes());
+        hasher.update(b"=");
+        hasher.update(v.as_bytes());
+        hasher.update(b"\n");
+    }
+    let digest = hasher.finalize();
+    let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+    format!("params-sha256:{hex}")
+}
+
 /// Run the training-search pipeline for `cfg`, sealing a vintage under the configured artefacts
 /// directory and streaming structured [`ProgressLine`]s through `emit`. `code_commit` is the build's
 /// code provenance (folded into the lineage / vintage id), passed in so the result is deterministic and
@@ -122,11 +146,43 @@ pub fn run_train(
         create_dir(dir)?;
     }
 
-    // 3. Build the vintage lineage from real inputs (config hash + seed + commit). No input snapshot yet
-    //    (the ingest stages are P1), so the snapshot id is empty. The seed is the search master seed, so
-    //    the sealed vintage id (= lineage id) is deterministic for a fixed seed.
+    // 3. Build the vintage lineage from real inputs (config hash + seed + commit + the EFFECTIVE run
+    //    parameters). QE-496: the CLI knobs (window, resolution, search budget, split geometry, steer)
+    //    never touch the config, so hashing the config alone let two different runs share one lineage id
+    //    and silently overwrite each other's sealed vintages. The `input_snapshot_id` slot (empty until
+    //    the ingest snapshot stages land) now carries a deterministic fingerprint of those effective
+    //    parameters, so the vintage id separates every distinct run while staying byte-stable for
+    //    identical ones.
     let seed = opts.seed.unwrap_or(cfg.determinism.seed);
-    let lineage = Lineage::from_config(cfg, "", code_commit, vec![seed])?;
+    let params_fp = run_fingerprint(
+        "train",
+        &[
+            ("instrument", instrument.clone()),
+            ("start", opts.start.clone()),
+            ("end", opts.end.clone()),
+            ("resolution", opts.resolution.clone()),
+            ("generations", opts.generations.to_string()),
+            ("population", opts.population.to_string()),
+            ("holdout", opts.holdout.to_string()),
+            ("embargo", opts.embargo.to_string()),
+            (
+                "indicator_subset",
+                opts.indicator_subset
+                    .as_ref()
+                    .map_or_else(String::new, |s| s.join(",")),
+            ),
+            (
+                "windows",
+                opts.windows.map_or_else(String::new, |w| w.to_string()),
+            ),
+            (
+                "folds",
+                opts.folds.map_or_else(String::new, |f| f.to_string()),
+            ),
+            ("flow", opts.flow.to_string()),
+        ],
+    );
+    let lineage = Lineage::from_config(cfg, params_fp, code_commit, vec![seed])?;
 
     // 4. Build the job params from config + options and run the pipeline.
     let params = TrainParams {
@@ -221,7 +277,23 @@ pub fn run_evolve(
     }
 
     // The evolve seed is REQUIRED (design §13.10) — the lineage / pool id is deterministic for it.
-    let lineage = Lineage::from_config(cfg, "", code_commit, vec![opts.seed])?;
+    // QE-496: fold the effective campaign parameters into the lineage (same collision as `run_train`:
+    // two campaigns differing only in window/budget/K would otherwise share one lineage id).
+    let params_fp = run_fingerprint(
+        "evolve",
+        &[
+            ("instrument", instrument.clone()),
+            ("start", opts.start.clone()),
+            ("end", opts.end.clone()),
+            ("resolution", opts.resolution.clone()),
+            ("mode", format!("{:?}", opts.mode)),
+            ("generations", opts.generations.to_string()),
+            ("offspring", opts.offspring.to_string()),
+            ("states", opts.states.to_string()),
+            ("k", opts.k.to_string()),
+        ],
+    );
+    let lineage = Lineage::from_config(cfg, params_fp, code_commit, vec![opts.seed])?;
 
     let params = EvolveJobParams {
         store_path: PathBuf::from(&cfg.storage.market_dir),
@@ -703,6 +775,51 @@ fn parse_profile(s: &str) -> Result<qe_config::Profile, CliError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn run_fingerprint_separates_every_effective_parameter() {
+        // QE-496: two runs differing in ANY effective parameter must get distinct fingerprints (and
+        // hence distinct lineage/vintage ids); identical inputs must be byte-stable (QE-006).
+        let base = vec![
+            ("start", "2023-07-01".to_owned()),
+            ("end", "2025-01-31".to_owned()),
+            ("generations", "40".to_owned()),
+        ];
+        let a = run_fingerprint("train", &base);
+        assert_eq!(
+            a,
+            run_fingerprint("train", &base),
+            "identical inputs ⇒ identical fingerprint"
+        );
+        assert!(a.starts_with("params-sha256:"), "self-describing prefix");
+
+        // window change
+        let mut w = base.clone();
+        w[1] = ("end", "2025-03-31".to_owned());
+        assert_ne!(
+            a,
+            run_fingerprint("train", &w),
+            "a different window must change the id"
+        );
+        // budget change
+        let mut b = base.clone();
+        b[2] = ("generations", "80".to_owned());
+        assert_ne!(
+            a,
+            run_fingerprint("train", &b),
+            "a different budget must change the id"
+        );
+        // kind change (train vs evolve with same params)
+        assert_ne!(
+            a,
+            run_fingerprint("evolve", &base),
+            "train and evolve must never collide"
+        );
+        // key=value boundary is unambiguous (["ab","c"] vs ["a","bc"])
+        let x = run_fingerprint("t", &[("ab", "c".to_owned())]);
+        let y = run_fingerprint("t", &[("a", "bc".to_owned())]);
+        assert_ne!(x, y, "key/value concatenation must not be ambiguous");
+    }
 
     #[test]
     fn bare_invocation_is_version() {
