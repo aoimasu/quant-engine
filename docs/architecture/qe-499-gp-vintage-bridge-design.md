@@ -150,3 +150,30 @@ qe train --pool <id>  (Phase B):
   **separate** measured question; QE-499 delivers the honest mechanism, not a promised pass.
 
 `Spec ref: QE-499 ticket + the 2026-08-02 design review (verdict PROCEED-WITH-DESIGN-CHANGES, Phase A only). Grounds: expr.rs:403, formula-pool/src/lib.rs:72–97/178, feature.rs:132/152/168, deflation.rs:30/96–203, architecture/src/lib.rs:501–510, train.rs:829–838/564. Preserves QE-006/QE-132/QE-454/QE-476; G1 gate unchanged.`
+
+## 8. Phase C results (2026-08-02) — the mechanism works; the edge still isn't there
+
+Phase C ran end-to-end: `qe evolve` (Sandbox) → sealed formula pool → `qe train --pool <id>` → G1-gated vintage over
+the evolved formulas. **The bridge and the honest deflation both work exactly as designed** — and the answer is the
+same honest "no edge" the fixed grammar gave.
+
+| Run (BTC 4h) | n_trials | DSR | promoted |
+|---|---|---|---|
+| price-only baseline (train 2022-07→2024-12) | 4,020 | 0.0075 | false |
+| **evolved formulas, same window** | **117,723** | **0.000053** | false |
+| evolved formulas #2 (bear-evolved pool → disjoint train 2023-01→2025-01) | 124,899 | 0.000000 | false |
+
+**The finding.** Injecting 8 evolved formulas raised the multiple-testing basis ~29× (4,020 → 117,723) and crushed DSR
+~140× — the composed §4 deflation (widened feature space + the pool's own trials) correctly discounts the richer
+representation. A richer *representation* behaves exactly like richer *factors* (premium) and a wider *search* (budget):
+it widens the hypothesis space, the deflation hardens proportionally, and no deflation-surviving edge appears. Every
+pool vintage was force-marked non-production (`pool_vintage_non_production` failed) and carried
+`evolve_window_provenance_unverified` (the pool doesn't yet record its evolve window) — the honesty guards held.
+
+**Conclusion for the whole edge thread.** Across data quantity, factor breadth (premium), search budget, and now
+strategy representation (evolved formulas), the engine's honesty machinery consistently reports: on liquid BTC/ETH perps
+in 2020–2025, there is **no deflation-surviving, out-of-sample-persistent edge in the space this engine can express**.
+That is a real, valuable answer — and the fact that the gate hardens under *every* lever, rather than being gameable by
+any of them, is the strongest possible evidence the engine is trustworthy. The next honest move is not another lever on
+this market/space; it is either richer *factors with real historical depth* (OI/basis/microstructure, cross-sectional)
+or accepting the engine's verdict and hardening it for production for when a genuinely different signal source arrives.

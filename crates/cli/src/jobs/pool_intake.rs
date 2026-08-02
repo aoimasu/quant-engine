@@ -4,9 +4,13 @@
 //! `qe-signal` never gains a `qe-formula-pool` edge (design §5). Given a sealed [`FormulaPool`], it:
 //!
 //! 1. **Governs intake (B5 / §4 majors), fail-closed:** the pool must be **Sandbox** mode, its deflation
-//!    summary must be **GP-aware** (`gp_aware == true`, else a hard error), and every formula must carry a
-//!    **present-and-passing** per-formula `gate_evidence` row (hard-blocks 5–8). A pool failing any of these
-//!    is rejected before a single formula enters the catalogue.
+//!    summary must be **GP-aware** (`gp_aware == true`) and carry a present, readable `uncensored_pbo` and a
+//!    non-degenerate trial basis (else hard errors). `gate_evidence` (production hard-blocks 5–8, QE-454) is
+//!    **enforced if present** but **not required** here — a pool vintage is unconditionally non-production
+//!    (write-but-mark + load-boundary reject + research-root isolation), so requiring it protected nothing at
+//!    the research stage; it becomes mandatory again when a pool vintage can reach production (QE-499 B5,
+//!    relaxed after review sign-off). A pool failing any required check is rejected before a formula enters
+//!    the catalogue.
 //! 2. **Reconstructs each formula (B6):** parses the sealed canonical `sexpr` back to an [`Expr`], and
 //!    **verifies the round-trip hash** (`canonical_hash(parse(sexpr)) == formula_hash`) — a sexpr/hash
 //!    disagreement is rejected. Each becomes a [`CompiledFormula`] `{ id = formula_hash, expr,
@@ -81,31 +85,31 @@ pub fn admit_pool(pool: &FormulaPool, states: u16) -> Result<PoolIntake, RunErro
     if !content.deflation.gp_aware {
         return Err(RunError::PoolNotGpAware { pool_id });
     }
-    // ---- B5 (a): every formula must carry a PRESENT-AND-PASSING gate_evidence row (hard-blocks 5–8). ----
-    let evidence =
-        content
-            .gate_evidence
-            .as_ref()
-            .ok_or_else(|| RunError::PoolGateEvidenceMissing {
-                pool_id: pool_id.clone(),
-                formula_hash: content
-                    .formulas
-                    .first()
-                    .map(|f| f.formula_hash.clone())
-                    .unwrap_or_default(),
-            })?;
-    for f in &content.formulas {
-        let row = evidence
-            .iter()
-            .find(|e| e.formula_hash == f.formula_hash)
-            .ok_or_else(|| RunError::PoolGateEvidenceMissing {
-                pool_id: pool_id.clone(),
-                formula_hash: f.formula_hash.clone(),
-            })?;
-        if !row.passes() {
-            return Err(RunError::PoolGateEvidenceFailed {
-                formula_hash: f.formula_hash.clone(),
-            });
+    // ---- B5 — gate_evidence is enforced-IF-PRESENT, not required at the research intake (QE-499, relaxed
+    // after review sign-off 2026-08-02). Rationale: `gate_evidence` (per-formula hard-blocks 5–8: IC/FDR,
+    // cost-stress, turnover, capacity, random-entry null) is a PRODUCTION-seal control (QE-454). A pool
+    // vintage produced here is *unconditionally non-production* — force-marked `promoted=false`
+    // (write-but-mark, QE-476), rejected by the generic `assert_schema` load boundary, and its pool lives in
+    // the research-only artefacts root the production repository never scans. Requiring gate_evidence
+    // therefore protected nothing at this stage while blocking the legitimate research re-hunt (and `qe
+    // evolve` does not emit it). We STILL enforce it when a pool carries it (defense-in-depth), and it
+    // becomes MANDATORY again the moment a pool vintage can reach production — a future phase governed by
+    // QE-454. The honesty-preserving controls that DO stay required: Sandbox mode, `gp_aware`,
+    // `uncensored_pbo` present, and the additive two-stage deflation composition (§4).
+    if let Some(evidence) = content.gate_evidence.as_ref() {
+        for f in &content.formulas {
+            let row = evidence
+                .iter()
+                .find(|e| e.formula_hash == f.formula_hash)
+                .ok_or_else(|| RunError::PoolGateEvidenceMissing {
+                    pool_id: pool_id.clone(),
+                    formula_hash: f.formula_hash.clone(),
+                })?;
+            if !row.passes() {
+                return Err(RunError::PoolGateEvidenceFailed {
+                    formula_hash: f.formula_hash.clone(),
+                });
+            }
         }
     }
 
@@ -329,12 +333,15 @@ mod tests {
     }
 
     #[test]
-    fn rejects_absent_gate_evidence() {
+    fn admits_absent_gate_evidence_for_a_research_pool() {
+        // QE-499 B5 (relaxed): gate_evidence is a PRODUCTION control (QE-454); a Sandbox research pool
+        // vintage is non-production regardless, so an ABSENT gate_evidence block no longer blocks intake —
+        // the other honesty controls (gp_aware, uncensored_pbo, the §4 deflation composition) still apply.
         let pool = seal(content(PoolMode::Sandbox, true, false));
-        assert!(matches!(
-            admit_pool(&pool, 5),
-            Err(RunError::PoolGateEvidenceMissing { .. })
-        ));
+        let intake = admit_pool(&pool, 5)
+            .expect("a sandbox, gp-aware, uncensored-pbo pool admits w/o gate_evidence");
+        assert_eq!(intake.compiled.len(), 2);
+        assert_eq!(intake.pool_n_trials, 200);
     }
 
     #[test]
