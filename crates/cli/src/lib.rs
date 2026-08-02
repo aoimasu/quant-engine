@@ -84,6 +84,12 @@ pub struct TrainOptions {
     /// records the frozen-holdout lineage (holdout split + regime composition + overlap-keyed consultation
     /// count) and the resolved holdout window into `result.json`. Off (a plain train) ⇒ byte-identical seal.
     pub flow: bool,
+    /// QE-499 Phase B — inject a sealed **formula pool** (`--pool <id>`) into the catalogue for this train.
+    /// `None` (the default) ⇒ a plain train, byte-identical to pre-QE-499. `Some(id)` resolves the sealed
+    /// pool from the **sandbox** pool repository (fail-closed: missing/tampered ⇒ hard error), governs it
+    /// (Sandbox-only, GP-aware, gate_evidence present-and-passing), widens the catalogue, composes the §4
+    /// deflation basis, and marks the sealed vintage non-production (B5).
+    pub pool: Option<String>,
 }
 
 /// Deterministic fingerprint of a run's **effective parameters**, carried in the lineage's
@@ -162,34 +168,58 @@ pub fn run_train(
     //    parameters, so the vintage id separates every distinct run while staying byte-stable for
     //    identical ones.
     let seed = opts.seed.unwrap_or(cfg.determinism.seed);
-    let params_fp = run_fingerprint(
-        "train",
-        &[
-            ("instrument", instrument.clone()),
-            ("start", opts.start.clone()),
-            ("end", opts.end.clone()),
-            ("resolution", opts.resolution.clone()),
-            ("generations", opts.generations.to_string()),
-            ("population", opts.population.to_string()),
-            ("holdout", opts.holdout.to_string()),
-            ("embargo", opts.embargo.to_string()),
-            (
-                "indicator_subset",
-                opts.indicator_subset
-                    .as_ref()
-                    .map_or_else(String::new, |s| s.join(",")),
-            ),
-            (
-                "windows",
-                opts.windows.map_or_else(String::new, |w| w.to_string()),
-            ),
-            (
-                "folds",
-                opts.folds.map_or_else(String::new, |f| f.to_string()),
-            ),
-            ("flow", opts.flow.to_string()),
-        ],
-    );
+    // QE-499 Phase B: resolve + govern the sealed formula pool BEFORE deriving the lineage, so a bad pool
+    // fails closed before anything is sealed. The pool lives under the SANDBOX research root (the bridge
+    // admits Sandbox pools only, B5). `FormulaPoolRepository::load` verifies the content hash (a tampered
+    // pool is rejected) and a missing artefact is a hard error.
+    let pool_intake = match opts.pool.as_deref() {
+        Some(pool_id) => {
+            let repo = qe_formula_pool::FormulaPoolRepository::new(pool_root_for(
+                &cfg.storage.artifacts_dir,
+                EvolveMode::Sandbox,
+            ));
+            let sealed = repo.load(pool_id).map_err(|e| RunError::PoolLoad {
+                pool_id: pool_id.to_owned(),
+                reason: e.to_string(),
+            })?;
+            let intake =
+                jobs::pool_intake::admit_pool(&sealed, jobs::features::catalogue_config().states)?;
+            Some(intake)
+        }
+        None => None,
+    };
+    // QE-496: fold the effective run parameters into the lineage fingerprint. The `--pool` id is appended
+    // ONLY when present, so a no-pool run's fingerprint (and thus its vintage id) is byte-identical to
+    // pre-QE-499 — while two configs differing only in `--pool` get distinct vintage ids.
+    let mut parts: Vec<(&str, String)> = vec![
+        ("instrument", instrument.clone()),
+        ("start", opts.start.clone()),
+        ("end", opts.end.clone()),
+        ("resolution", opts.resolution.clone()),
+        ("generations", opts.generations.to_string()),
+        ("population", opts.population.to_string()),
+        ("holdout", opts.holdout.to_string()),
+        ("embargo", opts.embargo.to_string()),
+        (
+            "indicator_subset",
+            opts.indicator_subset
+                .as_ref()
+                .map_or_else(String::new, |s| s.join(",")),
+        ),
+        (
+            "windows",
+            opts.windows.map_or_else(String::new, |w| w.to_string()),
+        ),
+        (
+            "folds",
+            opts.folds.map_or_else(String::new, |f| f.to_string()),
+        ),
+        ("flow", opts.flow.to_string()),
+    ];
+    if let Some(intake) = pool_intake.as_ref() {
+        parts.push(("pool", intake.pool_id.clone()));
+    }
+    let params_fp = run_fingerprint("train", &parts);
     let lineage = Lineage::from_config(cfg, params_fp, code_commit, vec![seed])?;
 
     // 4. Build the job params from config + options and run the pipeline.
@@ -224,6 +254,8 @@ pub fn run_train(
         folds: opts.folds,
         // QE-460 composite-flow marker: record the frozen-holdout lineage. Off ⇒ byte-identical seal.
         flow: opts.flow,
+        // QE-499 Phase B: the resolved + governed sealed pool (None ⇒ plain train, byte-identical seal).
+        pool: pool_intake,
     };
 
     Ok(run_train_job(&params, emit)?)
@@ -386,6 +418,9 @@ pub enum Command {
         /// QE-460 — train sub-job of a composite flow (`--flow`): record the frozen-holdout lineage + the
         /// resolved holdout window. Off ⇒ a plain train (byte-identical seal).
         flow: bool,
+        /// QE-499 Phase B — inject a sealed formula pool (`--pool <id>`) into the catalogue. `None` ⇒ a
+        /// plain train (byte-identical seal).
+        pool: Option<String>,
     },
     /// Run the offline GP evolve pipeline (QE-452): illuminate → deflation → freeze → **seal a formula
     /// pool** (never a vintage).
@@ -513,6 +548,8 @@ where
             let mut folds: Option<usize> = None;
             // QE-460 composite-flow train sub-job marker (records the frozen-holdout lineage).
             let mut flow = false;
+            // QE-499 Phase B: inject a sealed formula pool by id.
+            let mut pool: Option<String> = None;
             while let Some(flag) = it.next() {
                 match flag.as_str() {
                     "--config" => config = PathBuf::from(value(&mut it, "--config")?),
@@ -533,6 +570,8 @@ where
                     "--windows" => windows = Some(parse_usize_flag(&mut it, "--windows")?),
                     "--folds" => folds = Some(parse_usize_flag(&mut it, "--folds")?),
                     "--flow" => flow = true,
+                    // QE-499: `--pool <id>` injects a sealed formula pool into the catalogue.
+                    "--pool" => pool = Some(value(&mut it, "--pool")?),
                     other => {
                         return Err(CliError::Usage(format!("unknown flag `{other}`")));
                     }
@@ -555,6 +594,7 @@ where
                 windows,
                 folds,
                 flow,
+                pool,
             })
         }
         "evolve" => {
@@ -823,6 +863,22 @@ mod tests {
             run_fingerprint("evolve", &base),
             "train and evolve must never collide"
         );
+        // QE-499/QE-496: appending a `--pool` part changes the fingerprint (⇒ a distinct vintage id), while
+        // the NO-pool run (no `pool` part appended) is byte-identical to the pre-QE-499 fingerprint `a`.
+        let mut with_pool = base.clone();
+        with_pool.push(("pool", "campaign-abc".to_owned()));
+        let mut with_other_pool = base.clone();
+        with_other_pool.push(("pool", "campaign-xyz".to_owned()));
+        assert_ne!(
+            a,
+            run_fingerprint("train", &with_pool),
+            "QE-496: --pool must change the vintage id"
+        );
+        assert_ne!(
+            run_fingerprint("train", &with_pool),
+            run_fingerprint("train", &with_other_pool),
+            "two different pools must produce distinct vintage ids"
+        );
         // key/value boundary is unambiguous (["ab","c"] vs ["a","bc"])
         let x = run_fingerprint("t", &[("ab", "c".to_owned())]);
         let y = run_fingerprint("t", &[("a", "bc".to_owned())]);
@@ -868,6 +924,7 @@ mod tests {
                 windows: None,
                 folds: None,
                 flow: false,
+                pool: None,
             }
         );
         // Every flag overridden.
@@ -927,8 +984,19 @@ mod tests {
                 windows: Some(6),
                 folds: Some(4),
                 flow: true,
+                pool: None,
             }
         );
+    }
+
+    #[test]
+    fn train_parses_the_pool_flag() {
+        // QE-499: `--pool <id>` selects a sealed formula pool to inject; absent ⇒ `None` (plain train).
+        let cmd = parse_args(["train", "--pool", "campaign-abc"]).unwrap();
+        match cmd {
+            Command::Train { pool, .. } => assert_eq!(pool.as_deref(), Some("campaign-abc")),
+            other => panic!("expected Train, got {other:?}"),
+        }
     }
 
     #[test]

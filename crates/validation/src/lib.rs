@@ -114,6 +114,30 @@ pub struct VintageStats<'a> {
     pub n_trials: usize,
     /// CSCV block count (even, `≥ 2`).
     pub cscv_blocks: usize,
+    /// QE-499 §4 — an optional **sealed-pool deflation floor** to COMPOSE into this vintage's DSR bar when
+    /// evolved formulas were injected into the catalogue. `None` (the default, no-pool path) leaves the
+    /// deflation byte-identical. When `Some`, the bar is floored in **both** dimensions (never averaged):
+    /// the trial-Sharpe dispersion becomes `max(genome-population variance, pool.trial_variance)` and the
+    /// best-of-N noise bar `E[max SR]` is floored by the pool's sealed `expected_max_sharpe`. Flooring is
+    /// the honest direction (over-deflation ⇒ false-reject, never false-accept). The additive trial COUNT
+    /// (`effective_trials_with_features(..) + pool.n_trials`) is composed by the caller and passed through
+    /// [`n_trials`](Self::n_trials).
+    pub deflation_floor: Option<DeflationFloor>,
+}
+
+/// A sealed pool's deflation floor (QE-499 §4), composed into a `--pool` vintage's DSR bar. Both components
+/// are **floors**, applied with `max`, never averaged — the composed bar is at least as high as either the
+/// genome stage's bar or the pool's own sealed bar. Carrying `expected_max_sharpe` separately (rather than
+/// only the variance) preserves the pool's finite log-N best-of-N bar even when the genome-stage variance is
+/// smaller, so the pool's multiple-testing penalty can never be discarded.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DeflationFloor {
+    /// The pool's sealed cross-trial Sharpe **variance** (`DeflationSummary::trial_variance`). The composed
+    /// trial variance is `max(genome-population variance, this)`.
+    pub trial_variance: f64,
+    /// The pool's sealed best-of-N noise bar (`DeflationSummary::expected_max_sharpe`). The composed
+    /// `E[max SR]` deflation bar is floored by this value.
+    pub expected_max_sharpe: f64,
 }
 
 /// The robustness diagnostics for a vintage — `serde` so gate G1 (QE-134) can consume/record it.
@@ -158,10 +182,23 @@ pub fn assess(
     )?;
     // QE-414: the deflation bar's dispersion comes from the uncensored full-cell population, not the
     // (possibly top-N) CSCV `trial_returns`. Both are recorded so the basis is auditable.
-    let trial_variance = trial_sharpe_variance(stats.variance_returns);
+    let genome_variance = trial_sharpe_variance(stats.variance_returns);
+    // QE-499 §4: compose the sealed-pool deflation floor into the bar when evolved formulas were injected.
+    // No floor (the default no-pool path) reproduces `deflated_sharpe_ratio(.., genome_variance, n_trials)`
+    // BYTE-IDENTICALLY. With a floor, both the trial variance and the best-of-N noise bar are floored (max),
+    // never averaged — the honest over-deflation direction.
+    let trial_variance = match stats.deflation_floor {
+        Some(f) => genome_variance.max(f.trial_variance),
+        None => genome_variance,
+    };
+    let mut sr0 = expected_max_sharpe(trial_variance, stats.n_trials);
+    if let Some(f) = stats.deflation_floor {
+        sr0 = sr0.max(f.expected_max_sharpe);
+    }
+    let dsr = probabilistic_sharpe_ratio(stats.candidate_returns, sr0);
     Ok(RobustnessReport {
         observed_sharpe: sharpe_ratio(stats.candidate_returns),
-        dsr: deflated_sharpe_ratio(stats.candidate_returns, trial_variance, stats.n_trials),
+        dsr,
         pbo: pbo_report.pbo,
         spa_pvalue: reality_check_pvalue(stats.excess_over_benchmark, cfg, seed),
         n_trials: stats.n_trials,
@@ -199,6 +236,7 @@ mod tests {
             excess_over_benchmark: &excess,
             n_trials: effective_trials(64, 30, 4),
             cscv_blocks: 6,
+            deflation_floor: None,
         };
         let report = assess(&stats, &SpaConfig::with_defaults(), 2024).unwrap();
 
@@ -219,6 +257,70 @@ mod tests {
     }
 
     #[test]
+    fn deflation_floor_only_hardens_the_bar_never_softens_it() {
+        // QE-499 §4: composing a sealed-pool floor can only LOWER (or hold) the DSR — the composed bar is
+        // floored, never averaged. `None` reproduces the plain deflation byte-identically.
+        let candidate: Vec<f64> = (0..240)
+            .map(|i| 0.02 + 0.005 * ((i % 5) as f64 - 2.0))
+            .collect();
+        let trials: Vec<Vec<f64>> = (0..8)
+            .map(|k| {
+                (0..240)
+                    .map(|i| 0.01 + 0.001 * k as f64 + 0.002 * ((i % 4) as f64 - 1.5))
+                    .collect()
+            })
+            .collect();
+        let excess: Vec<Vec<f64>> = trials
+            .iter()
+            .map(|t| t.iter().map(|x| x - 0.008).collect())
+            .collect();
+        let mk = |floor: Option<DeflationFloor>| VintageStats {
+            candidate_returns: &candidate,
+            trial_returns: &trials,
+            variance_returns: &trials,
+            excess_over_benchmark: &excess,
+            n_trials: effective_trials(45, 20, 2),
+            cscv_blocks: 8,
+            deflation_floor: floor,
+        };
+        let base = assess(&mk(None), &SpaConfig::with_defaults(), 7).unwrap();
+        // A floor with LARGE variance + a high sealed E[maxSR] must not raise the DSR, and must raise the
+        // recorded trial_variance to at least the pool's.
+        let hard = assess(
+            &mk(Some(DeflationFloor {
+                trial_variance: 1.0,
+                expected_max_sharpe: 5.0,
+            })),
+            &SpaConfig::with_defaults(),
+            7,
+        )
+        .unwrap();
+        assert!(
+            hard.dsr <= base.dsr + 1e-12,
+            "floor must not soften the DSR: {} > {}",
+            hard.dsr,
+            base.dsr
+        );
+        assert!(
+            hard.trial_variance >= 1.0,
+            "composed variance floors at the pool's: {}",
+            hard.trial_variance
+        );
+        // A degenerate (zero) floor is a no-op — byte-identical to no floor.
+        let noop = assess(
+            &mk(Some(DeflationFloor {
+                trial_variance: 0.0,
+                expected_max_sharpe: 0.0,
+            })),
+            &SpaConfig::with_defaults(),
+            7,
+        )
+        .unwrap();
+        assert_eq!(noop.dsr, base.dsr, "a zero floor must be a no-op");
+        assert_eq!(noop.trial_variance, base.trial_variance);
+    }
+
+    #[test]
     fn assess_propagates_cscv_errors() {
         let trials = vec![vec![0.01, 0.02]; 8];
         let stats = VintageStats {
@@ -228,6 +330,7 @@ mod tests {
             excess_over_benchmark: &trials,
             n_trials: 100,
             cscv_blocks: 3, // odd
+            deflation_floor: None,
         };
         assert!(matches!(
             assess(&stats, &SpaConfig::with_defaults(), 1),
@@ -255,6 +358,7 @@ mod tests {
             excess_over_benchmark: &trials,
             n_trials: 64,
             cscv_blocks: 8,
+            deflation_floor: None,
         };
         let report = assess(&stats, &SpaConfig::with_defaults(), 7)
             .expect("time-major transpose lets S=8 partition the 80-step time axis (pre-QE-490 this errored)");

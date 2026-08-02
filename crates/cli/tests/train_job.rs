@@ -82,6 +82,8 @@ fn params(store_path: PathBuf, vintage_root: PathBuf, seed: u64) -> TrainParams 
         folds: None,
         // Plain train (not a composite-flow sub-job) ⇒ no frozen-holdout lineage; byte-identical seal.
         flow: false,
+        // QE-499: no injected formula pool ⇒ plain train.
+        pool: None,
     }
 }
 
@@ -904,5 +906,194 @@ fn cpcv_gate_is_wired_into_the_live_promotion_verdict_and_fails_closed() {
     assert!(
         !g1u.promoted,
         "an under-powered CPCV must REJECT (not seal-and-promote by default) — AC #4 fail-closed"
+    );
+}
+
+// ---- QE-499 Phase B: the `--pool` train-intake bridge (end-to-end) --------------------------------
+
+/// Seal a real sandbox pool (two normalising-root formulas + passing per-formula gate_evidence) and admit
+/// it — the exact `PoolIntake` a `qe train --pool` produces. Returns `(intake, sanctioned_hashes, pool_n)`.
+fn admit_fixture_pool() -> (qe_cli::jobs::pool_intake::PoolIntake, Vec<String>, usize) {
+    use qe_formula_pool::{
+        DeflationSummary, FormulaGateEvidence, FormulaPool, FormulaPoolContent, PoolFormula,
+        PoolLineage, PoolMode, POOL_FORMAT_VERSION,
+    };
+    use qe_signal::indicator::expr::{Expr, ExprTree, Field, WinOp};
+
+    let frozen = |op, field, n| {
+        let t = ExprTree::repaired(Expr::Window(op, Box::new(Expr::Input(field)), n));
+        PoolFormula {
+            sexpr: t.canonical_sexpr(),
+            formula_hash: t.canonical_hash(),
+        }
+    };
+    let mut formulas = vec![
+        frozen(WinOp::Rank, Field::Close, 10),
+        frozen(WinOp::Zscore, Field::High, 20),
+    ];
+    formulas.sort_by(|a, b| a.formula_hash.cmp(&b.formula_hash));
+    let evidence: Vec<FormulaGateEvidence> = formulas
+        .iter()
+        .map(|f| FormulaGateEvidence {
+            formula_hash: f.formula_hash.clone(),
+            ic_two_fold_same_sign_fdr_pass: true,
+            cost_stress_min_net_log_growth: Decimal::new(5, 3),
+            realised_turnover_frac: Decimal::new(20, 2),
+            capacity_usd: Decimal::from(300_000),
+            within_caps_and_stratum_deflated: true,
+            random_entry_null_pass: true,
+        })
+        .collect();
+    let pool_n = 200u64;
+    let content = FormulaPoolContent {
+        format_version: POOL_FORMAT_VERSION,
+        pool_id: "campaign-pool-e2e".to_owned(),
+        mode: PoolMode::Sandbox,
+        formulas,
+        deflation: DeflationSummary {
+            gp_aware: true,
+            distinct_evaluations: 190,
+            n_trials: pool_n,
+            analytic_floor: 90,
+            variance_trials: 45,
+            trial_variance: Decimal::new(1234, 4),
+            expected_max_sharpe: Decimal::new(21, 1),
+            champion_dsr: Decimal::new(97, 2),
+            uncensored_pbo: Some(Decimal::new(42, 2)),
+        },
+        gate_evidence: Some(evidence),
+        lineage: PoolLineage {
+            campaign_id: "campaign-pool-e2e".to_owned(),
+            seed: 7,
+            mode: PoolMode::Sandbox,
+            code_commit: "commit".to_owned(),
+            input_snapshot_id: String::new(),
+            config_hash: "cfg".to_owned(),
+            pool_hash: "poolhash".to_owned(),
+        },
+    };
+    let sealed = FormulaPool::seal(content).unwrap();
+    let intake = qe_cli::jobs::pool_intake::admit_pool(&sealed, CatalogueConfig::default().states)
+        .expect("a sandbox, gp-aware, evidenced pool is admitted");
+    let hashes = intake.formula_hashes.clone();
+    (intake, hashes, pool_n as usize)
+}
+
+#[test]
+fn qe499_pool_train_widens_identity_composes_deflation_and_is_non_production() {
+    use qe_signal::CatalogueIdentity;
+    use qe_vintage::{schema, Vintage};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let store_path = copy_store_to(tmp.path());
+    let (intake, sanctioned, pool_n) = admit_fixture_pool();
+
+    // A --pool train over the fixture (un-steered).
+    let root = tmp.path().join("artifacts/pool");
+    let mut lines: Vec<ProgressLine> = Vec::new();
+    let outcome = run_train_job(
+        &TrainParams {
+            pool: Some(intake),
+            ..params(store_path.clone(), root.clone(), 42)
+        },
+        &mut |l| lines.push(l),
+    )
+    .expect("a --pool train seals");
+
+    // (§6 data-window provenance) The unverifiable evolve/train overlap is surfaced as a warning, never a
+    // silent pass (the fixture pool has an empty input_snapshot_id, so disjointness cannot be asserted).
+    assert!(
+        lines.iter().any(|l| matches!(
+            l,
+            ProgressLine::Progress { stage, msg, .. }
+                if stage == "warn" && msg.contains("data-window provenance")
+        )),
+        "a --pool train must warn when the evolve/train window disjointness is unverifiable"
+    );
+
+    // The written vintage: read WITHOUT the generic schema assert (which rejects pool vintages by design).
+    let file = std::fs::File::open(&outcome.vintage_path).unwrap();
+    let v = Vintage::load(file).expect("hash verifies");
+    let content = &v.content;
+
+    // (B4/identity) The sealed identity is WIDENED and binds the exact sanctioned pool.
+    assert_eq!(
+        content.catalogue.formula_pool, sanctioned,
+        "the sealed identity carries the sanctioned pool hashes"
+    );
+    assert_ne!(
+        content.catalogue,
+        CatalogueIdentity::current(),
+        "a pool vintage's identity is not the empty-pool current()"
+    );
+    // (B4) Pool vintages are WRITE-ONLY (sealed for evidence/audit; loadability deferred to Phase C): the
+    // GENERIC boundary (the only load boundary — runtime/live AND CLI backtest) REJECTS it, fail-closed.
+    assert!(schema::assert_schema(content).is_err());
+    // And the real repository load path (used by runtime/backtest) refuses it too.
+    assert!(
+        VintageRepository::new(&root)
+            .load(&outcome.vintage_id)
+            .is_err(),
+        "the generic repo load must refuse a pool vintage (live fail-closed)"
+    );
+
+    // (B5) The vintage is written but marked NON-PRODUCTION (promoted=false, dedicated criterion present).
+    assert!(
+        !content.seal_evidence.is_promoted(),
+        "a pool vintage must never read as promoted (non-production, B5)"
+    );
+    assert!(
+        content
+            .seal_evidence
+            .promotion
+            .as_ref()
+            .unwrap()
+            .criteria
+            .iter()
+            .any(|c| c.name == "pool_vintage_non_production" && !c.passed),
+        "the non-production reason criterion must be sealed"
+    );
+    // (§6 data-window honesty record) The unverifiable evolve/train overlap is sealed as a FAILING criterion
+    // on the artefact (not just a log line), since the fixture pool records no evolve window.
+    assert!(
+        content
+            .seal_evidence
+            .promotion
+            .as_ref()
+            .unwrap()
+            .criteria
+            .iter()
+            .any(|c| c.name == "evolve_window_provenance_unverified" && !c.passed),
+        "the unverifiable evolve/train data-window overlap must be recorded as a sealed caveat"
+    );
+
+    // (§4) The composed trial basis includes the additive pool stage: n_trials >= pool_n.
+    assert!(
+        content.seal_evidence.n_trials >= pool_n as u64,
+        "§4: the sealed n_trials {} must include the additive pool basis {pool_n}",
+        content.seal_evidence.n_trials
+    );
+
+    // Control: a NO-pool run over the same store loads CLEAN through the generic boundary and carries no
+    // non-production marker (non-vacuous — proves the pool path is what widens/marks the vintage). (The
+    // "--pool changes the vintage id" QE-496 property is a `run_train` fingerprint concern, tested in the
+    // library-crate `run_fingerprint` unit test — `run_train_job` here takes an externally-supplied
+    // lineage, so both runs share one id by construction.)
+    let np_root = tmp.path().join("artifacts/nopool");
+    let np = run_train_job(&params(store_path, np_root.clone(), 7), &mut |_| {})
+        .expect("a no-pool train seals");
+    assert!(
+        VintageRepository::new(&np_root)
+            .load(&np.vintage_id)
+            .is_ok(),
+        "the no-pool vintage still loads clean (control)"
+    );
+    assert!(
+        np.result
+            .g1
+            .criteria
+            .iter()
+            .all(|c| c.name != "pool_vintage_non_production"),
+        "the no-pool vintage carries no non-production marker"
     );
 }

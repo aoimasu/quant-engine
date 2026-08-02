@@ -170,7 +170,10 @@ mod tests {
     use qe_signal::{CatalogueConfig, FeatureSchema};
 
     fn schema() -> FeatureSchema {
-        FeatureSchema::from_catalogue(&CatalogueConfig { states: 5 })
+        FeatureSchema::from_catalogue(&CatalogueConfig {
+            states: 5,
+            formula_pool: Vec::new(),
+        })
     }
 
     fn idx_of(schema: &FeatureSchema, id: &str) -> u16 {

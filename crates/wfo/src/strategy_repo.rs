@@ -178,7 +178,10 @@ mod tests {
     use rust_decimal::Decimal;
 
     fn schema() -> FeatureSchema {
-        FeatureSchema::from_catalogue(&CatalogueConfig { states: 5 })
+        FeatureSchema::from_catalogue(&CatalogueConfig {
+            states: 5,
+            formula_pool: Vec::new(),
+        })
     }
 
     fn long_genome(hold: u16) -> Genome {

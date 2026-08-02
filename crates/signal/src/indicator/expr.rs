@@ -49,6 +49,13 @@ pub const MAX_NODES: usize = 16;
 /// Maximum total FIR lookback in bars (inclusive).
 pub const MAX_TOTAL_LOOKBACK: usize = 200;
 
+/// The maximum nesting depth [`parse_sexpr`] will descend before failing with [`ParseError::TooDeep`]
+/// (QE-499 Phase B, B6 hardening). The intake path parses **untrusted** sealed-pool text *before* the
+/// round-trip hash check, so an adversarial deeply-nested S-expression must not blow the stack. This cap
+/// is far above any legitimate canonical formula ([`MAX_DEPTH`] = 4) yet bounds recursion to a handful of
+/// frames, turning a malicious nest into a clean `ParseError` instead of a panic.
+pub const MAX_PARSE_DEPTH: usize = 64;
+
 /// The fixed rational constant grid (§4.2). A finite grid keeps the reachable canonical set countable
 /// (`E[maxSR]` well-posed for Phase 1b's deflation). Ascending order (nearest-snap, ties → lower).
 pub const CONST_GRID: [Decimal; 15] = [
@@ -791,6 +798,208 @@ fn field_tag(f: Field) -> &'static str {
     }
 }
 
+// ---- QE-499 Phase B (B6): the canonical S-expression PARSER (text → Expr) ----------------------
+
+/// An error reconstructing an [`Expr`] from a canonical S-expression string ([`parse_sexpr`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParseError {
+    /// The input ended while a node was still being parsed.
+    UnexpectedEnd,
+    /// A token appeared that the grammar does not permit at this position (carries the offending token).
+    UnexpectedToken(String),
+    /// An operator tag was not one of the known unary/binary/window ops (carries the tag).
+    UnknownOp(String),
+    /// A bare atom was neither a `#`-prefixed constant nor a known field terminal (carries the atom).
+    UnknownAtom(String),
+    /// A window op's period was not a valid `usize` (carries the offending token).
+    BadPeriod(String),
+    /// A `#`-prefixed constant did not parse as an exact `Decimal` (carries the literal).
+    BadConst(String),
+    /// Tokens remained after a complete expression was parsed (carries the first stray token).
+    TrailingTokens(String),
+    /// The S-expression nested deeper than [`MAX_PARSE_DEPTH`] (an adversarial/malformed deep nest on the
+    /// untrusted intake path). Bounded so parsing fails cleanly instead of overflowing the stack.
+    TooDeep,
+}
+
+impl std::fmt::Display for ParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ParseError::UnexpectedEnd => write!(f, "unexpected end of S-expression"),
+            ParseError::UnexpectedToken(t) => write!(f, "unexpected token `{t}`"),
+            ParseError::UnknownOp(t) => write!(f, "unknown operator `{t}`"),
+            ParseError::UnknownAtom(t) => write!(f, "unknown atom `{t}`"),
+            ParseError::BadPeriod(t) => write!(f, "malformed window period `{t}`"),
+            ParseError::BadConst(t) => write!(f, "malformed constant `{t}`"),
+            ParseError::TrailingTokens(t) => write!(f, "trailing tokens after expression: `{t}`"),
+            ParseError::TooDeep => {
+                write!(
+                    f,
+                    "S-expression nested deeper than the parse depth cap ({MAX_PARSE_DEPTH})"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for ParseError {}
+
+fn field_from_tag(tag: &str) -> Option<Field> {
+    match tag {
+        "close" => Some(Field::Close),
+        "high" => Some(Field::High),
+        "low" => Some(Field::Low),
+        "volume" => Some(Field::Volume),
+        "typical" => Some(Field::Typical),
+        _ => None,
+    }
+}
+
+fn unop_from_tag(tag: &str) -> Option<UnOp> {
+    match tag {
+        "abs" => Some(UnOp::Abs),
+        "sign" => Some(UnOp::Sign),
+        "neg" => Some(UnOp::Neg),
+        _ => None,
+    }
+}
+
+fn binop_from_tag(tag: &str) -> Option<BinOp> {
+    match tag {
+        "add" => Some(BinOp::Add),
+        "sub" => Some(BinOp::Sub),
+        "mul" => Some(BinOp::Mul),
+        "div" => Some(BinOp::Div),
+        _ => None,
+    }
+}
+
+fn winop_from_tag(tag: &str) -> Option<WinOp> {
+    match tag {
+        "mean" => Some(WinOp::Mean),
+        "max" => Some(WinOp::Max),
+        "min" => Some(WinOp::Min),
+        "std" => Some(WinOp::Std),
+        "mad" => Some(WinOp::MeanAbsDev),
+        "delta" => Some(WinOp::Delta),
+        "lag" => Some(WinOp::Lag),
+        "rank" => Some(WinOp::Rank),
+        "zscore" => Some(WinOp::Zscore),
+        _ => None,
+    }
+}
+
+/// Split a canonical S-expression into tokens: the parentheses `(`/`)` are single tokens, whitespace is a
+/// separator, and every other maximal run of non-space, non-paren characters is one atom (a field tag, an
+/// operator tag, a `#`-prefixed constant, or a window period). This is the exact inverse of
+/// [`write_sexpr`]'s single-space-delimited, paren-wrapped output.
+fn tokenize(s: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut cur = String::new();
+    for ch in s.chars() {
+        match ch {
+            '(' | ')' => {
+                if !cur.is_empty() {
+                    tokens.push(std::mem::take(&mut cur));
+                }
+                tokens.push(ch.to_string());
+            }
+            c if c.is_whitespace() => {
+                if !cur.is_empty() {
+                    tokens.push(std::mem::take(&mut cur));
+                }
+            }
+            c => cur.push(c),
+        }
+    }
+    if !cur.is_empty() {
+        tokens.push(cur);
+    }
+    tokens
+}
+
+fn parse_atom(atom: &str) -> Result<Expr, ParseError> {
+    if let Some(lit) = atom.strip_prefix('#') {
+        let value =
+            Decimal::from_str_exact(lit).map_err(|_| ParseError::BadConst(atom.to_owned()))?;
+        return Ok(Expr::Const(value));
+    }
+    if let Some(field) = field_from_tag(atom) {
+        return Ok(Expr::Input(field));
+    }
+    Err(ParseError::UnknownAtom(atom.to_owned()))
+}
+
+fn parse_node(tokens: &[String], pos: &mut usize, depth: usize) -> Result<Expr, ParseError> {
+    // Bound recursion on the untrusted intake path: a deeply-nested S-expression must fail cleanly, not
+    // overflow the stack (the parse runs BEFORE the round-trip hash check that would reject it).
+    if depth > MAX_PARSE_DEPTH {
+        return Err(ParseError::TooDeep);
+    }
+    let tok = tokens.get(*pos).ok_or(ParseError::UnexpectedEnd)?.clone();
+    *pos += 1;
+    if tok == ")" {
+        return Err(ParseError::UnexpectedToken(tok));
+    }
+    if tok != "(" {
+        // A bare atom (terminal): a `#`-constant or a field.
+        return parse_atom(&tok);
+    }
+    // A compound `( <op> ... )`: the head names the operator.
+    let head = tokens.get(*pos).ok_or(ParseError::UnexpectedEnd)?.clone();
+    *pos += 1;
+    let node = if let Some(op) = unop_from_tag(&head) {
+        let child = parse_node(tokens, pos, depth + 1)?;
+        Expr::Unary(op, Box::new(child))
+    } else if let Some(op) = binop_from_tag(&head) {
+        let a = parse_node(tokens, pos, depth + 1)?;
+        let b = parse_node(tokens, pos, depth + 1)?;
+        Expr::Binary(op, Box::new(a), Box::new(b))
+    } else if let Some(op) = winop_from_tag(&head) {
+        let period_tok = tokens.get(*pos).ok_or(ParseError::UnexpectedEnd)?.clone();
+        *pos += 1;
+        let period: Period = period_tok
+            .parse()
+            .map_err(|_| ParseError::BadPeriod(period_tok.clone()))?;
+        let child = parse_node(tokens, pos, depth + 1)?;
+        Expr::Window(op, Box::new(child), period)
+    } else {
+        return Err(ParseError::UnknownOp(head));
+    };
+    // Consume the closing paren.
+    match tokens.get(*pos) {
+        Some(close) if close == ")" => {
+            *pos += 1;
+            Ok(node)
+        }
+        Some(other) => Err(ParseError::UnexpectedToken(other.clone())),
+        None => Err(ParseError::UnexpectedEnd),
+    }
+}
+
+/// Reconstruct an [`Expr`] from a canonical S-expression string — the exact inverse of
+/// [`write_sexpr`]/[`ExprTree::canonical_sexpr`] (QE-499 Phase B, B6). Constants are read back with
+/// [`Decimal::from_str_exact`] (no `f64`), so a round trip is byte-exact for any on-grid or folded constant.
+///
+/// The design invariant this underwrites (proved by the `parse_sexpr_round_trips_hash_stably` property
+/// test): for any tree `t`, `SHA-256(canonical_sexpr(parse_sexpr(t.canonical_sexpr()))) == t.canonical_hash()`
+/// — so a sealed pool's `formula_hash` is reproducible from its stored `sexpr` alone, and the train-intake
+/// bridge (qe-cli) can turn a sealed `PoolFormula` back into a live indicator without trusting the stored
+/// hash.
+///
+/// # Errors
+/// [`ParseError`] on malformed input: an unknown operator/field tag, a non-`usize` window period, a
+/// non-`Decimal` constant, an unbalanced paren, or trailing tokens after a complete expression.
+pub fn parse_sexpr(s: &str) -> Result<Expr, ParseError> {
+    let tokens = tokenize(s);
+    let mut pos = 0usize;
+    let expr = parse_node(&tokens, &mut pos, 0)?;
+    if pos != tokens.len() {
+        return Err(ParseError::TrailingTokens(tokens[pos].clone()));
+    }
+    Ok(expr)
+}
+
 fn unop_tag(op: UnOp) -> &'static str {
     match op {
         UnOp::Abs => "abs",
@@ -1499,5 +1708,182 @@ mod tests {
         let mut m = e.clone();
         *nth_node_mut(&mut m, 1).unwrap() = Expr::Input(Field::Low);
         assert!(matches!(nth_node(&m, 1), Some(Expr::Input(Field::Low))));
+    }
+
+    // ---- QE-499 Phase B (B6): the canonical S-expression parser (round-trip + hash stability) -----
+
+    /// The canonical S-expression of `expr` after canonicalisation — the exact text a sealed pool stores.
+    fn canonical_text(expr: Expr) -> String {
+        ExprTree::new(expr).canonical_sexpr()
+    }
+
+    #[test]
+    fn parse_sexpr_inverts_write_sexpr_structurally() {
+        // A spread of trees exercising every node kind (fields, all unops, all binops, all winops, negative
+        // and fractional constants, nesting). `parse_sexpr` must reconstruct the identical `Expr`.
+        let trees = vec![
+            Expr::Input(Field::Close),
+            Expr::Const(Decimal::new(-25, 2)), // -0.25
+            Expr::Const(Decimal::from(100)),
+            Expr::Unary(UnOp::Neg, boxed(Expr::Input(Field::High))),
+            Expr::Unary(
+                UnOp::Abs,
+                boxed(Expr::Unary(UnOp::Sign, boxed(Expr::Input(Field::Low)))),
+            ),
+            Expr::Binary(
+                BinOp::Div,
+                boxed(Expr::Input(Field::Volume)),
+                boxed(window(WinOp::Mean, Field::Volume, 20)),
+            ),
+            Expr::Window(WinOp::Zscore, boxed(Expr::Input(Field::Typical)), 50),
+            Expr::Window(
+                WinOp::Rank,
+                boxed(Expr::Binary(
+                    BinOp::Sub,
+                    boxed(window(WinOp::Max, Field::High, 14)),
+                    boxed(window(WinOp::Min, Field::Low, 14)),
+                )),
+                100,
+            ),
+            Expr::Window(WinOp::Lag, boxed(Expr::Input(Field::Close)), 11),
+            Expr::Window(WinOp::Delta, boxed(Expr::Input(Field::Close)), 5),
+            Expr::Window(WinOp::MeanAbsDev, boxed(Expr::Input(Field::Close)), 10),
+            Expr::Window(WinOp::Std, boxed(Expr::Input(Field::Close)), 20),
+        ];
+        for tree in trees {
+            let mut s = String::new();
+            write_sexpr(&tree, &mut s);
+            let back = parse_sexpr(&s).unwrap_or_else(|e| panic!("parse `{s}` failed: {e}"));
+            assert_eq!(back, tree, "structural round trip failed for `{s}`");
+            // And re-emitting the parsed tree yields byte-identical text.
+            let mut s2 = String::new();
+            write_sexpr(&back, &mut s2);
+            assert_eq!(s2, s, "re-emit diverged for `{s}`");
+        }
+    }
+
+    #[test]
+    fn parse_sexpr_round_trips_hash_stably() {
+        // THE B6 property: for the catalogue-seed formulas AND a spread of trees, the hash recomputed from
+        // the PARSED canonical text equals the sealed `formula_hash` — SHA-256(canonical_sexpr(parse(s))) == s.
+        let mut samples: Vec<Expr> = seed_catalogue_subset(5)
+            .into_iter()
+            .map(|(_, expr, _)| expr)
+            .collect();
+        // A spread of trees with normalising roots (the shape a real pool freezes), incl. affine wrappers
+        // that canonicalisation collapses (so the stored text is genuinely the canonical form).
+        samples.push(Expr::Window(
+            WinOp::Rank,
+            boxed(Expr::Binary(
+                BinOp::Add,
+                boxed(Expr::Input(Field::High)),
+                boxed(Expr::Input(Field::Close)),
+            )),
+            50,
+        ));
+        samples.push(Expr::Window(
+            WinOp::Zscore,
+            boxed(Expr::Binary(
+                BinOp::Mul,
+                boxed(window(WinOp::Mean, Field::Close, 20)),
+                boxed(Expr::Const(Decimal::from(2))),
+            )),
+            50,
+        ));
+        samples.push(Expr::Window(
+            WinOp::Rank,
+            boxed(Expr::Input(Field::Low)),
+            10,
+        ));
+
+        for expr in samples {
+            // The sealed artefact stores the CANONICAL text and its SHA-256 as `formula_hash`.
+            let sealed_sexpr = canonical_text(expr.clone());
+            let sealed_hash = {
+                let digest = Sha256::digest(sealed_sexpr.as_bytes());
+                digest
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<String>()
+            };
+            // Reconstruct from the text alone, then recompute the hash the way the pool did.
+            let parsed = parse_sexpr(&sealed_sexpr)
+                .unwrap_or_else(|e| panic!("parse `{sealed_sexpr}` failed: {e}"));
+            let reparsed_sexpr = canonical_text(parsed);
+            let reparsed_hash = {
+                let digest = Sha256::digest(reparsed_sexpr.as_bytes());
+                digest
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<String>()
+            };
+            assert_eq!(
+                reparsed_sexpr, sealed_sexpr,
+                "canonical text not stable through parse for `{sealed_sexpr}`"
+            );
+            assert_eq!(
+                reparsed_hash, sealed_hash,
+                "formula_hash not reproducible from stored sexpr `{sealed_sexpr}`"
+            );
+        }
+    }
+
+    #[test]
+    fn every_const_grid_value_round_trips_through_the_parser() {
+        // Constants are read back exactly (no f64): each grid value survives `#{c}` → parse → Const.
+        for &c in CONST_GRID.iter() {
+            let text = format!("#{c}");
+            match parse_sexpr(&text).unwrap() {
+                Expr::Const(v) => assert_eq!(v, c, "const `{text}` re-parsed to {v}"),
+                other => panic!("`{text}` did not parse to a Const: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn parse_sexpr_rejects_malformed_input() {
+        assert!(matches!(parse_sexpr(""), Err(ParseError::UnexpectedEnd)));
+        assert!(matches!(
+            parse_sexpr("(add close)"), // binary with one child ⇒ the ) is seen where a node is expected
+            Err(ParseError::UnexpectedToken(_))
+        ));
+        assert!(matches!(
+            parse_sexpr("(bogus close 5)"),
+            Err(ParseError::UnknownOp(_))
+        ));
+        assert!(matches!(
+            parse_sexpr("wat"),
+            Err(ParseError::UnknownAtom(_))
+        ));
+        assert!(matches!(
+            parse_sexpr("(mean five close)"),
+            Err(ParseError::BadPeriod(_))
+        ));
+        assert!(matches!(
+            parse_sexpr("#not-a-number"),
+            Err(ParseError::BadConst(_))
+        ));
+        assert!(matches!(
+            parse_sexpr("close high"), // two complete exprs
+            Err(ParseError::TrailingTokens(_))
+        ));
+    }
+
+    #[test]
+    fn parse_sexpr_bounds_recursion_depth_instead_of_overflowing() {
+        // QE-499 B6 hardening: a deeply-nested S-expression on the untrusted intake path must fail with a
+        // clean `TooDeep` error, never a stack overflow. `neg` is a unary op, so `(neg (neg ... close))`
+        // nests one level per wrapper — build well past the cap and assert a typed error, not a panic.
+        let deep = format!(
+            "{}close{}",
+            "(neg ".repeat(MAX_PARSE_DEPTH + 50),
+            ")".repeat(MAX_PARSE_DEPTH + 50)
+        );
+        assert!(
+            matches!(parse_sexpr(&deep), Err(ParseError::TooDeep)),
+            "a nest past the depth cap must be a clean TooDeep error"
+        );
+        // A legitimately shallow expression (depth ≤ MAX_DEPTH) still parses fine — the cap is far above it.
+        assert!(parse_sexpr("(neg (mean 5 close))").is_ok());
     }
 }

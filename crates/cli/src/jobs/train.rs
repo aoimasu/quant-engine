@@ -32,8 +32,8 @@ use qe_risk::{
 use qe_signal::{label_regimes, Regime, RegimeConfig, TrendState, VolState};
 use qe_validation::{
     assess, available_feature_space, buy_and_hold_returns, coverage_floor_ok, effective_trials,
-    effective_trials_with_features, sharpe_ratio, RobustnessReport, SpaConfig, VintageStats,
-    MIN_OCCUPIED_NICHES,
+    effective_trials_with_features, sharpe_ratio, DeflationFloor, RobustnessReport, SpaConfig,
+    VintageStats, MIN_OCCUPIED_NICHES,
 };
 use qe_vintage::{
     HoldoutSplit, RegimeShare, ResearchProvenance, SteerDelta, TimeRange, Vintage, VintageContent,
@@ -53,8 +53,9 @@ use rust_decimal::Decimal;
 use serde::Serialize;
 
 use super::datetime::{format_ymd, parse_ymd_to_millis};
-use super::features::{catalogue_schema, check_schema, to_decision_bars};
+use super::features::{catalogue_config, check_schema, to_decision_bars_with};
 use super::{ProgressLine, RunError};
+use qe_signal::{CatalogueConfig, CatalogueIdentity, FeatureSchema};
 
 /// The even CSCV block count for the robustness assessment's PBO estimator (QE-478/QE-490). `S = 8` gives
 /// `C(8,4) = 70` balanced partitions of the **time** axis (`assess` transposes the strategy-major trial
@@ -422,6 +423,15 @@ pub struct TrainParams {
     /// `false` (a plain train) the provenance holdout fields stay default (empty) ⇒ the sealed vintage is
     /// **byte-identical** to the pre-QE-460 seal (no golden move, un-flow vintages unaffected).
     pub flow: bool,
+
+    /// QE-499 Phase B — the resolved, **verified** sealed formula pool this train injects into the catalogue
+    /// (`qe train --pool <id>`). `None` (the default) ⇒ a plain train: the catalogue, schema, identity, and
+    /// deflation are **byte-identical** to the pre-QE-499 seal. `Some` ⇒ the pool's formulas widen the
+    /// catalogue (formulas-as-features), the sealed identity binds the exact pool, the §4 deflation basis is
+    /// composed (additive count + `(variance, E[maxSR])` floor), and the vintage is written but marked
+    /// **non-production** (B5). Resolved + governed in `run_train` (qe-cli lib) via
+    /// [`pool_intake::admit_pool`](super::pool_intake::admit_pool) before the job runs.
+    pub pool: Option<super::pool_intake::PoolIntake>,
 }
 
 /// The training window recorded in the result sidecar.
@@ -556,7 +566,45 @@ pub fn run_train_job(
         "features",
         "assembling decision bars and splitting train/holdout",
     );
-    let schema = catalogue_schema();
+    // QE-499 Phase B: build the catalogue config with the injected formula pool (empty ⇒ byte-identical to
+    // the default catalogue). The formulas ride the catalogue at a fixed position after price/flow, so the
+    // schema is WIDENED and the MAP-Elites search can address them as ordinary features (formulas-as-
+    // features). The injected formulas are compiled at the catalogue's own `states`, keeping `num_states`
+    // uniform (design §5). A no-pool run yields `cfg == CatalogueConfig::default()`.
+    let cfg = CatalogueConfig {
+        states: catalogue_config().states,
+        formula_pool: params
+            .pool
+            .as_ref()
+            .map(|p| p.compiled.clone())
+            .unwrap_or_default(),
+    };
+    let schema = FeatureSchema::from_catalogue(&cfg);
+
+    // ---- QE-499 data-window provenance major (design §6): warn on an unverifiable evolve/train overlap ----
+    // An evolve-fit formula scored by G1 over bars that OVERLAP its evolve window is in-sample-contaminated
+    // regardless of the deflation count. Full enforcement is a disjoint-window/embargo assertion between the
+    // pool's evolve window and this train/holdout window — but the sealed pool artefact does not (yet) record
+    // its evolve window (`PoolLineage.input_snapshot_id` is empty until the ingest-snapshot seam lands). So we
+    // surface the risk as a hard, auditable WARNING here (never a silent pass) and DEFER the assertion to when
+    // the pool records its window. The vintage still binds the exact pool via `catalogue.formula_pool`, so the
+    // overlap is auditable post-hoc from the campaign lineage.
+    if let Some(pool) = params.pool.as_ref() {
+        if pool.input_snapshot_id.is_empty() {
+            progress(
+                emit,
+                20,
+                "warn",
+                &format!(
+                    "data-window provenance UNVERIFIED: pool `{}` records no evolve window \
+                     (input_snapshot_id empty) — cannot assert the G1 train/holdout window is disjoint \
+                     from the formulas' evolve window; an overlap would be in-sample contamination (§6). \
+                     Ensure the train window does not overlap the evolve campaign's window.",
+                    pool.campaign_id
+                ),
+            );
+        }
+    }
 
     // ---- QE-458 steer setup (steered-runs-only; un-steered ⇒ byte-identical seal) -----------------
     // A run is STEERED iff any steer knob is set. Un-steered runs take every default below and produce a
@@ -587,7 +635,9 @@ pub fn run_train_job(
     let steer_windows = params.windows.unwrap_or(2);
     let steer_folds = params.folds.unwrap_or(params.cv_folds);
 
-    let decision_bars = to_decision_bars(&bars, &funding, &premium, &open_interest);
+    // QE-499: assemble decision bars against the (possibly widened) catalogue so the injected formula
+    // features are present in every feature vector. A no-pool `cfg` reproduces the default assembly exactly.
+    let decision_bars = to_decision_bars_with(&cfg, &bars, &funding, &premium, &open_interest);
 
     // ---- funding-coverage gate (QE-403) ----------------------------------------------------------
     // Funding accrues only on bars carrying a stamp; a sparse/empty series would have every genome
@@ -826,17 +876,27 @@ pub fn run_train_job(
     // and is deflated against it. Un-steered runs keep the plain `effective_trials` basis unchanged (this
     // is what keeps the un-steered deflation bar / golden vintage byte-identical — no DEFLATION_BASIS_VERSION
     // move). Monotone: `effective_trials_with_features(..) >= effective_trials(..)` (feature_space >= 1).
-    let n_trials = if is_steered {
-        let feature_space = available_feature_space(catalogue_ids_in_play.len(), 0);
-        effective_trials_with_features(
-            occupied_niches,
-            generations,
-            train_cfg.windows,
-            feature_space,
-        )
-    } else {
-        effective_trials(occupied_niches, generations, train_cfg.windows)
-    };
+    //
+    // QE-499 §4 (MANDATORY, CTO ruling): whenever the catalogue carries an injected formula pool, the trial
+    // basis is the ADDITIVE SUM across the two independent selection stages, computed UNCONDITIONALLY (never
+    // gated on `is_steered` — this is what closes the A→B under-deflation window on the plain `--pool` path):
+    //   genome stage: effective_trials_with_features(cells, gens, windows, feature_space) with
+    //     feature_space = the WIDENED catalogue width INCLUDING the K injected formulas. The injected
+    //     formulas ARE catalogue indicators in `schema`, so `schema.ids().len()` is exactly that width, and
+    //     `evolved_count` stays 0 (single count — the formulas ride `catalogue_width`, never double-counted).
+    //   pool stage:   `pool.pool_n_trials` (= `pool.deflation.n_trials`, already `max(distinct, analytic
+    //     floor)` WITHIN the pool stage).
+    // The two are SUMMED (`max()` across stages is FORBIDDEN — it would discard a whole stage's
+    // multiple-testing penalty). Saturating to avoid overflow.
+    let n_trials = compose_trial_basis(
+        params.pool.as_ref().map(|p| p.pool_n_trials),
+        is_steered,
+        occupied_niches,
+        generations,
+        train_cfg.windows,
+        schema.ids().len(),
+        catalogue_ids_in_play.len(),
+    );
 
     // QE-414: the DSR deflation bar's cross-trial Sharpe *dispersion* is estimated from the FULL cell
     // population — the best elite of every occupied cell, one representative Sharpe per behavioural niche
@@ -846,14 +906,27 @@ pub fn run_train_job(
     // and inflates the DSR — exactly what G1 must not reward.
     let variance_returns = cell_champion_returns(&archive, train_bars, &train_cfg);
 
-    let robustness = assess_robustness(
+    // QE-499 §4: the sealed pool's deflation floor — composed into the DSR bar so the trial-Sharpe
+    // dispersion floors at `max(genome variance, pool.trial_variance)` and `E[max SR]` floors at the pool's
+    // sealed `expected_max_sharpe`. `None` on a no-pool run ⇒ byte-identical deflation.
+    let deflation_floor: Option<DeflationFloor> = params.pool.as_ref().map(|p| p.deflation_floor);
+    let mut robustness = assess_robustness(
         &pool,
         &variance_returns,
         &in_sample_returns,
         train_bars,
         n_trials,
+        deflation_floor,
         params.seed,
     );
+    // QE-499 §4 (MF-4): the vintage PBO is computed over the genome elite population only; the pool's sealed
+    // `uncensored_pbo` (the primary GP gate) would otherwise be silently dropped. Floor the genome-stage PBO
+    // by it so the composed PBO can only get HARDER (higher PBO ⇒ worse), analogous to the DSR floor. SPA has
+    // no pool-stage counterpart to compose, so it stays genome-stage-only (documented in §4). No-pool runs are
+    // untouched (byte-identical).
+    if let Some(pool) = params.pool.as_ref() {
+        robustness.pbo = robustness.pbo.max(pool.pool_uncensored_pbo);
+    }
 
     let in_sample_sharpe = sharpe_ratio(&in_sample_returns);
     let holdout_sharpe = sharpe_ratio(&holdout_returns);
@@ -880,6 +953,13 @@ pub fn run_train_job(
     // under-powered / degenerate config — `build → Err` (series too short for `S` purged blocks) or
     // `n_paths < min_paths` — makes `cpcv_gate_pass == false` and **flips the verdict to rejected**
     // (fail-closed), never default-accept. PBO stays primary and untouched; CPCV is additive.
+    // QE-499 §4 (MF-1): each held-out path's DSR must deflate against the SAME floored best-of-N noise bar
+    // the point-DSR path uses — floor `E[maxSR]` by the pool's sealed `expected_max_sharpe`. `None` on a
+    // no-pool run ⇒ the unfloored bar ⇒ the CPCV distribution is byte-identical to the pre-pool path.
+    let cpcv_pool_e_max = params
+        .pool
+        .as_ref()
+        .map(|p| p.deflation_floor.expected_max_sharpe);
     let cpcv_dist = qe_validation::CpcvDistribution::build(
         &holdout_returns,
         DEFAULT_CPCV_BLOCKS,
@@ -889,6 +969,7 @@ pub fn run_train_job(
         robustness.trial_variance,
         n_trials,
         qe_validation::DEFAULT_DSR_FLOOR,
+        cpcv_pool_e_max,
     )
     .ok();
     let cpcv_gate = qe_validation::CpcvGate::default();
@@ -904,6 +985,42 @@ pub fn run_train_job(
     // Conjoin: promote only if already promoted (all point-estimate criteria + PBO passed) AND the CPCV
     // distribution clears the floor. Fail-closed on under-power (`cpcv_gate_pass == false`).
     g1.promoted = g1.promoted && cpcv_gate_pass;
+
+    // ---- QE-499 B5: pool-carrying vintages are NON-PRODUCTION (write-but-mark, QE-476) ----------------
+    // A `--pool` vintage rode the catalogue-injection bridge, which does NOT re-derive the per-formula
+    // seal_allowed hard-blocks (IC/FDR, cost-stress, turnover, capacity, random-entry null — QE-454). So
+    // regardless of the G1 point verdict it is force-marked NON-PRODUCTION: `promoted = false`, so every
+    // downstream selector reading `SealEvidence::is_promoted()` — and the live load path — refuses it. The
+    // honest per-criterion evidence is preserved; a dedicated criterion records WHY. (B4's strict
+    // `assert_schema` already fails the runtime load of any pool vintage closed; this is the belt-and-braces
+    // promotion mark so a pool vintage is never production-sealable without re-deriving gate_evidence.)
+    if params.pool.is_some() {
+        g1.criteria.push(CriterionResult {
+            name: "pool_vintage_non_production".to_string(),
+            passed: false,
+            value: 0.0,
+            threshold: 1.0,
+        });
+        g1.promoted = false;
+    }
+
+    // ---- QE-499 §6 data-window provenance: RECORD the unverifiable evolve/train overlap as a sealed caveat.
+    // The bare warning at feature-assembly time (above) is not on the artefact. When the sealed pool records
+    // no evolve window (`input_snapshot_id` empty), the train cannot assert the G1 train/holdout window is
+    // disjoint from the formulas' evolve window — a real in-sample-contamination risk. Record it as a FAILING
+    // criterion into the sealed promotion evidence (mirroring `pool_vintage_non_production`) so the honesty
+    // gap rides the artefact, not just a log line. Deferred: a true disjoint-window/embargo assertion once the
+    // pool artefact records its evolve window (Phase C).
+    if let Some(pool) = params.pool.as_ref() {
+        if pool.input_snapshot_id.is_empty() {
+            g1.criteria.push(CriterionResult {
+                name: "evolve_window_provenance_unverified".to_string(),
+                passed: false,
+                value: 0.0,
+                threshold: 1.0,
+            });
+        }
+    }
 
     emit(ProgressLine::Gate {
         pct: 85,
@@ -1087,9 +1204,11 @@ pub fn run_train_job(
         shocks: shock_set,
         worst_case_loss: Some(hash_stable(stress.worst_case_loss)),
         // Pin the identity of the catalogue these chromosomes were evolved against (QE-402) — the
-        // exact-match key the backtest/live load boundary asserts. `schema` is the same
-        // `catalogue_schema()` the search/seal ran against, so this is the honest identity.
-        catalogue: qe_signal::CatalogueIdentity::from_schema(&schema),
+        // exact-match key the backtest/live load boundary asserts. QE-499: `from_config(&cfg)` binds the
+        // exact injected pool through BOTH `id_hash` (the injected ids ride the ordered catalogue) and the
+        // dedicated `formula_pool` slot. A no-pool `cfg` (empty pool) yields exactly
+        // `from_schema(&catalogue_schema())` — byte-identical to the pre-QE-499 seal (no golden move).
+        catalogue: CatalogueIdentity::from_config(&cfg),
         lineage: params.lineage.clone(),
         seal_evidence,
         holdout_series,
@@ -1461,6 +1580,46 @@ fn ensemble_funding_net(
         })
 }
 
+/// QE-499 §4 (MANDATORY) — the composed vintage trial basis `N`.
+///
+/// - **Pool path (`pool_n_trials = Some`), UNCONDITIONAL (never gated on `is_steered`):** the ADDITIVE SUM
+///   across the two independent selection stages — the genome stage
+///   `effective_trials_with_features(cells, gens, windows, available_feature_space(widened_catalogue_width,
+///   0))` (the injected formulas ride `catalogue_width`, so `evolved_count` stays 0 — single count, never
+///   double-counted) PLUS the pool stage `pool_n_trials` (already `max(distinct, analytic floor)` within
+///   that stage). `max()` across stages is FORBIDDEN.
+/// - **No pool + steered:** the QE-458 features-aware basis over the (possibly-subset) catalogue in play.
+/// - **No pool + un-steered:** the plain `effective_trials` basis — byte-identical to the pre-QE-499 golden.
+///
+/// Saturating throughout (over-counting is the safe, false-reject direction).
+fn compose_trial_basis(
+    pool_n_trials: Option<usize>,
+    is_steered: bool,
+    occupied_niches: usize,
+    generations: usize,
+    windows: usize,
+    widened_catalogue_width: usize,
+    steer_catalogue_width: usize,
+) -> usize {
+    match pool_n_trials {
+        Some(pool_basis) => {
+            let feature_space = available_feature_space(widened_catalogue_width, 0);
+            let genome_basis = effective_trials_with_features(
+                occupied_niches,
+                generations,
+                windows,
+                feature_space,
+            );
+            genome_basis.saturating_add(pool_basis)
+        }
+        None if is_steered => {
+            let feature_space = available_feature_space(steer_catalogue_width, 0);
+            effective_trials_with_features(occupied_niches, generations, windows, feature_space)
+        }
+        None => effective_trials(occupied_niches, generations, windows),
+    }
+}
+
 /// Assess robustness (DSR / PBO / SPA) for the candidate over the elite `pool`. Falls back to a
 /// conservative report (that cannot promote) when the pool is too thin for CSCV or the assessment
 /// errors — so a tiny-budget run always reaches the gate rather than aborting.
@@ -1470,6 +1629,7 @@ fn assess_robustness(
     candidate_returns: &[f64],
     train_bars: &[DecisionBar],
     n_trials: usize,
+    deflation_floor: Option<DeflationFloor>,
     seed: u64,
 ) -> RobustnessReport {
     let conservative = || RobustnessReport {
@@ -1509,6 +1669,7 @@ fn assess_robustness(
         excess_over_benchmark: &excess,
         n_trials,
         cscv_blocks: CSCV_BLOCKS,
+        deflation_floor,
     };
     assess(&stats, &SpaConfig::with_defaults(), seed).unwrap_or_else(|_| conservative())
 }
@@ -1516,6 +1677,70 @@ fn assess_robustness(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn qe499_pool_trial_basis_is_the_additive_sum_across_both_stages_on_the_unsteered_path() {
+        // QE-499 §4 — THE honesty-critical acceptance test. On the UN-STEERED default `--pool` path
+        // (is_steered = false), the composed trial basis is the ADDITIVE SUM of the genome stage (over the
+        // WIDENED catalogue width, incl. the K injected formulas) and the pool stage (`pool.deflation.
+        // n_trials`) — a quantitative LOWER BOUND, not mere monotonicity, and never `max()` across stages.
+        let occupied = 30usize;
+        let gens = 8usize;
+        let windows = 2usize;
+        let base_width = 22usize; // the default catalogue width
+        let k = 3usize; // injected formulas
+        let widened = base_width + k;
+        let pool_basis = 200usize;
+
+        let genome_basis = effective_trials_with_features(
+            occupied,
+            gens,
+            windows,
+            available_feature_space(widened, 0),
+        );
+        let composed = compose_trial_basis(
+            Some(pool_basis),
+            /* is_steered = */ false,
+            occupied,
+            gens,
+            windows,
+            widened,
+            base_width, // steer width (unused on the pool path)
+        );
+        // The load-bearing invariant: composed >= genome_basis + pool_basis, with is_steered = false.
+        assert!(
+            composed >= genome_basis + pool_basis,
+            "§4 UNDER-DEFLATION: composed {composed} < genome_basis {genome_basis} + pool_basis {pool_basis}"
+        );
+        // And it is EXACTLY the additive sum (not max across stages — that would discard a whole stage).
+        assert_eq!(
+            composed,
+            genome_basis + pool_basis,
+            "§4: the basis must be the additive SUM across the two stages, never max()"
+        );
+        // Strictly greater than either stage alone — neither stage's multiple-testing penalty is dropped.
+        assert!(
+            composed > genome_basis,
+            "the pool stage must add to the genome stage"
+        );
+        assert!(
+            composed > pool_basis,
+            "the genome stage must add to the pool stage"
+        );
+        // `max()` across stages would be strictly smaller here — prove the FORBIDDEN rule is not in effect.
+        assert!(
+            composed > genome_basis.max(pool_basis),
+            "a max()-across-stages basis would under-count: {composed} !> {}",
+            genome_basis.max(pool_basis)
+        );
+
+        // The un-steered NO-pool basis is the plain `effective_trials` — byte-identical to the golden path.
+        assert_eq!(
+            compose_trial_basis(None, false, occupied, gens, windows, widened, base_width),
+            effective_trials(occupied, gens, windows),
+            "the no-pool un-steered basis must be the plain effective_trials (golden-safe)"
+        );
+    }
 
     #[test]
     fn search_pct_spans_the_band() {
@@ -1533,7 +1758,7 @@ mod tests {
         let short = CSCV_BLOCKS - 1;
         let thin: Vec<Vec<f64>> = (0..10).map(|_| vec![0.01; short]).collect();
         let no_bars: Vec<DecisionBar> = Vec::new();
-        let report = assess_robustness(&thin, &[], &[0.01, -0.02, 0.03], &no_bars, 100, 7);
+        let report = assess_robustness(&thin, &[], &[0.01, -0.02, 0.03], &no_bars, 100, None, 7);
         assert_eq!(
             report.pbo, 1.0,
             "trial series shorter than CSCV_BLOCKS must fail closed to the conservative pbo = 1.0"

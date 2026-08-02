@@ -497,7 +497,10 @@ mod tests {
     use qe_signal::{CatalogueConfig, FeatureSchema, QState};
 
     fn schema() -> FeatureSchema {
-        FeatureSchema::from_catalogue(&CatalogueConfig { states: 5 })
+        FeatureSchema::from_catalogue(&CatalogueConfig {
+            states: 5,
+            formula_pool: Vec::new(),
+        })
     }
 
     /// A long-only genome: enter long when feature 0's state is high `[3,4]`; exit after `hold` bars.

@@ -52,7 +52,7 @@
 
 use std::ops::Range;
 
-use crate::dsr::deflated_sharpe_ratio;
+use crate::dsr::{expected_max_sharpe, probabilistic_sharpe_ratio};
 use crate::pbo::combinations;
 use crate::stats::sharpe_ratio;
 use crate::ValidationError;
@@ -221,8 +221,14 @@ pub struct CpcvDistribution {
 
 impl CpcvDistribution {
     /// Reduce a set of per-path held-out **return series** to the distribution summary: each path's Sharpe
-    /// ([`sharpe_ratio`]) and DSR ([`deflated_sharpe_ratio`], deflated against `trial_variance` /
-    /// `n_trials`), then the median / IQR / percentile summary and the `DSR ≥ dsr_floor` fraction.
+    /// ([`sharpe_ratio`]) and DSR (`PSR(sr0)`, deflated against `trial_variance` / `n_trials`), then the
+    /// median / IQR / percentile summary and the `DSR ≥ dsr_floor` fraction.
+    ///
+    /// **QE-499 §4 (MF-1) — pool `E[maxSR]` floor.** `pool_e_max` floors the per-path best-of-N noise bar:
+    /// `sr0 = max(expected_max_sharpe(trial_variance, n_trials), pool_e_max)`, identically to the point-DSR
+    /// path in `crate::assess`. Flooring only ever RAISES the bar (a harder DSR), never softens it. `None`
+    /// (the no-pool path) leaves `sr0 = expected_max_sharpe(trial_variance, n_trials)`, so each path's DSR is
+    /// byte-identical to the prior `deflated_sharpe_ratio(r, trial_variance, n_trials)`.
     ///
     /// An empty input (under-powered / degenerate geometry) yields a neutral all-zero summary with
     /// `n_paths = 0` — the fail-closed marker the gate rejects.
@@ -232,11 +238,22 @@ impl CpcvDistribution {
         trial_variance: f64,
         n_trials: usize,
         dsr_floor: f64,
+        pool_e_max: Option<f64>,
     ) -> Self {
         let sharpes: Vec<f64> = path_returns.iter().map(|r| sharpe_ratio(r)).collect();
+        // The floored best-of-N noise bar every held-out path's DSR deflates against — one value, shared by
+        // every path (it depends only on the deflation basis, not the path). `None` ⇒ the unfloored bar, so
+        // `PSR(sr0)` reproduces `deflated_sharpe_ratio(r, trial_variance, n_trials)` exactly.
+        let sr0 = {
+            let base = expected_max_sharpe(trial_variance, n_trials);
+            match pool_e_max {
+                Some(pool) => base.max(pool),
+                None => base,
+            }
+        };
         let dsrs: Vec<f64> = path_returns
             .iter()
-            .map(|r| deflated_sharpe_ratio(r, trial_variance, n_trials))
+            .map(|r| probabilistic_sharpe_ratio(r, sr0))
             .collect();
         let n_paths = path_returns.len();
         let frac_dsr_ge_floor = if n_paths == 0 {
@@ -276,6 +293,7 @@ impl CpcvDistribution {
         trial_variance: f64,
         n_trials: usize,
         dsr_floor: f64,
+        pool_e_max: Option<f64>,
     ) -> Result<Self, ValidationError> {
         let paths = cpcv_paths(candidate.len(), blocks, lookback, label_horizon, embargo)?;
         let path_returns: Vec<Vec<f64>> = paths.iter().map(|p| p.returns(candidate)).collect();
@@ -284,6 +302,7 @@ impl CpcvDistribution {
             trial_variance,
             n_trials,
             dsr_floor,
+            pool_e_max,
         ))
     }
 }
@@ -454,8 +473,18 @@ mod tests {
         let candidate: Vec<f64> = (0..600)
             .map(|i| 0.01 + 0.02 * ((i % 5) as f64 - 2.0))
             .collect();
-        let dist = CpcvDistribution::build(&candidate, 6, 4, 1, 4, 0.02, 20_000, DEFAULT_DSR_FLOOR)
-            .unwrap();
+        let dist = CpcvDistribution::build(
+            &candidate,
+            6,
+            4,
+            1,
+            4,
+            0.02,
+            20_000,
+            DEFAULT_DSR_FLOOR,
+            None,
+        )
+        .unwrap();
         assert_eq!(dist.n_paths, 20, "C(6,3) held-out paths");
         assert_eq!(dist.sharpes.len(), 20);
         assert_eq!(dist.dsrs.len(), 20);
@@ -478,8 +507,75 @@ mod tests {
     }
 
     #[test]
+    fn pool_e_max_floor_hardens_every_path_dsr_and_lowers_dsr_p05() {
+        // QE-499 §4 (MF-1): a pool with a HIGH sealed E[maxSR] floors each held-out path's best-of-N noise
+        // bar, so every path's DSR can only DROP — and the lower percentile `dsr_p05` the gate reads is
+        // strictly lower (harder) than without the floor. `None` must be byte-identical to the pre-floor
+        // path (the no-pool guarantee).
+        let candidate: Vec<f64> = (0..600)
+            .map(|i| 0.01 + 0.02 * ((i % 5) as f64 - 2.0))
+            .collect();
+        let unfloored = CpcvDistribution::build(
+            &candidate,
+            6,
+            4,
+            1,
+            4,
+            0.02,
+            20_000,
+            DEFAULT_DSR_FLOOR,
+            None,
+        )
+        .unwrap();
+        // A pool E[maxSR] well above the genome-stage bar (E[maxSR](0.02, 20_000) ≈ 0.5·√0.02 · few ⇒ < 1).
+        let floored = CpcvDistribution::build(
+            &candidate,
+            6,
+            4,
+            1,
+            4,
+            0.02,
+            20_000,
+            DEFAULT_DSR_FLOOR,
+            Some(3.0),
+        )
+        .unwrap();
+        // Same geometry ⇒ same path count and same Sharpes (the floor touches only the DSR bar).
+        assert_eq!(unfloored.n_paths, floored.n_paths);
+        assert_eq!(unfloored.sharpes, floored.sharpes);
+        // Every path's DSR is deflated at least as hard under the floor.
+        for (u, f) in unfloored.dsrs.iter().zip(&floored.dsrs) {
+            assert!(
+                f <= u,
+                "pool floor must not inflate any path DSR: {f} > {u}"
+            );
+        }
+        // And the effect is real on this fixture: the lower percentile is STRICTLY harder.
+        assert!(
+            floored.dsr_p05 < unfloored.dsr_p05,
+            "a high pool E[maxSR] must strictly lower dsr_p05: {} !< {}",
+            floored.dsr_p05,
+            unfloored.dsr_p05
+        );
+        // `None` reproduces the unfloored path byte-identically (the no-pool guarantee).
+        let none_again = CpcvDistribution::build(
+            &candidate,
+            6,
+            4,
+            1,
+            4,
+            0.02,
+            20_000,
+            DEFAULT_DSR_FLOOR,
+            None,
+        )
+        .unwrap();
+        assert_eq!(none_again, unfloored);
+    }
+
+    #[test]
     fn empty_distribution_is_neutral_and_fails_the_gate_closed() {
-        let dist = CpcvDistribution::from_path_returns(&[], 0.02, 100, DEFAULT_DSR_FLOOR);
+        let dist = CpcvDistribution::from_path_returns(&[], 0.02, 100, DEFAULT_DSR_FLOOR, None);
         assert_eq!(dist.n_paths, 0);
         assert_eq!(dist.frac_dsr_ge_floor, 0.0);
         assert!(

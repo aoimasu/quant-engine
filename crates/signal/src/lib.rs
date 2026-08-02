@@ -31,8 +31,8 @@ pub use genome::{
     RuleSet, CLAUSES_PER_SET, MAX_SIZE_BPS, REP_VERSION,
 };
 pub use indicator::{
-    catalogue, compute_batch, max_lookback, CatalogueConfig, Indicator, IndicatorSpec, QState,
-    Quantiser, Sample, CATALOGUE_VERSION,
+    catalogue, compute_batch, max_lookback, CatalogueConfig, CompiledFormula, Indicator,
+    IndicatorSpec, QState, Quantiser, Sample, CATALOGUE_VERSION,
 };
 pub use reconstruct::{reconstruct_batch, reconstruct_tiers, BarReconstructor, ReconError};
 pub use regime::{

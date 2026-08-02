@@ -94,6 +94,21 @@ pub fn to_decision_bars(
     premium: &[PremiumSample],
     open_interest: &[OpenInterestSample],
 ) -> Vec<DecisionBar> {
+    to_decision_bars_with(&catalogue_config(), bars, funding, premium, open_interest)
+}
+
+/// QE-499 Phase B: assemble decision bars against an explicit [`CatalogueConfig`] — the pool-aware variant.
+/// A `--pool` train passes a config carrying the injected formulas, so every feature vector includes the
+/// injected formula features (formulas-as-features). Passing [`catalogue_config`] (the default, empty pool)
+/// reproduces [`to_decision_bars`] byte-for-byte, so the no-pool path is unchanged.
+#[must_use]
+pub fn to_decision_bars_with(
+    cfg: &CatalogueConfig,
+    bars: &[OhlcvBar],
+    funding: &[FundingRateSample],
+    premium: &[PremiumSample],
+    open_interest: &[OpenInterestSample],
+) -> Vec<DecisionBar> {
     let funding_by_ms: BTreeMap<i64, Decimal> = funding
         .iter()
         .map(|f| (round_to_hour_ms(f.time.millis()), f.rate.get()))
@@ -121,7 +136,7 @@ pub fn to_decision_bars(
         })
         .collect();
 
-    let features = assemble_batch(&catalogue_config(), &samples);
+    let features = assemble_batch(cfg, &samples);
 
     features
         .into_iter()

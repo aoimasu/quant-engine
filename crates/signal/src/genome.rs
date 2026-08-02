@@ -566,7 +566,10 @@ mod tests {
 
     fn schema() -> FeatureSchema {
         // The real catalogue schema: a known width and num_states (default config → 5 states).
-        FeatureSchema::from_catalogue(&CatalogueConfig { states: 5 })
+        FeatureSchema::from_catalogue(&CatalogueConfig {
+            states: 5,
+            formula_pool: Vec::new(),
+        })
     }
 
     #[test]

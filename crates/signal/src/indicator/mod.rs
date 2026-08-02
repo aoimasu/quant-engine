@@ -23,6 +23,8 @@ pub mod expr;
 
 pub use quant::{QState, Quantiser};
 
+use expr::Expr;
+
 use rust_decimal::Decimal;
 
 use qe_domain::Bar;
@@ -137,22 +139,51 @@ pub fn compute_batch(indicator: &mut dyn Indicator, samples: &[Sample]) -> Vec<O
     samples.iter().map(|s| indicator.update(s)).collect()
 }
 
+/// A qe-signal-native compiled-formula spec (QE-499 Phase A): an injected `Expr`-backed indicator
+/// identified by its 64-hex `formula_hash`, plus the point-wise [`Quantiser`] it is scored through.
+///
+/// It carries the *un*compiled [`Expr`] (compilation into a live [`Box<dyn Indicator>`] happens inside
+/// [`catalogue`], since `Box<dyn Indicator>` is not `Clone`), so `CompiledFormula` stays `Clone` and
+/// `CatalogueConfig` can own a `Vec` of them. This type is deliberately qe-signal-native: the
+/// `FormulaPool → CompiledFormula` mapping (which would need `qe-formula-pool`) is **deferred to qe-cli
+/// in Phase B**, so qe-signal never gains a `qe-formula-pool` edge.
+#[derive(Debug, Clone)]
+pub struct CompiledFormula {
+    /// Deterministic id — the 64-hex SHA-256 `formula_hash` over the tree's canonical S-expression.
+    pub id: String,
+    /// The FIR expression tree to compile (via [`expr::compile`]).
+    pub expr: Expr,
+    /// The point-wise quantiser this formula's continuous value is bucketed through.
+    pub quantiser: Quantiser,
+}
+
 /// Configuration for building the catalogue. `states` sets the (configurable) number of quantised
 /// states every indicator uses.
-#[derive(Debug, Clone, Copy)]
+///
+/// `formula_pool` (QE-499 Phase A) is the **injected** set of evolved formulas appended to the
+/// catalogue at a fixed position after the price + flow kernels. It is **empty by default** and no
+/// train/CLI path populates it in Phase A — a non-empty pool is reachable only from unit tests — so
+/// the default catalogue, its [`FeatureSchema`](crate::feature::FeatureSchema), and its
+/// [`CatalogueIdentity`](crate::feature::CatalogueIdentity) are byte-identical to the pre-QE-499 build.
+#[derive(Debug, Clone)]
 pub struct CatalogueConfig {
     /// Number of discrete states per indicator (≥ 2).
     pub states: u16,
+    /// Injected evolved formulas (QE-499 Phase A). Empty by default; compiled inside [`catalogue`].
+    pub formula_pool: Vec<CompiledFormula>,
 }
 
 impl Default for CatalogueConfig {
     fn default() -> Self {
-        CatalogueConfig { states: 5 }
+        CatalogueConfig {
+            states: 5,
+            formula_pool: Vec::new(),
+        }
     }
 }
 
 impl CatalogueConfig {
-    fn states(self) -> u16 {
+    fn states(&self) -> u16 {
         self.states.max(2)
     }
 }
@@ -168,6 +199,17 @@ pub fn catalogue(cfg: &CatalogueConfig) -> Vec<Box<dyn Indicator>> {
     let mut v: Vec<Box<dyn Indicator>> = Vec::new();
     price::extend_catalogue(&mut v, s);
     flow::extend_catalogue(&mut v, s);
+    // QE-499 Phase A: append the injected formula pool at a **fixed position after** the price + flow
+    // kernels, in **sorted-by-id order** (id == 64-hex `formula_hash`), so the catalogue — and thus its
+    // `FeatureSchema`/`CatalogueIdentity` — is a pure, deterministic function of the (sorted) pool. Each
+    // formula is compiled here via the existing `expr::compile` (its `Expr` is not turned into a live
+    // indicator until now, keeping `CompiledFormula` `Clone`). The pool is **empty by default** and no
+    // Phase-A caller populates it, so this loop is a no-op and the default catalogue is byte-identical.
+    let mut injected: Vec<&CompiledFormula> = cfg.formula_pool.iter().collect();
+    injected.sort_by(|a, b| a.id.cmp(&b.id));
+    for f in injected {
+        v.push(expr::compile(&f.id, &f.expr, f.quantiser.clone()));
+    }
     v
 }
 
@@ -277,10 +319,113 @@ mod tests {
 
     #[test]
     fn every_indicator_respects_configured_state_count() {
-        let cfg = CatalogueConfig { states: 7 };
+        let cfg = CatalogueConfig {
+            states: 7,
+            formula_pool: Vec::new(),
+        };
         for ind in catalogue(&cfg) {
             assert_eq!(ind.spec().num_states, 7, "{}", ind.spec().id);
         }
+    }
+
+    #[test]
+    fn qe499_empty_pool_byte_identical_nonempty_pool_changes_identity_and_is_causal() {
+        // QE-499 Phase A acceptance: the EMPTY pool leaves the catalogue / schema / identity exactly as
+        // today (golden-safe), while a synthetic NON-EMPTY pool changes `CatalogueIdentity` in BOTH
+        // `id_hash` (the injected id rides the ordered catalogue) and the dedicated `formula_pool` slot,
+        // and injects a real non-constant, causal feature.
+        use crate::feature::{CatalogueIdentity, FeatureSchema};
+        use expr::{ExprTree, Field, WinOp};
+
+        let default_cfg = CatalogueConfig::default();
+
+        // --- EMPTY pool: byte-identical to today. ---
+        let base_ids: Vec<String> = catalogue(&default_cfg)
+            .iter()
+            .map(|i| i.spec().id)
+            .collect();
+        let base_identity = CatalogueIdentity::from_config(&default_cfg);
+        assert_eq!(
+            base_identity,
+            CatalogueIdentity::current(),
+            "empty-pool identity moved — a golden would move"
+        );
+        assert!(base_identity.formula_pool.is_empty());
+        // The default identity still OMITS the pool field from JSON (skip_serializing_if preserved).
+        let json = serde_json::to_string(&base_identity).unwrap();
+        assert!(
+            !json.contains("formula_pool"),
+            "empty-pool identity must not serialise the pool field: {json}"
+        );
+        assert_eq!(
+            FeatureSchema::from_catalogue(&default_cfg).len(),
+            base_ids.len()
+        );
+
+        // --- NON-EMPTY pool: one real causal formula, id == its 64-hex formula_hash. ---
+        let tree = ExprTree::repaired(Expr::Window(
+            WinOp::Zscore,
+            Box::new(Expr::Input(Field::Close)),
+            10,
+        ));
+        let formula_hash = tree.canonical_hash();
+        assert_eq!(formula_hash.len(), 64, "id must be a 64-hex formula_hash");
+        let formula = CompiledFormula {
+            id: formula_hash.clone(),
+            expr: tree.canonical(),
+            quantiser: Quantiser::Linear {
+                min: dec(-4),
+                max: dec(4),
+                states: default_cfg.states,
+            },
+        };
+        let pooled_cfg = CatalogueConfig {
+            states: default_cfg.states,
+            formula_pool: vec![formula],
+        };
+
+        // The injected indicator is appended after price+flow, with id == formula_hash.
+        let pooled: Vec<Box<dyn Indicator>> = catalogue(&pooled_cfg);
+        let pooled_ids: Vec<String> = pooled.iter().map(|i| i.spec().id).collect();
+        assert_eq!(
+            pooled_ids.len(),
+            base_ids.len() + 1,
+            "catalogue must grow by one"
+        );
+        assert_eq!(
+            pooled_ids.last().unwrap(),
+            &formula_hash,
+            "injected id must be the formula_hash, appended last"
+        );
+
+        // Identity changes in BOTH id_hash and formula_pool, and is a pure function of the sorted pool.
+        let pooled_identity = CatalogueIdentity::from_config(&pooled_cfg);
+        assert_ne!(pooled_identity, base_identity);
+        assert_ne!(pooled_identity.id_hash, base_identity.id_hash);
+        assert_eq!(pooled_identity.formula_pool, vec![formula_hash.clone()]);
+        assert!(serde_json::to_string(&pooled_identity)
+            .unwrap()
+            .contains("formula_pool"));
+
+        // The injected feature is CAUSAL (warms exactly at its lookback) and NON-CONSTANT over the
+        // shared series.
+        let samples = series(120);
+        let mut inj = catalogue(&pooled_cfg).pop().unwrap();
+        let lookback = inj.spec().lookback;
+        let out = compute_batch(inj.as_mut(), &samples);
+        assert!(
+            out[..lookback - 1].iter().all(Option::is_none),
+            "injected feature emitted before its lookback"
+        );
+        assert!(
+            out[lookback - 1].is_some(),
+            "injected feature did not warm at lookback"
+        );
+        let states: Vec<u16> = out.iter().flatten().map(|q| q.index()).collect();
+        assert!(
+            states.iter().any(|&s| s != states[0]),
+            "injected feature is constant — not a useful feature"
+        );
     }
 
     #[test]
